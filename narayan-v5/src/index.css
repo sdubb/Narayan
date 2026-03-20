@@ -1,0 +1,83 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;1,9..40,300&family=DM+Mono:wght@400;500&display=swap');
+
+@layer base {
+  :root {
+    --bg:        #f5f2ee;
+    --bg-card:   #ffffff;
+    --bg-hover:  #f0ece6;
+    --bg-active: #e9e3da;
+    --border:    #e2dbd2;
+    --border-md: #d4ccc0;
+    --text-1:    #1a1714;
+    --text-2:    #4a4540;
+    --text-3:    #8a8278;
+    --text-4:    #b0a89e;
+    --accent:    #c96a2e;
+    --accent-soft: #f5e6da;
+    --accent-text: #7a3d16;
+    --green:     #2d7a4f;
+    --green-soft:#e3f2e9;
+    --red:       #c0392b;
+    --red-soft:  #fde8e6;
+    --amber:     #b45309;
+    --amber-soft:#fef3c7;
+    --violet:    #6d28d9;
+    --violet-soft:#ede9fe;
+    --blue:      #1d6fa4;
+    --blue-soft: #dbeafe;
+    --shadow-sm: 0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
+    --shadow-md: 0 4px 12px rgba(0,0,0,0.08), 0 2px 4px rgba(0,0,0,0.04);
+    --r:         10px;
+    --r-lg:      14px;
+    --r-xl:      18px;
+  }
+
+  html { font-size: 15px; }
+
+  body {
+    background: var(--bg);
+    color: var(--text-1);
+    font-family: 'DM Sans', sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  ::selection { background: var(--accent-soft); color: var(--accent-text); }
+
+  ::-webkit-scrollbar       { width: 4px; height: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border-md); border-radius: 4px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--text-4); }
+}
+
+@layer utilities {
+  .font-serif  { font-family: 'Instrument Serif', serif; }
+  .font-mono   { font-family: 'DM Mono', monospace; }
+  .font-sans   { font-family: 'DM Sans', sans-serif; }
+
+  .animate-in {
+    animation: animIn 0.18s cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+  .animate-fade {
+    animation: fadeIn 0.15s ease both;
+  }
+  .animate-spin-slow { animation: spin 2.5s linear infinite; }
+  .animate-pulse-dot { animation: pulseDot 1.4s ease-in-out infinite; }
+
+  @keyframes animIn {
+    from { opacity: 0; transform: translateY(5px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  @keyframes fadeIn {
+    from { opacity: 0; }
+    to   { opacity: 1; }
+  }
+  @keyframes pulseDot {
+    0%, 100% { opacity: 0.3; transform: scale(0.8); }
+    50%       { opacity: 1;   transform: scale(1); }
+  }
+}

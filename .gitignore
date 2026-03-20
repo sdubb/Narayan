@@ -1,0 +1,80 @@
+/target
+target/
+target_verify_frontend/
+firmware/*/target
+*.db
+*.db-journal
+.DS_Store
+.wt-pr37/
+__pycache__/
+*.pyc
+docker-compose.override.yml
+
+# Environment files (may contain secrets)
+.env
+
+# Python virtual environments
+.venv/
+venv/
+
+# ESP32 build cache (esp-idf-sys managed)
+.embuild/
+.env.local
+.env.*.local
+
+# Secret keys and credentials
+.secret_key
+*.key
+*.pem
+credentials.json
+.worktrees/
+
+# Local build/test diagnostics
+*.log
+*.out.log
+*.err.log
+check*.txt
+build*.txt
+compile*.txt
+clean_error*.txt
+docker_build*.txt
+errors*.txt
+run_help*.txt
+test*.txt
+
+# Package/bundle artifacts
+*.crate
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+*.7z
+*.deb
+*.rpm
+*.msi
+*.dmg
+dist/
+pkg/
+release/
+
+# JS/package-manager artifacts
+node_modules/
+.npm/
+.pnpm-store/
+.yarn/
+package-lock.json
+npm-shrinkwrap.json
+pnpm-lock.yaml
+yarn.lock
+bun.lockb
+
+# Next.js build output
+.next/
+out/
+
+# React / Vite / CRA build output
+build/
+
+# TypeScript build info
+*.tsbuildinfo
+next-env.d.ts

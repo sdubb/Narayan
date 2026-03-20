@@ -1,0 +1,81 @@
+[package]
+name = "narayan"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "narayan"
+path = "src/main.rs"
+
+[dependencies]
+tokio        = { version = "1",    features = ["full"] }
+anyhow       = "1"
+serde        = { version = "1",    features = ["derive"] }
+serde_json   = "1"
+chrono       = { version = "0.4",  features = ["serde"] }
+uuid         = { version = "1",    features = ["v4", "serde"] }
+axum         = { version = "0.7",  features = ["macros"] }
+tower        = "0.4"
+tower-http   = { version = "0.5",  features = ["cors", "trace"] }
+tower_governor = { version = "0.4", features = ["axum"] }
+async-trait  = "0.1"
+tracing      = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+sqlx         = { version = "0.8.6", features = ["postgres", "runtime-tokio-native-tls", "chrono", "uuid"] }
+# This repo now uses the sqlx 0.8 stable line.
+# pgvector crate remains removed even though the dependency line is now compatible again.
+# Vector values are passed as text with ::vector casts instead of introducing a pgvector crate dependency.
+redis        = { version = "1.0.5", features = ["tokio-comp"] }
+reqwest      = { version = "0.12", features = ["json", "stream"] }
+tokio-stream = "0.1"
+futures      = "0.3"
+dotenv       = "0.15"
+config       = "0.14"
+sha2         = "0.10"
+hex          = "0.4"
+dashmap      = "5"
+# Tool dependencies
+walkdir      = "2"
+glob         = "0.3"
+regex        = "1"
+scraper      = "0.19"
+base64       = "0.22"
+mime_guess   = "2"
+libc         = "0.2"
+thiserror    = "1"
+futures-util = "0.3"
+
+
+# WASM runtime — WASI 0.2 stable (Feb 2026)
+wat           = "1"
+wasmtime      = { version = "31", features = ["async", "cranelift", "component-model"] }
+wasmtime-wasi = "31"
+
+# Headless browser — full CDP over Tokio
+chromiumoxide = { version = "0.7", features = ["tokio-runtime"], default-features = false }
+
+# Browser pool + sync
+
+
+# Tool dependencies (batch add)
+similar          = "2.6"           # diff + patch
+zip              = "2.2"           # compress/decompress
+flate2           = "1.0"           # gzip
+tar              = "0.4"           # tarballs
+image            = { version = "0.25", default-features = false, features = ["png","jpeg","gif","webp","bmp","tiff"] }
+russh            = "0.44"          # ssh_exec
+russh-sftp       = "2.1"          # sftp (companion to russh)
+bollard          = { version = "0.17", features = ["ssl"] }  # docker
+calamine         = "0.25"          # spreadsheet read
+rust_xlsxwriter  = "0.75"          # spreadsheet write
+sysinfo          = "0.32"          # process monitor
+kube             = { version = "0.97", features = ["client","runtime"] }  # kubernetes
+k8s-openapi      = { version = "0.23", features = ["v1_30"] }
+printpdf         = "0.7"           # pdf create
+ring             = "0.17"          # crypto
+hmac             = "0.12"
+urlencoding      = "2"
+
+[dev-dependencies]
+tokio-test = "0.4"
+tempfile   = "3"
