@@ -610,6 +610,9 @@ impl AgentLoop {
         // ── 13. Advance state ───────────────────────────────────────────────
         match eval.verdict {
             EvalVerdict::Continue => {
+                // Reset retry counter and clear error for the new step
+                state.metadata["retry_count"] = serde_json::json!(0);
+                state.metadata.as_object_mut().map(|m| m.remove("last_step_error"));
                 state.advance_step();
                 state.mark_waiting(next_run_after(0));
                 self.event_bus.publish(AgentEvent::StepCompleted {
@@ -634,14 +637,32 @@ impl AgentLoop {
                 Ok(StepOutcome::Complete)
             }
             EvalVerdict::Retry => {
-                state.mark_waiting(next_run_after(10));
+                // Increment retry counter so evaluator's 3-retry limit works
+                let new_retry = retry_count + 1;
+                state.metadata["retry_count"] = serde_json::json!(new_retry);
+
+                // Exponential backoff: 10s, 20s, 40s
+                let delay = 10i64 * 2i64.pow(retry_count.min(4));
+                state.mark_waiting(next_run_after(delay));
+
+                // Store last failure details so the executor can include them on retry
+                state.metadata["last_step_error"] = serde_json::Value::String(eval.summary.clone());
+
                 self.event_bus.publish(AgentEvent::StepRetrying {
                     agent_id: state.id.clone(),
                     step_index: step.index,
-                    delay_secs: 10,
+                    delay_secs: delay,
                     reason: eval.summary.clone(),
                 });
-                Ok(StepOutcome::Continue { delay_secs: 10 })
+                tracing::warn!(
+                    agent_id = %state.id,
+                    step = step.index,
+                    retry = new_retry,
+                    delay_secs = delay,
+                    reason = %truncate_for_log(&eval.summary, 200),
+                    "step retrying with backoff"
+                );
+                Ok(StepOutcome::Continue { delay_secs: delay })
             }
             EvalVerdict::Abort => {
                 state.mark_failed();

@@ -166,6 +166,42 @@ impl Evaluator for LlmEvaluator {
             });
         }
 
+        // ── Fast-path: repeated identical error — abort early ─────────────────
+        // If the current error is the same as the previous attempt's error,
+        // the LLM is unlikely to fix it on its own (e.g., missing OAuth token,
+        // wrong tool schema). Abort after 2nd identical failure.
+        if retry_count >= 1 && !result.success {
+            let current_errors: Vec<String> = result.tool_results
+                .iter()
+                .filter(|r| !r.success)
+                .filter_map(|r| r.error.clone())
+                .collect();
+            let current_error_str = current_errors.join(" | ");
+
+            if let Some(prev_error) = state.metadata.get("last_step_error").and_then(|v| v.as_str()) {
+                if !current_error_str.is_empty() && current_error_str == prev_error {
+                    tracing::warn!(
+                        agent_id    = %state.id,
+                        step        = step.index,
+                        retry_count,
+                        error       = %current_error_str,
+                        "identical error repeated — aborting step early"
+                    );
+                    return Ok(EvalReflection {
+                        verdict: EvalVerdict::Abort,
+                        summary: format!(
+                            "step {} aborted: same error repeated ({}) — agent cannot self-resolve",
+                            step.index,
+                            &current_error_str[..current_error_str.len().min(100)]
+                        ),
+                        key_findings: vec![current_error_str],
+                        should_revise: false,
+                        revision_feedback: String::new(),
+                    });
+                }
+            }
+        }
+
         // ── Combined LLM call — one prompt, one response ──────────────────────
         let request = GatewayRequest::new(
             state.id.clone(),

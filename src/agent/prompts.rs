@@ -923,14 +923,29 @@ EXECUTION RULES:
             })
             .unwrap_or_default();
 
+        // Include previous attempt error so the LLM can fix its approach
+        let retry_ctx = match (
+            state.metadata.get("retry_count").and_then(|v| v.as_u64()).unwrap_or(0),
+            state.metadata.get("last_step_error").and_then(|v| v.as_str()),
+        ) {
+            (count, Some(error)) if count > 0 => format!(
+                "\n\nPREVIOUS ATTEMPT FAILED (retry {count}/{max}):\n{error}\nYou MUST use a different approach or fix the error. Do NOT repeat the same call with the same arguments.",
+                count = count,
+                max = 3,
+                error = truncate(error, 500),
+            ),
+            _ => String::new(),
+        };
+
         format!(
-            "{conv_ctx}USER GOAL:\n{goal}\n\nCURRENT STEP [{idx}]: {desc}{planned_tool}{planned_tool_args}{history}{tools}\n\nExecute this step now.",
+            "{conv_ctx}USER GOAL:\n{goal}\n\nCURRENT STEP [{idx}]: {desc}{planned_tool}{planned_tool_args}{retry_ctx}{history}{tools}\n\nExecute this step now.",
             conv_ctx = conv_ctx,
             goal = state.goal,
             idx = step.index,
             desc = step.description,
             planned_tool = planned_tool,
             planned_tool_args = planned_tool_args,
+            retry_ctx = retry_ctx,
             history = history_ctx,
             tools = tool_ctx,
         )
