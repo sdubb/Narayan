@@ -46,8 +46,7 @@ impl ConnectorPoller {
     async fn poll_all(&self) -> Result<()> {
         // Fetch all enabled installs that have an access token (OAuth or API key).
         // webhook_only installs don't need polling — they receive pushes.
-        let all = sqlx::query_as!(
-            ConnectorInstall,
+        let all = sqlx::query_as::<_, ConnectorInstall>(
             "SELECT id, tenant_id, connector_type, auth_type, token_enc, refresh_enc,
                     token_expires_at, settings, webhook_secret_enc, enabled, last_polled_at,
                     created_at, updated_at

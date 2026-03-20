@@ -48,7 +48,7 @@ impl OAuthConfig {
         let client_id     = std::env::var(format!("{prefix}_CLIENT_ID")).ok()?;
         let client_secret = std::env::var(format!("{prefix}_CLIENT_SECRET")).ok()?;
 
-        let (auth_url, token_url, scopes, connector_type) = match provider {
+        let (auth_url, token_url, scopes, connector_type): (String, String, Vec<&str>, &str) = match provider {
             "slack" => (
                 "https://slack.com/oauth/v2/authorize".into(),
                 "https://slack.com/api/oauth.v2.access".into(),
@@ -123,7 +123,7 @@ impl OAuthConfig {
             client_id,
             client_secret,
             auth_url,
-            token_url: token_url.into(),
+            token_url,
             scopes: scopes.iter().map(|s| s.to_string()).collect(),
             connector_type: connector_type.to_string(),
         })

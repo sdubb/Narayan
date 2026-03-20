@@ -67,7 +67,8 @@ impl Metrics {
     /// Load per-tenant step counts from the costs DB table for the current calendar month.
     /// Called on startup so restarts don't reset plan enforcement counters.
     pub async fn load_steps_from_db(&self, pool: &sqlx::PgPool) {
-        let rows = sqlx::query!(
+        use sqlx::Row;
+        let rows = sqlx::query(
             r#"SELECT tenant_id, COUNT(*) AS steps
                  FROM costs
                 WHERE period_start >= date_trunc('month', NOW())
@@ -79,11 +80,12 @@ impl Metrics {
         match rows {
             Ok(rows) => {
                 for row in rows {
-                    let steps = row.steps.unwrap_or(0) as u64;
+                    let tenant_id: String = row.get("tenant_id");
+                    let steps: i64 = row.get("steps");
                     self.tenant_steps
-                        .entry(row.tenant_id)
+                        .entry(tenant_id)
                         .or_insert_with(|| AtomicU64::new(0))
-                        .fetch_add(steps, Ordering::Relaxed);
+                        .fetch_add(steps as u64, Ordering::Relaxed);
                 }
                 tracing::info!("loaded per-tenant step counts from DB");
             }

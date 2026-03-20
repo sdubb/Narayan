@@ -59,15 +59,15 @@ mod tests {
 
     // ── Plugin construction ───────────────────────────────────────────────
 
-    #[test]
-    fn test_all_plugins_construct_without_panic() {
+    #[tokio::test]
+    async fn test_all_plugins_construct_without_panic() {
         let deps = fake_deps();
         let plugins = all_plugins(&deps);
         assert_eq!(plugins.len(), 11, "expected 11 segment plugins");
     }
 
-    #[test]
-    fn test_all_plugin_ids_are_unique() {
+    #[tokio::test]
+    async fn test_all_plugin_ids_are_unique() {
         let deps = fake_deps();
         let ids: Vec<&str> = all_plugins(&deps).iter().map(|p| p.id).collect();
         let mut sorted = ids.clone();
@@ -76,8 +76,8 @@ mod tests {
         assert_eq!(ids.len(), sorted.len(), "duplicate plugin IDs detected");
     }
 
-    #[test]
-    fn test_all_plugin_names_are_non_empty() {
+    #[tokio::test]
+    async fn test_all_plugin_names_are_non_empty() {
         let deps = fake_deps();
         for plugin in all_plugins(&deps) {
             assert!(!plugin.name.is_empty(), "plugin '{}' has empty name", plugin.id);
@@ -86,8 +86,8 @@ mod tests {
 
     // ── SLA policy sanity ─────────────────────────────────────────────────
 
-    #[test]
-    fn test_sla_policies_have_sane_deadlines() {
+    #[tokio::test]
+    async fn test_sla_policies_have_sane_deadlines() {
         let deps = fake_deps();
         for plugin in all_plugins(&deps) {
             for sla in &plugin.sla_policies {
@@ -110,8 +110,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_sla_escalation_trigger_percentages_are_valid() {
+    #[tokio::test]
+    async fn test_sla_escalation_trigger_percentages_are_valid() {
         let deps = fake_deps();
         for plugin in all_plugins(&deps) {
             for sla in &plugin.sla_policies {
@@ -128,8 +128,8 @@ mod tests {
 
     // ── Policy rules ──────────────────────────────────────────────────────
 
-    #[test]
-    fn test_high_risk_segments_have_policy_rules() {
+    #[tokio::test]
+    async fn test_high_risk_segments_have_policy_rules() {
         let deps = fake_deps();
         let must_have_rules = ["compliance_ops", "legal_contract", "finance_accounting", "hr_people_ops"];
         for plugin in all_plugins(&deps) {
@@ -143,8 +143,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_all_policy_rules_have_non_empty_ids() {
+    #[tokio::test]
+    async fn test_all_policy_rules_have_non_empty_ids() {
         let deps = fake_deps();
         for plugin in all_plugins(&deps) {
             for rule in &plugin.policy_rules.rules {
@@ -162,8 +162,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_compliance_segment_requires_review_for_all_outputs() {
+    #[tokio::test]
+    async fn test_compliance_segment_requires_review_for_all_outputs() {
         let deps    = fake_deps();
         let plugin  = compliance_ops::plugin(&deps, "t1");
         let has_universal_review = plugin.policy_rules.rules.iter().any(|r| {
@@ -172,8 +172,8 @@ mod tests {
         assert!(has_universal_review, "compliance segment must require approval on outputs");
     }
 
-    #[test]
-    fn test_legal_segment_blocks_signing() {
+    #[tokio::test]
+    async fn test_legal_segment_blocks_signing() {
         let deps   = fake_deps();
         let plugin = legal_contract::plugin(&deps, "t1");
         let blocks_signing = plugin.policy_rules.rules.iter().any(|r| {
@@ -183,8 +183,8 @@ mod tests {
         assert!(blocks_signing, "legal segment must block agent contract signing");
     }
 
-    #[test]
-    fn test_finance_segment_blocks_truncate() {
+    #[tokio::test]
+    async fn test_finance_segment_blocks_truncate() {
         let deps   = fake_deps();
         let plugin = finance_accounting::plugin(&deps, "t1");
         let blocks_truncate = plugin.policy_rules.rules.iter().any(|r| {
@@ -194,8 +194,8 @@ mod tests {
         assert!(blocks_truncate, "finance segment must block destructive SQL");
     }
 
-    #[test]
-    fn test_hr_segment_requires_review_for_hiring_actions() {
+    #[tokio::test]
+    async fn test_hr_segment_requires_review_for_hiring_actions() {
         let deps   = fake_deps();
         let plugin = hr_people_ops::plugin(&deps, "t1");
         let has_hire_review = plugin.policy_rules.rules.iter().any(|r| {
@@ -207,8 +207,8 @@ mod tests {
 
     // ── Services activation ───────────────────────────────────────────────
 
-    #[test]
-    fn test_policy_engine_active_in_all_segments() {
+    #[tokio::test]
+    async fn test_policy_engine_active_in_all_segments() {
         let deps = fake_deps();
         for plugin in all_plugins(&deps) {
             assert!(
@@ -219,8 +219,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_pii_redactor_active_in_customer_facing_segments() {
+    #[tokio::test]
+    async fn test_pii_redactor_active_in_customer_facing_segments() {
         let deps = fake_deps();
         let must_have_pii = [
             "customer_support", "compliance_ops", "sales_revops",
@@ -238,8 +238,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_evidence_packager_active_in_audit_grade_segments() {
+    #[tokio::test]
+    async fn test_evidence_packager_active_in_audit_grade_segments() {
         let deps = fake_deps();
         let must_have_evidence = [
             "compliance_ops", "finance_accounting", "legal_contract", "it_ops_itsm",
@@ -255,8 +255,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_engineering_segment_does_not_activate_evidence_packager() {
+    #[tokio::test]
+    async fn test_engineering_segment_does_not_activate_evidence_packager() {
         let deps   = fake_deps();
         let plugin = engineering::plugin(&deps, "t1");
         assert!(
@@ -265,8 +265,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_review_queue_active_in_all_segments() {
+    #[tokio::test]
+    async fn test_review_queue_active_in_all_segments() {
         let deps = fake_deps();
         for plugin in all_plugins(&deps) {
             assert!(
@@ -279,8 +279,8 @@ mod tests {
 
     // ── Connector registration ────────────────────────────────────────────
 
-    #[test]
-    fn test_all_segment_connectors_report_correct_type() {
+    #[tokio::test]
+    async fn test_all_segment_connectors_report_correct_type() {
         let deps = fake_deps();
         for plugin in all_plugins(&deps) {
             for conn in &plugin.connectors {
@@ -290,8 +290,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_segment_registry_builder_merges_all_connectors() {
+    #[tokio::test]
+    async fn test_segment_registry_builder_merges_all_connectors() {
         let deps = fake_deps();
         let registry = SegmentRegistry::builder()
             .add(engineering::plugin(&deps, "t1"))
@@ -310,8 +310,8 @@ mod tests {
         assert!(connectors.contains(&"pagerduty"),   "pagerduty connector must be registered");
     }
 
-    #[test]
-    fn test_segment_registry_merges_sla_policies() {
+    #[tokio::test]
+    async fn test_segment_registry_merges_sla_policies() {
         let deps = fake_deps();
         let registry = SegmentRegistry::builder()
             .add(customer_support::plugin(&deps, "t1"))
@@ -325,8 +325,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_segment_registry_with_no_sla_policies_has_none_tracker() {
+    #[tokio::test]
+    async fn test_segment_registry_with_no_sla_policies_has_none_tracker() {
         let deps = fake_deps();
         // research_intelligence and marketing_growth have no SLA policies
         let registry = SegmentRegistry::builder()
@@ -340,8 +340,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_agent_services_none_has_all_fields_none() {
+    #[tokio::test]
+    async fn test_agent_services_none_has_all_fields_none() {
         let svc = crate::segments::registry::AgentServices::none();
         assert!(svc.policy.is_none());
         assert!(svc.citations.is_none());
@@ -351,8 +351,8 @@ mod tests {
         assert!(svc.pii.is_none());
     }
 
-    #[test]
-    fn test_merged_services_take_union_across_segments() {
+    #[tokio::test]
+    async fn test_merged_services_take_union_across_segments() {
         let deps = fake_deps();
         // engineering activates policy + reviews only (no evidence)
         // compliance_ops activates all services

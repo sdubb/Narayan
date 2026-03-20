@@ -91,8 +91,7 @@ impl AuditLog {
 
     pub async fn migrate(&self) -> Result<()> {
         sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS audit_log (
+            "CREATE TABLE IF NOT EXISTS audit_log (
                 id          TEXT PRIMARY KEY,
                 tenant_id   TEXT NOT NULL,
                 agent_id    TEXT,
@@ -100,24 +99,35 @@ impl AuditLog {
                 detail      JSONB NOT NULL DEFAULT '{}',
                 ip_address  TEXT,
                 created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            );
-            CREATE INDEX IF NOT EXISTS audit_log_tenant_id ON audit_log (tenant_id);
-            CREATE INDEX IF NOT EXISTS audit_log_agent_id ON audit_log (agent_id);
-            CREATE INDEX IF NOT EXISTS audit_log_action ON audit_log (action);
-            CREATE INDEX IF NOT EXISTS audit_log_created_at ON audit_log (created_at);
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS audit_log_tenant_id ON audit_log (tenant_id)")
+            .execute(&self.pool).await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS audit_log_agent_id ON audit_log (agent_id)")
+            .execute(&self.pool).await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS audit_log_action ON audit_log (action)")
+            .execute(&self.pool).await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS audit_log_created_at ON audit_log (created_at)")
+            .execute(&self.pool).await?;
 
-            -- Prevent any UPDATE or DELETE via a trigger (immutable log)
-            CREATE OR REPLACE FUNCTION audit_log_immutable() RETURNS TRIGGER AS $$
+        // Immutable audit log — prevent UPDATE/DELETE via trigger
+        sqlx::query(
+            "CREATE OR REPLACE FUNCTION audit_log_immutable() RETURNS TRIGGER AS $$
             BEGIN
                 RAISE EXCEPTION 'audit_log is append-only — UPDATE and DELETE are forbidden';
             END;
-            $$ LANGUAGE plpgsql;
-
-            DROP TRIGGER IF EXISTS enforce_audit_immutability ON audit_log;
-            CREATE TRIGGER enforce_audit_immutability
+            $$ LANGUAGE plpgsql",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query("DROP TRIGGER IF EXISTS enforce_audit_immutability ON audit_log")
+            .execute(&self.pool).await?;
+        sqlx::query(
+            "CREATE TRIGGER enforce_audit_immutability
                 BEFORE UPDATE OR DELETE ON audit_log
-                FOR EACH ROW EXECUTE FUNCTION audit_log_immutable();
-        "#,
+                FOR EACH ROW EXECUTE FUNCTION audit_log_immutable()",
         )
         .execute(&self.pool)
         .await?;

@@ -23,10 +23,11 @@ use crate::{
     gateway::{GatewayRequest, LlmGateway, TaskComplexity},
     policy::{
         engine::PolicyContext,
-        rules::{PolicyAction, PolicyDecision, PolicyRuleSet},
+        rules::{PolicyAction, PolicyRuleSet},
+        PolicyDecision,
     },
     providers::Message,
-    segments::registry::AgentServices,
+    segments::AgentServices,
     state::AgentState,
     tenant::TenantStore,
     tools::{selector::select_tools_for_step, ToolRegistry, ToolResult},
@@ -354,7 +355,7 @@ mod tests {
         },
         gateway::gateway::GatewayRequest,
         providers::{ChatResponse, ToolCall},
-        segments::registry::AgentServices,
+        segments::AgentServices,
         state::AgentState,
         tools::{ParameterSchema, Tool},
     };

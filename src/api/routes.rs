@@ -10,6 +10,8 @@ use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
+use sqlx::Row;
+
 use crate::{
     agent::AgentManager,
     auth::{generate_api_key, issue_token},
@@ -50,41 +52,46 @@ impl AutoApprovalStore {
 
     /// Create the table if it doesn't exist and warm the in-memory cache.
     pub async fn migrate(&self) -> anyhow::Result<()> {
-        sqlx::query(r#"
-            CREATE TABLE IF NOT EXISTS auto_approvals (
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS auto_approvals (
                 rule_id    TEXT        NOT NULL,
                 tenant_id  TEXT        NOT NULL,
                 notes      TEXT,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 PRIMARY KEY (tenant_id, rule_id)
-            );
-            CREATE INDEX IF NOT EXISTS auto_approvals_tenant ON auto_approvals (tenant_id);
-        "#).execute(&self.pool).await?;
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS auto_approvals_tenant ON auto_approvals (tenant_id)")
+            .execute(&self.pool).await?;
         self.warm_cache().await?;
         Ok(())
     }
 
     async fn warm_cache(&self) -> anyhow::Result<()> {
-        let rows = sqlx::query!("SELECT rule_id, tenant_id, notes, created_at FROM auto_approvals")
+        let rows = sqlx::query("SELECT rule_id, tenant_id, notes, created_at FROM auto_approvals")
             .fetch_all(&self.pool).await?;
         for r in rows {
-            self.cache.insert(Self::key(&r.tenant_id, &r.rule_id), AutoApprovalRule {
-                rule_id:    r.rule_id,
-                tenant_id:  r.tenant_id,
-                notes:      r.notes,
-                created_at: r.created_at,
+            let rule_id: String = r.get("rule_id");
+            let tenant_id: String = r.get("tenant_id");
+            self.cache.insert(Self::key(&tenant_id, &rule_id), AutoApprovalRule {
+                rule_id,
+                tenant_id,
+                notes:      r.get("notes"),
+                created_at: r.get("created_at"),
             });
         }
         Ok(())
     }
 
     pub async fn upsert(&self, tenant_id: &str, rule_id: &str, notes: Option<&str>) -> anyhow::Result<AutoApprovalRule> {
-        sqlx::query!(
+        sqlx::query(
             "INSERT INTO auto_approvals (rule_id, tenant_id, notes)
              VALUES ($1, $2, $3)
              ON CONFLICT (tenant_id, rule_id) DO UPDATE SET notes = EXCLUDED.notes",
-            rule_id, tenant_id, notes
-        ).execute(&self.pool).await?;
+        ).bind(rule_id).bind(tenant_id).bind(notes)
+        .execute(&self.pool).await?;
 
         let rule = AutoApprovalRule {
             rule_id:    rule_id.to_string(),
@@ -97,15 +104,15 @@ impl AutoApprovalStore {
     }
 
     pub async fn get_for_tenant(&self, tenant_id: &str) -> anyhow::Result<Vec<AutoApprovalRule>> {
-        let rows = sqlx::query!(
+        let rows = sqlx::query(
             "SELECT rule_id, tenant_id, notes, created_at FROM auto_approvals WHERE tenant_id = $1 ORDER BY created_at",
-            tenant_id
-        ).fetch_all(&self.pool).await?;
+        ).bind(tenant_id)
+        .fetch_all(&self.pool).await?;
         Ok(rows.into_iter().map(|r| AutoApprovalRule {
-            rule_id:    r.rule_id,
-            tenant_id:  r.tenant_id,
-            notes:      r.notes,
-            created_at: r.created_at,
+            rule_id:    r.get("rule_id"),
+            tenant_id:  r.get("tenant_id"),
+            notes:      r.get("notes"),
+            created_at: r.get("created_at"),
         }).collect())
     }
 
@@ -115,10 +122,10 @@ impl AutoApprovalStore {
     }
 
     pub async fn delete(&self, tenant_id: &str, rule_id: &str) -> anyhow::Result<bool> {
-        let result = sqlx::query!(
+        let result = sqlx::query(
             "DELETE FROM auto_approvals WHERE tenant_id = $1 AND rule_id = $2",
-            tenant_id, rule_id
-        ).execute(&self.pool).await?;
+        ).bind(tenant_id).bind(rule_id)
+        .execute(&self.pool).await?;
         self.cache.remove(&Self::key(tenant_id, rule_id));
         Ok(result.rows_affected() > 0)
     }

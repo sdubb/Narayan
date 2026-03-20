@@ -11,7 +11,7 @@ use tokio::sync::Mutex;
 use crate::{
     agent::{
         clarifier::{ClarificationAnswers, ClarificationResult, Clarifier},
-        evaluator::{EvalVerdict, Evaluator},
+        evaluator::{EvalReflection, EvalVerdict, Evaluator},
         executor::{Executor, StepResult},
         planner::{Plan, PlannedStep, Planner},
         preflight::{Preflight, PreflightResult},
@@ -159,6 +159,24 @@ impl Evaluator for MockEvaluator {
             Ok(queue.remove(0))
         }
     }
+
+    async fn evaluate_and_reflect(
+        &self,
+        state: &AgentState,
+        plan: &Plan,
+        step: &PlannedStep,
+        result: &StepResult,
+        retry_count: u32,
+    ) -> Result<EvalReflection> {
+        let verdict = self.evaluate(state, plan, step, result, retry_count).await?;
+        Ok(EvalReflection {
+            verdict,
+            summary: result.output.clone(),
+            key_findings: vec![],
+            should_revise: false,
+            revision_feedback: String::new(),
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -192,6 +210,10 @@ impl Reflector for MockReflector {
         } else {
             Ok(queue.remove(0))
         }
+    }
+
+    async fn revise_plan(&self, plan: &Plan, _state: &AgentState, _feedback: &str) -> Result<Plan> {
+        Ok(plan.clone())
     }
 }
 

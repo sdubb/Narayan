@@ -56,8 +56,7 @@ impl ReviewQueue {
 
     pub async fn migrate(&self) -> Result<()> {
         sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS review_queue (
+            "CREATE TABLE IF NOT EXISTS review_queue (
                 id              TEXT PRIMARY KEY,
                 tenant_id       TEXT NOT NULL,
                 agent_id        TEXT NOT NULL,
@@ -68,13 +67,14 @@ impl ReviewQueue {
                 reviewer_notes  TEXT,
                 created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 reviewed_at     TIMESTAMPTZ
-            );
-            CREATE INDEX IF NOT EXISTS review_queue_tenant ON review_queue (tenant_id, status);
-            CREATE INDEX IF NOT EXISTS review_queue_agent ON review_queue (agent_id);
-        "#,
+            )",
         )
         .execute(&self.pool)
         .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS review_queue_tenant ON review_queue (tenant_id, status)")
+            .execute(&self.pool).await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS review_queue_agent ON review_queue (agent_id)")
+            .execute(&self.pool).await?;
         Ok(())
     }
 

@@ -8,7 +8,7 @@ use crate::{
     events::EventBus,
     metrics::Metrics,
     scheduler::queue::Queue,
-    segments::registry::AgentServices,
+    segments::AgentServices,
     storage::PostgresStore,
     worker::worker::Worker,
     workspace::manager::WorkspaceManager,

@@ -21,8 +21,7 @@ impl TenantStore {
 
     pub async fn migrate(&self) -> Result<()> {
         sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS tenants (
+            "CREATE TABLE IF NOT EXISTS tenants (
                 id         TEXT PRIMARY KEY,
                 name       TEXT NOT NULL,
                 email      TEXT NOT NULL UNIQUE,
@@ -32,27 +31,37 @@ impl TenantStore {
                 plan       TEXT NOT NULL DEFAULT 'free',
                 created_at TIMESTAMPTZ NOT NULL,
                 updated_at TIMESTAMPTZ NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS tenants_key_prefix ON tenants (key_prefix);
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS tenants_key_prefix ON tenants (key_prefix)")
+            .execute(&self.pool).await?;
 
-            CREATE TABLE IF NOT EXISTS tenant_configs (
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS tenant_configs (
                 tenant_id   TEXT PRIMARY KEY REFERENCES tenants(id) ON DELETE CASCADE,
                 credentials JSONB NOT NULL DEFAULT '{}',
                 routing     JSONB NOT NULL DEFAULT '{}',
                 metadata    JSONB NOT NULL DEFAULT '{}'
-            );
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
 
-            CREATE TABLE IF NOT EXISTS tenant_policy_rules (
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS tenant_policy_rules (
                 id        TEXT PRIMARY KEY,
                 tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
                 rules     JSONB NOT NULL DEFAULT '[]',
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            );
-            CREATE INDEX IF NOT EXISTS tenant_policy_rules_tenant ON tenant_policy_rules (tenant_id);
-        "#,
+            )",
         )
         .execute(&self.pool)
         .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS tenant_policy_rules_tenant ON tenant_policy_rules (tenant_id)")
+            .execute(&self.pool).await?;
+
         Ok(())
     }
 

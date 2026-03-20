@@ -133,7 +133,7 @@ async fn main() -> Result<()> {
 
     // ── Segment plugin system ───────────────────────────────────────────────
     // Build shared dependencies once — all segment plugins share these instances.
-    let shared_deps = segments::registry::SharedDeps {
+    let shared_deps = segments::SharedDeps {
         policy_engine:    Arc::new(policy::PolicyEngine::new()),
         citation_tracker: citation_tracker.clone(),
         review_queue:     review_queue.clone(),
@@ -149,7 +149,7 @@ async fn main() -> Result<()> {
     // Multiple segments can be active simultaneously — services are merged (union).
     // tenant_id used for SLA policy scoping — replace with actual tenant in multi-tenant setup.
     let tenant_id = "default";
-    let segment_registry = segments::registry::SegmentRegistry::builder()
+    let segment_registry = segments::SegmentRegistry::builder()
         .add(segments::engineering::plugin(&shared_deps, tenant_id))
         .add(segments::customer_support::plugin(&shared_deps, tenant_id))
         .add(segments::compliance_ops::plugin(&shared_deps, tenant_id))
@@ -272,12 +272,7 @@ async fn main() -> Result<()> {
     let cache = Arc::new(ResponseCache::new(cfg.gateway.cache_ttl_secs, cfg.gateway.cache_max_entries));
     let cost_tracker = Arc::new(
         CostTracker::new(CostTracker::default_pricing())
-            .with_pool(store.pool())
     );
-    cost_tracker.migrate().await?;
-    cost_tracker.load_from_db().await.unwrap_or_else(|e| {
-        tracing::warn!(error = %e, "cost tracker DB load failed — starting with empty cache");
-    });
     // Load per-tenant step counts so plan enforcement survives restarts
     metrics.load_steps_from_db(&store.pool()).await;
     let rate_limits = build_rate_limits(cfg.gateway.requests_per_sec);
@@ -325,9 +320,9 @@ async fn main() -> Result<()> {
     // instead of the old global crate::swarm::push() free function.
     tool_registry.register(Arc::new(DelegateTool::new(store.clone(), workspace_manager.clone(), swarm.clone())));
     // Memory tools use the durable Redis-backed store
-    tool_registry.register(Arc::new(tools::memory_store::MemoryStoreTool { store: memory_store.clone() }));
-    tool_registry.register(Arc::new(tools::memory_recall::MemoryRecallTool { store: memory_store.clone() }));
-    tool_registry.register(Arc::new(tools::memory_forget::MemoryForgetTool { store: memory_store.clone() }));
+    tool_registry.register(Arc::new(tools::memory_store::MemoryStoreTool));
+    tool_registry.register(Arc::new(tools::memory_recall::MemoryRecallTool));
+    tool_registry.register(Arc::new(tools::memory_forget::MemoryForgetTool));
     // Register vector tools
     {
         let vs = vector_store.clone();

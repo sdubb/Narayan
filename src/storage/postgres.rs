@@ -28,10 +28,13 @@ impl PostgresStore {
     }
 
     pub async fn migrate(&self) -> Result<()> {
+        // pgvector extension — optional, warn if unavailable
+        let _ = sqlx::query("CREATE EXTENSION IF NOT EXISTS vector")
+            .execute(&self.pool)
+            .await;
+
         sqlx::query(
-            r#"
-            CREATE EXTENSION IF NOT EXISTS vector;
-            CREATE TABLE IF NOT EXISTS agents (
+            "CREATE TABLE IF NOT EXISTS agents (
                 id               TEXT PRIMARY KEY,
                 tenant_id        TEXT NOT NULL,
                 goal             TEXT NOT NULL,
@@ -48,20 +51,22 @@ impl PostgresStore {
                 metadata         JSONB NOT NULL DEFAULT '{}',
                 parent_agent_id  TEXT,
                 pending_children JSONB NOT NULL DEFAULT '[]'
-            );
-            CREATE INDEX IF NOT EXISTS agents_next_run
-                ON agents (next_run)
-                WHERE status IN ('pending', 'waiting');
-            CREATE INDEX IF NOT EXISTS agents_tenant
-                ON agents (tenant_id, status);
-            CREATE INDEX IF NOT EXISTS agents_parent
-                ON agents (parent_agent_id)
-                WHERE parent_agent_id IS NOT NULL;
-            CREATE INDEX IF NOT EXISTS agents_delegating
-                ON agents (status)
-                WHERE status = 'delegating';
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
 
-            CREATE TABLE IF NOT EXISTS goals (
+        sqlx::query("CREATE INDEX IF NOT EXISTS agents_next_run ON agents (next_run) WHERE status IN ('pending', 'waiting')")
+            .execute(&self.pool).await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS agents_tenant ON agents (tenant_id, status)")
+            .execute(&self.pool).await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS agents_parent ON agents (parent_agent_id) WHERE parent_agent_id IS NOT NULL")
+            .execute(&self.pool).await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS agents_delegating ON agents (status) WHERE status = 'delegating'")
+            .execute(&self.pool).await?;
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS goals (
                 id          TEXT PRIMARY KEY,
                 tenant_id   TEXT NOT NULL,
                 description TEXT NOT NULL,
@@ -69,10 +74,15 @@ impl PostgresStore {
                 agent_ids   JSONB NOT NULL DEFAULT '[]',
                 created_at  TIMESTAMPTZ NOT NULL,
                 updated_at  TIMESTAMPTZ NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS goals_tenant ON goals (tenant_id);
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS goals_tenant ON goals (tenant_id)")
+            .execute(&self.pool).await?;
 
-            CREATE TABLE IF NOT EXISTS workspaces (
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS workspaces (
                 id           TEXT PRIMARY KEY,
                 tenant_id    TEXT NOT NULL,
                 agent_id     TEXT NOT NULL,
@@ -81,16 +91,15 @@ impl PostgresStore {
                 storage_key  TEXT,
                 created_at   TIMESTAMPTZ NOT NULL,
                 archived     BOOLEAN NOT NULL DEFAULT FALSE
-            );
-            CREATE INDEX IF NOT EXISTS workspaces_tenant
-                ON workspaces (tenant_id);
-            CREATE INDEX IF NOT EXISTS workspaces_created
-                ON workspaces (created_at)
-                WHERE archived = FALSE;
-        "#,
+            )",
         )
         .execute(&self.pool)
         .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS workspaces_tenant ON workspaces (tenant_id)")
+            .execute(&self.pool).await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS workspaces_created ON workspaces (created_at) WHERE archived = FALSE")
+            .execute(&self.pool).await?;
+
         Ok(())
     }
 

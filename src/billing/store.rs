@@ -7,6 +7,7 @@ use anyhow::{bail, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
+use sqlx::Row;
 
 use crate::billing::provider::{BillingEvent, BillingPlan, BillingProvider, ProviderSubscription};
 
@@ -76,8 +77,8 @@ impl BillingStore {
     }
 
     pub async fn migrate(&self) -> Result<()> {
-        sqlx::query(r#"
-            CREATE TABLE IF NOT EXISTS subscriptions (
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS subscriptions (
                 id                       TEXT PRIMARY KEY,
                 tenant_id                TEXT NOT NULL UNIQUE,
                 provider                 TEXT NOT NULL,
@@ -88,11 +89,17 @@ impl BillingStore {
                 current_period_end       TIMESTAMPTZ NOT NULL DEFAULT NOW() + INTERVAL '30 days',
                 created_at               TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 updated_at               TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            );
-            CREATE INDEX IF NOT EXISTS subscriptions_tenant ON subscriptions (tenant_id);
-            CREATE INDEX IF NOT EXISTS subscriptions_provider_sub ON subscriptions (provider_subscription_id);
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS subscriptions_tenant ON subscriptions (tenant_id)")
+            .execute(&self.pool).await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS subscriptions_provider_sub ON subscriptions (provider_subscription_id)")
+            .execute(&self.pool).await?;
 
-            CREATE TABLE IF NOT EXISTS invoices (
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS invoices (
                 id              TEXT PRIMARY KEY,
                 tenant_id       TEXT NOT NULL,
                 provider        TEXT NOT NULL,
@@ -103,10 +110,15 @@ impl BillingStore {
                 period_end      TIMESTAMPTZ NOT NULL,
                 pdf_url         TEXT,
                 created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            );
-            CREATE INDEX IF NOT EXISTS invoices_tenant ON invoices (tenant_id);
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS invoices_tenant ON invoices (tenant_id)")
+            .execute(&self.pool).await?;
 
-            CREATE TABLE IF NOT EXISTS billing_events (
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS billing_events (
                 id           TEXT PRIMARY KEY,
                 tenant_id    TEXT,
                 provider     TEXT NOT NULL,
@@ -116,27 +128,35 @@ impl BillingStore {
                 error        TEXT,
                 received_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 processed_at TIMESTAMPTZ
-            );
-            CREATE INDEX IF NOT EXISTS billing_events_unprocessed ON billing_events (processed) WHERE NOT processed;
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS billing_events_unprocessed ON billing_events (processed) WHERE NOT processed")
+            .execute(&self.pool).await?;
 
-            CREATE TABLE IF NOT EXISTS tenant_credits (
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS tenant_credits (
                 tenant_id   TEXT PRIMARY KEY,
                 extra_steps BIGINT NOT NULL DEFAULT 0,
                 updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            );
-        "#).execute(&self.pool).await?;
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
+
         Ok(())
     }
 
     // ── Subscriptions ─────────────────────────────────────────────────────
 
     pub async fn get_subscription_by_tenant(&self, tenant_id: &str) -> Result<Option<SubscriptionRow>> {
-        let row = sqlx::query_as!(SubscriptionRow,
+        let row = sqlx::query_as::<_, SubscriptionRow>(
             "SELECT id, tenant_id, provider, provider_subscription_id, plan, status,
                     current_period_start, current_period_end, created_at, updated_at
-               FROM subscriptions WHERE tenant_id = $1",
-            tenant_id
-        ).fetch_optional(&self.pool).await?;
+               FROM subscriptions WHERE tenant_id = $1"
+        ).bind(tenant_id)
+        .fetch_optional(&self.pool).await?;
         Ok(row)
     }
 
@@ -151,7 +171,7 @@ impl BillingStore {
         period_end:               DateTime<Utc>,
     ) -> Result<()> {
         let id = crate::util::new_id();
-        sqlx::query!(
+        sqlx::query(
             r#"INSERT INTO subscriptions
                    (id, tenant_id, provider, provider_subscription_id, plan, status,
                     current_period_start, current_period_end)
@@ -162,19 +182,19 @@ impl BillingStore {
                    plan=EXCLUDED.plan, status=EXCLUDED.status,
                    current_period_start=EXCLUDED.current_period_start,
                    current_period_end=EXCLUDED.current_period_end,
-                   updated_at=NOW()"#,
-            id, tenant_id, provider, provider_subscription_id,
-            plan.as_str(), status, period_start, period_end
-        ).execute(&self.pool).await?;
+                   updated_at=NOW()"#
+        ).bind(&id).bind(tenant_id).bind(provider).bind(provider_subscription_id)
+        .bind(plan.as_str()).bind(status).bind(period_start).bind(period_end)
+        .execute(&self.pool).await?;
         Ok(())
     }
 
     pub async fn cancel_subscription_in_db(&self, provider: &str, provider_sub_id: &str) -> Result<()> {
-        sqlx::query!(
+        sqlx::query(
             "UPDATE subscriptions SET status='cancelled', updated_at=NOW()
-              WHERE provider=$1 AND provider_subscription_id=$2",
-            provider, provider_sub_id
-        ).execute(&self.pool).await?;
+              WHERE provider=$1 AND provider_subscription_id=$2"
+        ).bind(provider).bind(provider_sub_id)
+        .execute(&self.pool).await?;
         Ok(())
     }
 
@@ -192,51 +212,57 @@ impl BillingStore {
         pdf_url:         Option<&str>,
     ) -> Result<()> {
         let id = crate::util::new_id();
-        sqlx::query!(
+        sqlx::query(
             "INSERT INTO invoices (id, tenant_id, provider, provider_inv_id, amount_usd, status, period_start, period_end, pdf_url)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
-            id, tenant_id, provider, provider_inv_id, amount_usd, status, period_start, period_end, pdf_url
-        ).execute(&self.pool).await?;
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)"
+        ).bind(&id).bind(tenant_id).bind(provider).bind(provider_inv_id)
+        .bind(amount_usd).bind(status).bind(period_start).bind(period_end).bind(pdf_url)
+        .execute(&self.pool).await?;
         Ok(())
     }
 
     pub async fn list_invoices(&self, tenant_id: &str) -> Result<Vec<InvoiceRow>> {
-        let rows = sqlx::query_as!(InvoiceRow,
+        let rows = sqlx::query_as::<_, InvoiceRow>(
             "SELECT id, tenant_id, provider, provider_inv_id, amount_usd, status,
                     period_start, period_end, pdf_url, created_at
-               FROM invoices WHERE tenant_id=$1 ORDER BY created_at DESC LIMIT 50",
-            tenant_id
-        ).fetch_all(&self.pool).await?;
+               FROM invoices WHERE tenant_id=$1 ORDER BY created_at DESC LIMIT 50"
+        ).bind(tenant_id)
+        .fetch_all(&self.pool).await?;
         Ok(rows)
     }
 
     // ── Credits ───────────────────────────────────────────────────────────
 
     pub async fn get_extra_steps(&self, tenant_id: &str) -> Result<u64> {
-        let row = sqlx::query!(
-            "SELECT extra_steps FROM tenant_credits WHERE tenant_id=$1", tenant_id
-        ).fetch_optional(&self.pool).await?;
-        Ok(row.map(|r| r.extra_steps.max(0) as u64).unwrap_or(0))
+        let row = sqlx::query(
+            "SELECT extra_steps FROM tenant_credits WHERE tenant_id=$1"
+        ).bind(tenant_id)
+        .fetch_optional(&self.pool).await?;
+        Ok(row.map(|r| {
+            let extra_steps: i64 = r.get::<i64, _>("extra_steps");
+            extra_steps.max(0) as u64
+        }).unwrap_or(0))
     }
 
     pub async fn add_credits(&self, tenant_id: &str, steps: u64) -> Result<()> {
-        sqlx::query!(
+        let steps_i64 = steps as i64;
+        sqlx::query(
             r#"INSERT INTO tenant_credits (tenant_id, extra_steps)
                VALUES ($1, $2)
                ON CONFLICT (tenant_id) DO UPDATE SET
                    extra_steps = tenant_credits.extra_steps + EXCLUDED.extra_steps,
-                   updated_at  = NOW()"#,
-            tenant_id, steps as i64
-        ).execute(&self.pool).await?;
+                   updated_at  = NOW()"#
+        ).bind(tenant_id).bind(steps_i64)
+        .execute(&self.pool).await?;
         Ok(())
     }
 
     pub async fn deduct_credit_step(&self, tenant_id: &str) -> Result<bool> {
-        let result = sqlx::query!(
+        let result = sqlx::query(
             "UPDATE tenant_credits SET extra_steps = extra_steps - 1, updated_at=NOW()
-              WHERE tenant_id=$1 AND extra_steps > 0",
-            tenant_id
-        ).execute(&self.pool).await?;
+              WHERE tenant_id=$1 AND extra_steps > 0"
+        ).bind(tenant_id)
+        .execute(&self.pool).await?;
         Ok(result.rows_affected() > 0)
     }
 
@@ -244,18 +270,18 @@ impl BillingStore {
 
     pub async fn record_event(&self, provider: &str, event_type: &str, tenant_id: Option<&str>, payload: &serde_json::Value) -> Result<String> {
         let id = crate::util::new_id();
-        sqlx::query!(
-            "INSERT INTO billing_events (id, tenant_id, provider, event_type, payload) VALUES ($1,$2,$3,$4,$5)",
-            id, tenant_id, provider, event_type, payload
-        ).execute(&self.pool).await?;
+        sqlx::query(
+            "INSERT INTO billing_events (id, tenant_id, provider, event_type, payload) VALUES ($1,$2,$3,$4,$5)"
+        ).bind(&id).bind(tenant_id).bind(provider).bind(event_type).bind(payload)
+        .execute(&self.pool).await?;
         Ok(id)
     }
 
     pub async fn mark_event_processed(&self, id: &str, error: Option<&str>) -> Result<()> {
-        sqlx::query!(
-            "UPDATE billing_events SET processed=true, error=$1, processed_at=NOW() WHERE id=$2",
-            error, id
-        ).execute(&self.pool).await?;
+        sqlx::query(
+            "UPDATE billing_events SET processed=true, error=$1, processed_at=NOW() WHERE id=$2"
+        ).bind(error).bind(id)
+        .execute(&self.pool).await?;
         Ok(())
     }
 
@@ -306,18 +332,18 @@ impl BillingStore {
                     let _ = self.create_invoice(tid, "paypal", inv_id, *amount_usd, "paid", now, end, None).await;
                 }
                 // Renew subscription
-                sqlx::query!(
+                sqlx::query(
                     "UPDATE subscriptions SET status='active', current_period_start=$1, current_period_end=$2, updated_at=NOW()
-                      WHERE provider_subscription_id=$3",
-                    now, end, provider_subscription_id
-                ).execute(&self.pool).await?;
+                      WHERE provider_subscription_id=$3"
+                ).bind(now).bind(end).bind(provider_subscription_id)
+                .execute(&self.pool).await?;
             }
             BillingEvent::PaymentFailed { provider_subscription_id, .. } => {
-                sqlx::query!(
+                sqlx::query(
                     "UPDATE subscriptions SET status='past_due', updated_at=NOW()
-                      WHERE provider_subscription_id=$1",
-                    provider_subscription_id
-                ).execute(&self.pool).await?;
+                      WHERE provider_subscription_id=$1"
+                ).bind(provider_subscription_id)
+                .execute(&self.pool).await?;
             }
             BillingEvent::SubscriptionCancelled { tenant_id: Some(tid), provider_subscription_id } => {
                 self.cancel_subscription_in_db("paypal", provider_subscription_id).await?;
@@ -332,10 +358,10 @@ impl BillingStore {
     }
 
     async fn update_tenant_plan_in_db(&self, tenant_id: &str, plan: &str) -> Result<()> {
-        sqlx::query!(
-            "UPDATE tenants SET plan=$1, updated_at=NOW() WHERE id=$2",
-            plan, tenant_id
-        ).execute(&self.pool).await?;
+        sqlx::query(
+            "UPDATE tenants SET plan=$1, updated_at=NOW() WHERE id=$2"
+        ).bind(plan).bind(tenant_id)
+        .execute(&self.pool).await?;
         Ok(())
     }
 }
@@ -344,7 +370,7 @@ impl BillingStore {
 mod tests {
     use super::*;
 
-    #[test] fn billing_store_no_default_without_providers() {
+    #[tokio::test] async fn billing_store_no_default_without_providers() {
         let store = BillingStore::new(
             sqlx::PgPool::connect_lazy("postgres://localhost/test").unwrap()
         );

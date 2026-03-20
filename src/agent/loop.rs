@@ -18,7 +18,7 @@ use crate::{
     debug::recorder::AgentRecorder,
     events::{AgentEvent, EventBus},
     knowledge::graph::KnowledgeGraph,
-    segments::registry::AgentServices,
+    segments::AgentServices,
     skill_evolution::evolution::evolve_skill,
     skills::registry::SkillRegistry,
     state::{AgentState, AgentStatus},
@@ -665,7 +665,7 @@ mod tests {
             Arc::new(Mutex::new(KnowledgeGraph::new())),
             vector_store,
             embedder,
-            Arc::new(crate::segments::registry::AgentServices::none()),
+            Arc::new(crate::segments::AgentServices::none()),
         )
     }
 

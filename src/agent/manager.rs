@@ -5,7 +5,7 @@ use anyhow::Result;
 use crate::{
     agent::prompts::JobType,
     compliance::sla::SlaPriority,
-    segments::registry::AgentServices,
+    segments::AgentServices,
     state::{AgentState, GoalState},
     storage::PostgresStore,
     util::new_id,

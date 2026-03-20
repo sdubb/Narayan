@@ -38,8 +38,7 @@ impl CitationTracker {
 
     pub async fn migrate(&self) -> Result<()> {
         sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS citations (
+            "CREATE TABLE IF NOT EXISTS citations (
                 id          TEXT PRIMARY KEY,
                 agent_id    TEXT NOT NULL,
                 tenant_id   TEXT NOT NULL,
@@ -50,13 +49,14 @@ impl CitationTracker {
                 excerpt     TEXT NOT NULL DEFAULT '',
                 confidence  DOUBLE PRECISION NOT NULL DEFAULT 1.0,
                 created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            );
-            CREATE INDEX IF NOT EXISTS citations_agent_id ON citations (agent_id);
-            CREATE INDEX IF NOT EXISTS citations_tenant_id ON citations (tenant_id);
-        "#,
+            )",
         )
         .execute(&self.pool)
         .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS citations_agent_id ON citations (agent_id)")
+            .execute(&self.pool).await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS citations_tenant_id ON citations (tenant_id)")
+            .execute(&self.pool).await?;
         Ok(())
     }
 

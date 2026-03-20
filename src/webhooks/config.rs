@@ -43,8 +43,7 @@ impl WebhookStore {
 
     pub async fn migrate(&self) -> Result<()> {
         sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS webhooks (
+            "CREATE TABLE IF NOT EXISTS webhooks (
                 id            TEXT PRIMARY KEY,
                 tenant_id     TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
                 url           TEXT NOT NULL,
@@ -55,10 +54,15 @@ impl WebhookStore {
                 max_failures  INT NOT NULL DEFAULT 10,
                 created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            );
-            CREATE INDEX IF NOT EXISTS webhooks_tenant_id ON webhooks (tenant_id);
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS webhooks_tenant_id ON webhooks (tenant_id)")
+            .execute(&self.pool).await?;
 
-            CREATE TABLE IF NOT EXISTS webhook_deliveries (
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS webhook_deliveries (
                 id          TEXT PRIMARY KEY,
                 webhook_id  TEXT NOT NULL REFERENCES webhooks(id) ON DELETE CASCADE,
                 event_type  TEXT NOT NULL,
@@ -68,12 +72,12 @@ impl WebhookStore {
                 attempt     INT NOT NULL DEFAULT 1,
                 success     BOOLEAN NOT NULL DEFAULT false,
                 created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            );
-            CREATE INDEX IF NOT EXISTS webhook_deliveries_webhook_id ON webhook_deliveries (webhook_id);
-        "#,
+            )",
         )
         .execute(&self.pool)
         .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS webhook_deliveries_webhook_id ON webhook_deliveries (webhook_id)")
+            .execute(&self.pool).await?;
         Ok(())
     }
 

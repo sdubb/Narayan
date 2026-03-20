@@ -11,7 +11,7 @@ use crate::{
     events::{AgentEvent, EventBus},
     metrics::Metrics,
     scheduler::queue::{Queue, Task},
-    segments::registry::AgentServices,
+    segments::AgentServices,
     storage::PostgresStore,
     workspace::manager::WorkspaceManager,
 };
