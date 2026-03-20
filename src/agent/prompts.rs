@@ -43,6 +43,65 @@ pub enum JobType {
     General,
 }
 
+pub fn is_direct_response_goal(goal: &str) -> bool {
+    let trimmed = goal.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    let lower = trimmed.to_lowercase();
+    let word_count = lower.split_whitespace().count();
+    let blocked_keywords = [
+        "file", "folder", "directory", "repo", "repository", "workspace", "shell", "command",
+        "run ", "execute", "edit", "write to", "save", "create file", "delete", "rename",
+        "fetch", "browse", "search", "web", "http", "api", "curl", "database", "sql",
+        "docker", "kubernetes", "git", "commit", "push", "pull request", "email", "slack",
+        "notion", "spreadsheet", "csv", "pdf", "image", "screenshot", "install", "deploy",
+    ];
+
+    if blocked_keywords.iter().any(|keyword| lower.contains(keyword)) {
+        return false;
+    }
+
+    let greetings = [
+        "hi",
+        "hello",
+        "hey",
+        "yo",
+        "good morning",
+        "good afternoon",
+        "good evening",
+    ];
+    if greetings.iter().any(|greeting| lower == *greeting) {
+        return true;
+    }
+
+    let conversational_starts = [
+        "what is",
+        "what's",
+        "who is",
+        "who's",
+        "why is",
+        "why does",
+        "how do",
+        "how does",
+        "can you",
+        "could you",
+        "please",
+        "say ",
+        "reply ",
+        "write ",
+        "explain ",
+        "summarize ",
+        "summarise ",
+    ];
+
+    word_count <= 14
+        && (lower.chars().all(|ch| ch.is_ascii_digit() || "+-*/().=? ".contains(ch))
+            || lower.ends_with('?')
+            || conversational_starts.iter().any(|prefix| lower.starts_with(prefix)))
+}
+
 impl JobType {
     pub fn detect(goal: &str) -> Self {
         let g = goal.to_lowercase();
@@ -567,6 +626,11 @@ CONSTRAINTS:
 - tool must be null only if the step is pure LLM reasoning with no external calls
 - tool_args must include every required parameter for the named tool
 - tool names must be exact — use the tool manifest provided
+- If any step uses tools to gather, create, or transform information for the user, add a final step with tool=null that answers the user directly from the verified results
+- The final step should be a user-facing answer step unless the goal is explicitly only background automation with no human reply needed
+- Use pdf_create for PDF generation; never use file_write to create .pdf files
+- Use compress/decompress for archives; never use file_write to create .zip, .tar.gz, or other archive files
+- Prefer code_run for calculations or short executable snippets; only create a script file first when the user explicitly asks for a saved script
 - Never plan a step you cannot verify as complete or failed"#,
             job_guidance = job_guidance,
             label = job_type.label(),
@@ -603,6 +667,24 @@ CONSTRAINTS:
 pub struct ExecutorPrompt;
 
 impl ExecutorPrompt {
+    pub fn direct_response_system() -> &'static str {
+        r#"You are Narayan, a helpful chat assistant.
+
+Reply directly to the user's message.
+- Give the final answer in natural language.
+- Do not describe internal planning, tools, or policies.
+- Do not invent tool usage or say that a tool is required.
+- If the user greeting is simple, answer simply and warmly."#
+    }
+
+    pub fn direct_response_user(state: &AgentState, history_summary: &str) -> String {
+        if history_summary.trim().is_empty() {
+            state.goal.clone()
+        } else {
+            format!("Conversation context:\n{history_summary}\n\nLatest user message:\n{}", state.goal)
+        }
+    }
+
     pub fn system(state: &AgentState, plan: &Plan) -> String {
         let job_type = JobType::detect(&state.goal);
 
@@ -742,6 +824,7 @@ FULL PLAN ({n} steps):
 EXECUTION RULES:
 - Execute ONLY the current step shown in the user message — do not skip ahead
 - Call the tool specified in the plan; only deviate if you have a concrete reason
+- file_read is for files, not directories; if a path is a directory, inspect the listing and then switch to a concrete child file or use glob_search/content_search
 - After every tool call, state what you observed and whether it achieved the step's intent
 - If the step is complete, end your response with exactly: STEP COMPLETE
 - If the step failed and cannot be recovered without a plan change, end with: STEP FAILED: <concise reason>
@@ -755,7 +838,12 @@ EXECUTION RULES:
         )
     }
 
-    pub fn user_step(step: &PlannedStep, history_summary: &str, previous_tool_results: &[&str]) -> String {
+    pub fn user_step(
+        state: &AgentState,
+        step: &PlannedStep,
+        history_summary: &str,
+        previous_tool_results: &[&str],
+    ) -> String {
         let history_ctx = if history_summary.is_empty() {
             String::new()
         } else {
@@ -781,14 +869,70 @@ EXECUTION RULES:
             .as_ref()
             .map(|t| format!("\nPLANNED TOOL: {} — use this unless you have a concrete reason not to", t))
             .unwrap_or_default();
+        let planned_tool_args = step
+            .tool_args
+            .as_ref()
+            .map(|args| {
+                format!(
+                    "\nPLANNED TOOL ARGS:\n{}",
+                    truncate(&serde_json::to_string_pretty(args).unwrap_or_default(), 1600)
+                )
+            })
+            .unwrap_or_default();
 
         format!(
-            "CURRENT STEP [{idx}]: {desc}{planned_tool}{history}{tools}\n\nExecute this step now.",
+            "USER GOAL:\n{goal}\n\nCURRENT STEP [{idx}]: {desc}{planned_tool}{planned_tool_args}{history}{tools}\n\nExecute this step now.",
+            goal = state.goal,
             idx = step.index,
             desc = step.description,
             planned_tool = planned_tool,
+            planned_tool_args = planned_tool_args,
             history = history_ctx,
             tools = tool_ctx,
+        )
+    }
+
+    pub fn synthesis_system() -> &'static str {
+        r#"You are Narayan, producing the final user-visible answer after internal tools have already run.
+
+Your job is to answer the user using the verified execution results.
+- Give only the user-facing answer
+- Do not mention internal planning, tools, steps, policies, or agent state
+- If the user asked for "filename only", "URL only", or similar, obey exactly
+- If the result is missing or failed, say so plainly and briefly
+- Do not invent facts that are not present in the provided results"#
+    }
+
+    pub fn synthesis_user(
+        state: &AgentState,
+        step: &PlannedStep,
+        history_summary: &str,
+        tool_results: &[ToolResult],
+    ) -> String {
+        let tool_output = if tool_results.is_empty() {
+            "none".to_string()
+        } else {
+            tool_results
+                .iter()
+                .enumerate()
+                .map(|(index, result)| {
+                    format!(
+                        "[{}] success={}\n{}",
+                        index + 1,
+                        result.success,
+                        truncate(&serde_json::to_string_pretty(result).unwrap_or_default(), 2000)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        };
+
+        format!(
+            "USER GOAL:\n{goal}\n\nCURRENT STEP:\n{step}\n\nCOMPLETED STEP HISTORY:\n{history}\n\nLATEST TOOL RESULTS:\n{tool_results}\n\nWrite the final answer for the user now.",
+            goal = state.goal,
+            step = step.description,
+            history = if history_summary.trim().is_empty() { "none" } else { history_summary },
+            tool_results = tool_output,
         )
     }
 }
@@ -1069,10 +1213,12 @@ RULES:
 ///
 /// This keeps the context window bounded regardless of how many steps run,
 /// while keeping the most recent and relevant information fully intact.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StepHistory {
     entries: Vec<StepEntry>,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct StepEntry {
     index: usize,
     desc: String,

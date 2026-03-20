@@ -111,6 +111,7 @@ impl Executor for MockExecutor {
                 step_index: step.index,
                 success: true,
                 output: "mock output".into(),
+                final_answer_candidate: Some("mock output".into()),
                 tool_results: Vec::new(),
                 tools_called: Vec::new(),
             })

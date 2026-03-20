@@ -14,7 +14,7 @@ use sqlx::Row;
 
 use crate::{
     agent::AgentManager,
-    auth::{generate_api_key, issue_token},
+    auth::{hash_password, issue_token, verify_password},
     gateway::{cost::AgentUsage, CostTracker},
     metrics::Metrics,
     skill_marketplace::{marketplace::MarketplaceSkill, SkillMarketplace},
@@ -28,9 +28,9 @@ use crate::{
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct AutoApprovalRule {
-    pub rule_id:    String,
-    pub tenant_id:  String,
-    pub notes:      Option<String>,
+    pub rule_id: String,
+    pub tenant_id: String,
+    pub notes: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -38,7 +38,7 @@ pub struct AutoApprovalRule {
 /// DB is authoritative; cache speeds up the hot path (executor checks per tool call).
 pub struct AutoApprovalStore {
     cache: DashMap<String, AutoApprovalRule>,
-    pool:  sqlx::PgPool,
+    pool: sqlx::PgPool,
 }
 
 impl AutoApprovalStore {
@@ -64,39 +64,48 @@ impl AutoApprovalStore {
         .execute(&self.pool)
         .await?;
         sqlx::query("CREATE INDEX IF NOT EXISTS auto_approvals_tenant ON auto_approvals (tenant_id)")
-            .execute(&self.pool).await?;
+            .execute(&self.pool)
+            .await?;
         self.warm_cache().await?;
         Ok(())
     }
 
     async fn warm_cache(&self) -> anyhow::Result<()> {
         let rows = sqlx::query("SELECT rule_id, tenant_id, notes, created_at FROM auto_approvals")
-            .fetch_all(&self.pool).await?;
+            .fetch_all(&self.pool)
+            .await?;
         for r in rows {
             let rule_id: String = r.get("rule_id");
             let tenant_id: String = r.get("tenant_id");
-            self.cache.insert(Self::key(&tenant_id, &rule_id), AutoApprovalRule {
-                rule_id,
-                tenant_id,
-                notes:      r.get("notes"),
-                created_at: r.get("created_at"),
-            });
+            self.cache.insert(
+                Self::key(&tenant_id, &rule_id),
+                AutoApprovalRule { rule_id, tenant_id, notes: r.get("notes"), created_at: r.get("created_at") },
+            );
         }
         Ok(())
     }
 
-    pub async fn upsert(&self, tenant_id: &str, rule_id: &str, notes: Option<&str>) -> anyhow::Result<AutoApprovalRule> {
+    pub async fn upsert(
+        &self,
+        tenant_id: &str,
+        rule_id: &str,
+        notes: Option<&str>,
+    ) -> anyhow::Result<AutoApprovalRule> {
         sqlx::query(
             "INSERT INTO auto_approvals (rule_id, tenant_id, notes)
              VALUES ($1, $2, $3)
              ON CONFLICT (tenant_id, rule_id) DO UPDATE SET notes = EXCLUDED.notes",
-        ).bind(rule_id).bind(tenant_id).bind(notes)
-        .execute(&self.pool).await?;
+        )
+        .bind(rule_id)
+        .bind(tenant_id)
+        .bind(notes)
+        .execute(&self.pool)
+        .await?;
 
         let rule = AutoApprovalRule {
-            rule_id:    rule_id.to_string(),
-            tenant_id:  tenant_id.to_string(),
-            notes:      notes.map(String::from),
+            rule_id: rule_id.to_string(),
+            tenant_id: tenant_id.to_string(),
+            notes: notes.map(String::from),
             created_at: chrono::Utc::now(),
         };
         self.cache.insert(Self::key(tenant_id, rule_id), rule.clone());
@@ -106,14 +115,19 @@ impl AutoApprovalStore {
     pub async fn get_for_tenant(&self, tenant_id: &str) -> anyhow::Result<Vec<AutoApprovalRule>> {
         let rows = sqlx::query(
             "SELECT rule_id, tenant_id, notes, created_at FROM auto_approvals WHERE tenant_id = $1 ORDER BY created_at",
-        ).bind(tenant_id)
-        .fetch_all(&self.pool).await?;
-        Ok(rows.into_iter().map(|r| AutoApprovalRule {
-            rule_id:    r.get("rule_id"),
-            tenant_id:  r.get("tenant_id"),
-            notes:      r.get("notes"),
-            created_at: r.get("created_at"),
-        }).collect())
+        )
+        .bind(tenant_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| AutoApprovalRule {
+                rule_id: r.get("rule_id"),
+                tenant_id: r.get("tenant_id"),
+                notes: r.get("notes"),
+                created_at: r.get("created_at"),
+            })
+            .collect())
     }
 
     /// Fast in-memory check — used by the executor hot path.
@@ -122,10 +136,11 @@ impl AutoApprovalStore {
     }
 
     pub async fn delete(&self, tenant_id: &str, rule_id: &str) -> anyhow::Result<bool> {
-        let result = sqlx::query(
-            "DELETE FROM auto_approvals WHERE tenant_id = $1 AND rule_id = $2",
-        ).bind(tenant_id).bind(rule_id)
-        .execute(&self.pool).await?;
+        let result = sqlx::query("DELETE FROM auto_approvals WHERE tenant_id = $1 AND rule_id = $2")
+            .bind(tenant_id)
+            .bind(rule_id)
+            .execute(&self.pool)
+            .await?;
         self.cache.remove(&Self::key(tenant_id, rule_id));
         Ok(result.rows_affected() > 0)
     }
@@ -135,31 +150,31 @@ impl AutoApprovalStore {
 
 #[derive(Clone)]
 pub struct AppState {
-    pub store:                Arc<PostgresStore>,
-    pub tenant_store:         Arc<TenantStore>,
-    pub manager:              Arc<AgentManager>,
-    pub cost_tracker:         Arc<CostTracker>,
-    pub metrics:              Arc<Metrics>,
-    pub jwt_secret:           String,
-    pub encrypt_key:          String,
-    pub skill_registry:       Arc<RwLock<SkillRegistry>>,
-    pub marketplace:          Arc<tokio::sync::Mutex<SkillMarketplace>>,
-    pub audit_log:            Arc<crate::audit::AuditLog>,
-    pub webhook_store:        Arc<crate::webhooks::WebhookStore>,
-    pub webhook_dispatcher:   Arc<crate::webhooks::WebhookDispatcher>,
-    pub review_queue:         Arc<crate::compliance::ReviewQueue>,
-    pub swarm:                Arc<crate::swarm::Swarm>,
-    pub connector_registry:   Arc<crate::connectors::ConnectorRegistry>,
+    pub store: Arc<PostgresStore>,
+    pub tenant_store: Arc<TenantStore>,
+    pub manager: Arc<AgentManager>,
+    pub cost_tracker: Arc<CostTracker>,
+    pub metrics: Arc<Metrics>,
+    pub jwt_secret: String,
+    pub encrypt_key: String,
+    pub skill_registry: Arc<RwLock<SkillRegistry>>,
+    pub marketplace: Arc<tokio::sync::Mutex<SkillMarketplace>>,
+    pub audit_log: Arc<crate::audit::AuditLog>,
+    pub webhook_store: Arc<crate::webhooks::WebhookStore>,
+    pub webhook_dispatcher: Arc<crate::webhooks::WebhookDispatcher>,
+    pub review_queue: Arc<crate::compliance::ReviewQueue>,
+    pub swarm: Arc<crate::swarm::Swarm>,
+    pub connector_registry: Arc<crate::connectors::ConnectorRegistry>,
     /// Optional citation tracker — present when compliance module is enabled.
-    pub citation_tracker:     Option<Arc<crate::compliance::CitationTracker>>,
+    pub citation_tracker: Option<Arc<crate::compliance::CitationTracker>>,
     /// In-process auto-approval rule store.
-    pub auto_approvals:       Arc<AutoApprovalStore>,
+    pub auto_approvals: Arc<AutoApprovalStore>,
     /// Event bus handle for publishing SSE events from HTTP handlers (connectors etc).
-    pub event_bus_handle:     Arc<crate::events::EventBus>,
+    pub event_bus_handle: Arc<crate::events::EventBus>,
     /// Billing store — subscriptions, invoices, credits, provider routing.
-    pub billing:              Arc<crate::billing::BillingStore>,
+    pub billing: Arc<crate::billing::BillingStore>,
     /// Connector install store — OAuth tokens and API keys per tenant.
-    pub connector_installs:   Arc<crate::connectors::ConnectorInstallStore>,
+    pub connector_installs: Arc<crate::connectors::ConnectorInstallStore>,
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -172,7 +187,7 @@ type Response = axum::response::Response;
 /// Verify a webhook HMAC-SHA256 signature (covers GitHub, PagerDuty, HubSpot, etc.)
 fn verify_webhook_hmac(signature: &str, payload: &[u8], secret: &str) -> bool {
     use ring::hmac;
-    let key      = hmac::Key::new(hmac::HMAC_SHA256, secret.as_bytes());
+    let key = hmac::Key::new(hmac::HMAC_SHA256, secret.as_bytes());
     let computed = hmac::sign(&key, payload);
     let computed_hex = format!("sha256={}", hex::encode(computed.as_ref()));
     // Constant-time compare
@@ -181,7 +196,18 @@ fn verify_webhook_hmac(signature: &str, payload: &[u8], secret: &str) -> bool {
 }
 
 fn register_request_is_valid(body: &RegisterRequest) -> bool {
-    !body.name.trim().is_empty() && !body.email.trim().is_empty()
+    !body.name.trim().is_empty()
+        && !body.username.trim().is_empty()
+        && !body.email.trim().is_empty()
+        && body.password.trim().len() >= 8
+}
+
+fn auth_response(tenant_id: &str, username: &str, token: String) -> serde_json::Value {
+    serde_json::json!({
+        "token": token,
+        "tenant_id": tenant_id,
+        "username": username,
+    })
 }
 
 fn cost_response_json(tenant_id: &str, usage: Option<AgentUsage>) -> serde_json::Value {
@@ -265,38 +291,61 @@ pub async fn health() -> impl IntoResponse {
 #[derive(Deserialize)]
 pub struct RegisterRequest {
     pub name: String,
+    pub username: String,
     pub email: String,
+    pub password: String,
 }
 
 #[derive(Serialize)]
 pub struct RegisterResponse {
-    /// Shown ONCE — user must save this.
-    pub api_key: String,
-    pub key_prefix: String,
+    pub token: String,
     pub tenant_id: String,
+    pub username: String,
 }
 
-/// POST /auth/register — create a new tenant and issue their first API key.
+/// POST /auth/register — create a new tenant and return a session token.
 pub async fn register(State(state): State<AppState>, Json(body): Json<RegisterRequest>) -> impl IntoResponse {
     if !register_request_is_valid(&body) {
-        return err(StatusCode::BAD_REQUEST, "name and email required");
+        return err(StatusCode::BAD_REQUEST, "name, username, email, and password (min 8 chars) required");
     }
 
-    let key = generate_api_key();
+    let password_hash = match hash_password(&body.password) {
+        Ok(hash) => hash,
+        Err(e) => return err(StatusCode::BAD_REQUEST, e.to_string()),
+    };
 
-    match state.tenant_store.create_tenant(body.name.clone(), body.email.clone(), key.hash, key.prefix.clone()).await {
+    match state
+        .tenant_store
+        .create_tenant(
+            body.username.trim().to_string(),
+            body.name.trim().to_string(),
+            body.email.trim().to_string(),
+            password_hash,
+            String::new(),
+            String::new(),
+        )
+        .await
+    {
         Ok(tenant) => {
-            let _ = state.audit_log.append(
-                &tenant.id, None,
-                crate::audit::AuditAction::TenantRegistered,
-                serde_json::json!({ "email": body.email, "name": body.name }),
-                None,
-            ).await;
-            (
-                StatusCode::CREATED,
-                Json(RegisterResponse { api_key: key.raw, key_prefix: key.prefix, tenant_id: tenant.id }),
-            )
-                .into_response()
+            let _ = state
+                .audit_log
+                .append(
+                    &tenant.id,
+                    None,
+                    crate::audit::AuditAction::TenantRegistered,
+                    serde_json::json!({ "email": body.email, "name": body.name, "username": body.username }),
+                    None,
+                )
+                .await;
+            let plan_str = format!("{:?}", tenant.plan).to_lowercase();
+            match issue_token(&tenant.id, &plan_str, &state.jwt_secret) {
+                Ok(token) => (
+                    StatusCode::CREATED,
+                    Json(RegisterResponse { token, tenant_id: tenant.id, username: tenant.username }),
+                )
+                    .into_response(),
+                Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+            }
         }
         Err(e) => {
             tracing::error!(error = %e, "register failed");
@@ -305,32 +354,36 @@ pub async fn register(State(state): State<AppState>, Json(body): Json<RegisterRe
     }
 }
 
-/// POST /auth/token — exchange API key for a short-lived JWT (for dashboard use).
+/// POST /auth/login or /auth/token — exchange username/email + password for a JWT session.
 #[derive(Deserialize)]
 pub struct TokenRequest {
-    pub api_key: String,
+    pub identifier: String,
+    pub password: String,
 }
 
 pub async fn issue_session_token(State(state): State<AppState>, Json(body): Json<TokenRequest>) -> impl IntoResponse {
-    use crate::auth::apikey::{extract_prefix, verify_key};
-
-    let prefix = match extract_prefix(&body.api_key) {
-        Some(p) => p,
-        None => return err(StatusCode::UNAUTHORIZED, "invalid API key"),
-    };
-
-    let tenant = match state.tenant_store.get_by_key_prefix(prefix).await {
-        Ok(Some(t)) => t,
-        _ => return err(StatusCode::UNAUTHORIZED, "invalid API key"),
-    };
-
-    if !verify_key(&body.api_key, &tenant.key_hash) {
-        return err(StatusCode::UNAUTHORIZED, "invalid API key");
+    if body.identifier.trim().is_empty() || body.password.trim().is_empty() {
+        return err(StatusCode::BAD_REQUEST, "identifier and password required");
     }
 
-    let plan_str = format!("{:?}", tenant.plan).to_lowercase();
-    match issue_token(&tenant.id, &plan_str, &state.jwt_secret) {
-        Ok(token) => Json(serde_json::json!({ "token": token, "tenant_id": tenant.id })).into_response(),
+    let tenant = match state.tenant_store.get_auth_by_identifier(&body.identifier).await {
+        Ok(Some(t)) => t,
+        Ok(None) => return err(StatusCode::UNAUTHORIZED, "invalid credentials"),
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    };
+
+    let Some(password_hash) = tenant.password_hash.as_deref() else {
+        return err(StatusCode::UNAUTHORIZED, "password login is not configured for this account");
+    };
+    if !verify_password(&body.password, password_hash) {
+        return err(StatusCode::UNAUTHORIZED, "invalid credentials");
+    }
+
+    match issue_token(&tenant.id, &tenant.plan, &state.jwt_secret) {
+        Ok(token) => {
+            Json(auth_response(&tenant.id, tenant.username.as_deref().unwrap_or(tenant.email.as_str()), token))
+                .into_response()
+        }
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
@@ -377,12 +430,16 @@ pub async fn set_credential(
 
             match state.tenant_store.upsert_config(&config).await {
                 Ok(_) => {
-                    let _ = state.audit_log.append(
-                        &tenant.tenant_id, None,
-                        crate::audit::AuditAction::CredentialSet,
-                        serde_json::json!({ "provider": provider_name }),
-                        None,
-                    ).await;
+                    let _ = state
+                        .audit_log
+                        .append(
+                            &tenant.tenant_id,
+                            None,
+                            crate::audit::AuditAction::CredentialSet,
+                            serde_json::json!({ "provider": provider_name }),
+                            None,
+                        )
+                        .await;
                     (
                         StatusCode::OK,
                         Json(serde_json::json!({
@@ -484,16 +541,16 @@ pub async fn get_metrics(State(state): State<AppState>) -> impl IntoResponse {
 
 pub async fn get_costs(State(state): State<AppState>, tenant: AuthenticatedTenant) -> impl IntoResponse {
     let tenant_usage = state.cost_tracker.get_tenant_usage(&tenant.tenant_id).await;
-    let limit        = tenant.plan.spend_limit_usd();
-    let current      = tenant_usage.as_ref().map(|u| u.total_cost_usd).unwrap_or(0.0);
-    let pct_used     = if limit > 0.0 { (current / limit) * 100.0 } else { 0.0 };
+    let limit = tenant.plan.spend_limit_usd();
+    let current = tenant_usage.as_ref().map(|u| u.total_cost_usd).unwrap_or(0.0);
+    let pct_used = if limit > 0.0 { (current / limit) * 100.0 } else { 0.0 };
 
     // Build per-provider usage breakdown.
     // CostTracker tracks per-agent; roll up into a single "combined" provider entry
     // so the frontend usage tab renders correctly even without per-provider breakdown.
-    let input_tokens  = tenant_usage.as_ref().map(|u| u.total_input_tokens).unwrap_or(0);
+    let input_tokens = tenant_usage.as_ref().map(|u| u.total_input_tokens).unwrap_or(0);
     let output_tokens = tenant_usage.as_ref().map(|u| u.total_output_tokens).unwrap_or(0);
-    let requests      = tenant_usage.as_ref().map(|u| u.total_requests).unwrap_or(0);
+    let requests = tenant_usage.as_ref().map(|u| u.total_requests).unwrap_or(0);
 
     Json(serde_json::json!({
         "tenant_id":         tenant.tenant_id,
@@ -561,8 +618,7 @@ pub async fn create_goal(
         if steps_limit != u64::MAX {
             let steps_used = state.metrics.steps_this_month(&tenant.tenant_id);
             // Also add any purchased credit steps
-            let extra_steps = state.billing.get_extra_steps(&tenant.tenant_id).await
-                .unwrap_or(0);
+            let extra_steps = state.billing.get_extra_steps(&tenant.tenant_id).await.unwrap_or(0);
             let total_budget = steps_limit + extra_steps;
             if steps_used >= total_budget {
                 return err(
@@ -587,12 +643,16 @@ pub async fn create_goal(
     match state.manager.create_goal(tenant.tenant_id.clone(), body.description.clone()).await {
         Ok((goal, agent)) => {
             state.metrics.goal_created();
-            let _ = state.audit_log.append(
-                &tenant.tenant_id, Some(&agent.id),
-                crate::audit::AuditAction::GoalCreated,
-                serde_json::json!({ "goal_id": goal.id, "description": body.description }),
-                None,
-            ).await;
+            let _ = state
+                .audit_log
+                .append(
+                    &tenant.tenant_id,
+                    Some(&agent.id),
+                    crate::audit::AuditAction::GoalCreated,
+                    serde_json::json!({ "goal_id": goal.id, "description": body.description }),
+                    None,
+                )
+                .await;
             (StatusCode::CREATED, Json(CreateGoalResponse { goal_id: goal.id, agent_id: agent.id })).into_response()
         }
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
@@ -632,21 +692,27 @@ pub async fn get_agent(
     Path(agent_id): Path<String>,
 ) -> impl IntoResponse {
     match state.store.get_agent(&tenant.tenant_id, &agent_id).await {
-        Ok(Some(a)) => Json(serde_json::json!({
-            "id":             a.id,
-            "goal":           a.goal,
-            "status":         format!("{:?}", a.status).to_lowercase(),
-            "current_step":   a.current_step,
-            "workspace_path": a.workspace_path,
-            "next_run":       a.next_run.to_rfc3339(),
-            "created_at":     a.created_at.to_rfc3339(),
-            "updated_at":     a.updated_at.to_rfc3339(),
-            "metadata": {
-                "last_reflection": a.metadata.get("last_reflection"),
-                "key_findings":    a.metadata.get("key_findings").unwrap_or(&serde_json::json!([])),
-            },
-        }))
-        .into_response(),
+        Ok(Some(a)) => {
+            let final_answer = a.final_answer().map(str::to_string);
+            let key_findings = a.metadata.get("key_findings").cloned().unwrap_or_else(|| serde_json::json!([]));
+            Json(serde_json::json!({
+                "id":             a.id,
+                "goal":           a.goal,
+                "status":         format!("{:?}", a.status).to_lowercase(),
+                "current_step":   a.current_step,
+                "workspace_path": a.workspace_path,
+                "next_run":       a.next_run.to_rfc3339(),
+                "created_at":     a.created_at.to_rfc3339(),
+                "updated_at":     a.updated_at.to_rfc3339(),
+                "final_answer":   final_answer.clone(),
+                "metadata": {
+                    "final_answer": final_answer,
+                    "last_reflection": a.metadata.get("last_reflection"),
+                    "key_findings": key_findings,
+                },
+            }))
+            .into_response()
+        }
         Ok(None) => err(StatusCode::NOT_FOUND, "agent not found"),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
@@ -833,39 +899,47 @@ pub async fn create_webhook(
     let secret = body.secret.unwrap_or_else(|| crate::util::new_id());
     match state.webhook_store.create(&tenant.tenant_id, &body.url, &secret, &body.events).await {
         Ok(hook) => {
-            let _ = state.audit_log.append(
-                &tenant.tenant_id, None,
-                crate::audit::AuditAction::WebhookRegistered,
-                serde_json::json!({ "webhook_id": hook.id, "url": hook.url }),
-                None,
-            ).await;
-            (StatusCode::CREATED, Json(serde_json::json!({
-                "id": hook.id,
-                "url": hook.url,
-                "secret": secret,
-                "events": hook.events,
-            }))).into_response()
+            let _ = state
+                .audit_log
+                .append(
+                    &tenant.tenant_id,
+                    None,
+                    crate::audit::AuditAction::WebhookRegistered,
+                    serde_json::json!({ "webhook_id": hook.id, "url": hook.url }),
+                    None,
+                )
+                .await;
+            (
+                StatusCode::CREATED,
+                Json(serde_json::json!({
+                    "id": hook.id,
+                    "url": hook.url,
+                    "secret": secret,
+                    "events": hook.events,
+                })),
+            )
+                .into_response()
         }
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
 
 /// GET /webhooks — list all webhooks for this tenant.
-pub async fn list_webhooks(
-    State(state): State<AppState>,
-    tenant: AuthenticatedTenant,
-) -> impl IntoResponse {
+pub async fn list_webhooks(State(state): State<AppState>, tenant: AuthenticatedTenant) -> impl IntoResponse {
     match state.webhook_store.list_for_tenant(&tenant.tenant_id).await {
         Ok(hooks) => {
-            let body: Vec<serde_json::Value> = hooks.iter().map(|h| {
-                serde_json::json!({
-                    "id": h.id,
-                    "url": h.url,
-                    "events": h.events,
-                    "enabled": h.enabled,
-                    "failure_count": h.failure_count,
+            let body: Vec<serde_json::Value> = hooks
+                .iter()
+                .map(|h| {
+                    serde_json::json!({
+                        "id": h.id,
+                        "url": h.url,
+                        "events": h.events,
+                        "enabled": h.enabled,
+                        "failure_count": h.failure_count,
+                    })
                 })
-            }).collect();
+                .collect();
             Json(serde_json::json!({ "webhooks": body, "count": body.len() })).into_response()
         }
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
@@ -918,46 +992,46 @@ pub async fn connector_inbound(
 
     let event = crate::connectors::ConnectorEvent {
         connector_type: connector_type.clone(),
-        event_type:     event_type.clone(),
-        payload:        payload.clone(),
-        tenant_id:      tenant.tenant_id.clone(),
-        external_id:    payload.get("id").and_then(|v| v.as_str()).map(String::from),
+        event_type: event_type.clone(),
+        payload: payload.clone(),
+        tenant_id: tenant.tenant_id.clone(),
+        external_id: payload.get("id").and_then(|v| v.as_str()).map(String::from),
     };
 
     // ── Look up connector and generate goal ───────────────────────────────
     let connector = match state.connector_registry.get(&connector_type) {
         Some(c) => c,
         None => {
-            return err(
-                StatusCode::NOT_FOUND,
-                format!("no connector registered for type '{connector_type}'"),
-            );
+            return err(StatusCode::NOT_FOUND, format!("no connector registered for type '{connector_type}'"));
         }
     };
 
     // Load real ConnectorConfig from the install store.
     // Falls back to empty credentials if tenant hasn't connected this connector —
     // the connector's handle_inbound will return an error with a helpful message.
-    let (credentials, settings) = match state.connector_installs
-        .get(&tenant.tenant_id, &connector_type).await
-    {
+    let (credentials, settings) = match state.connector_installs.get(&tenant.tenant_id, &connector_type).await {
         Ok(Some(install)) => {
             // Verify webhook signature if this is a webhook_only install
             if install.auth_type == "webhook_only" {
                 if let Some(secret) = state.connector_installs.decrypt_webhook_secret(&install) {
                     // Verify HMAC — connector-specific header names handled below
-                    let sig_header = payload.get("x-hub-signature-256")
+                    let sig_header = payload
+                        .get("x-hub-signature-256")
                         .or_else(|| payload.get("x-pagerduty-signature"))
                         .or_else(|| payload.get("x-hubspot-signature"))
                         .or_else(|| payload.get("stripe-signature"))
                         .and_then(|v| v.as_str())
                         .unwrap_or("");
-                    if !sig_header.is_empty() && !verify_webhook_hmac(sig_header, &serde_json::to_vec(&payload).unwrap_or_default(), &secret) {
+                    if !sig_header.is_empty()
+                        && !verify_webhook_hmac(sig_header, &serde_json::to_vec(&payload).unwrap_or_default(), &secret)
+                    {
                         return err(StatusCode::UNAUTHORIZED, "webhook signature verification failed");
                     }
                 }
             }
-            let token = state.connector_installs.decrypt_token(&install)
+            let token = state
+                .connector_installs
+                .decrypt_token(&install)
                 .map(|t| serde_json::json!({ "access_token": t, "api_key": t, "token": t }))
                 .unwrap_or(serde_json::json!({}));
             (token, install.settings.clone())
@@ -966,24 +1040,28 @@ pub async fn connector_inbound(
     };
 
     let config = crate::connectors::ConnectorConfig {
-        id:             crate::util::new_id(),
-        tenant_id:      tenant.tenant_id.clone(),
+        id: crate::util::new_id(),
+        tenant_id: tenant.tenant_id.clone(),
         connector_type: connector_type.clone(),
         credentials,
         settings,
-        enabled:        true,
+        enabled: true,
     };
 
     let goal_str = match connector.handle_inbound(&event, &config).await {
         Ok(Some(g)) => g,
-        Ok(None)    => {
+        Ok(None) => {
             // Connector handled the event but produced no agent goal (e.g. unsupported event type)
-            return (StatusCode::OK, Json(serde_json::json!({
-                "received":  true,
-                "connector": connector_type,
-                "agent_created": false,
-                "reason": "event type produced no goal",
-            }))).into_response();
+            return (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "received":  true,
+                    "connector": connector_type,
+                    "agent_created": false,
+                    "reason": "event type produced no goal",
+                })),
+            )
+                .into_response();
         }
         Err(e) => {
             tracing::error!(connector = %connector_type, error = %e, "connector handle_inbound failed");
@@ -996,23 +1074,27 @@ pub async fn connector_inbound(
         Ok((goal, agent)) => {
             // Emit ConnectorTrigger SSE so the frontend can show the trigger card
             state.event_bus_handle.publish(crate::events::AgentEvent::ConnectorTrigger {
-                agent_id:       agent.id.clone(),
+                agent_id: agent.id.clone(),
                 connector_type: connector_type.clone(),
-                event_type:     event_type.clone(),
-                external_id:    payload.get("id").and_then(|v| v.as_str()).map(String::from),
+                event_type: event_type.clone(),
+                external_id: payload.get("id").and_then(|v| v.as_str()).map(String::from),
             });
 
-            let _ = state.audit_log.append(
-                &tenant.tenant_id, Some(&agent.id),
-                crate::audit::AuditAction::Custom,
-                serde_json::json!({
-                    "action":         "connector_agent_created",
-                    "connector_type": connector_type,
-                    "event_type":     event_type,
-                    "goal":           goal_str,
-                }),
-                None,
-            ).await;
+            let _ = state
+                .audit_log
+                .append(
+                    &tenant.tenant_id,
+                    Some(&agent.id),
+                    crate::audit::AuditAction::Custom,
+                    serde_json::json!({
+                        "action":         "connector_agent_created",
+                        "connector_type": connector_type,
+                        "event_type":     event_type,
+                        "goal":           goal_str,
+                    }),
+                    None,
+                )
+                .await;
 
             tracing::info!(
                 connector  = %connector_type,
@@ -1021,13 +1103,17 @@ pub async fn connector_inbound(
                 "connector created agent"
             );
 
-            (StatusCode::OK, Json(serde_json::json!({
-                "received":      true,
-                "connector":     connector_type,
-                "agent_created": true,
-                "agent_id":      agent.id,
-                "goal_id":       goal.id,
-            }))).into_response()
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "received":      true,
+                    "connector":     connector_type,
+                    "agent_created": true,
+                    "agent_id":      agent.id,
+                    "goal_id":       goal.id,
+                })),
+            )
+                .into_response()
         }
         Err(e) => {
             tracing::error!(connector = %connector_type, error = %e, "failed to create agent from connector event");
@@ -1074,9 +1160,14 @@ pub async fn resolve_review(
     // auto_approved is a UI concept — maps to Approved on the wire
     let status = match body.status.as_str() {
         "approved" | "auto_approved" => crate::compliance::ReviewStatus::Approved,
-        "rejected"                   => crate::compliance::ReviewStatus::Rejected,
-        "changes_requested"          => crate::compliance::ReviewStatus::ChangesRequested,
-        _ => return err(StatusCode::BAD_REQUEST, "status must be: approved, auto_approved, rejected, or changes_requested"),
+        "rejected" => crate::compliance::ReviewStatus::Rejected,
+        "changes_requested" => crate::compliance::ReviewStatus::ChangesRequested,
+        _ => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "status must be: approved, auto_approved, rejected, or changes_requested",
+            )
+        }
     };
 
     match state.review_queue.resolve(&review_id, status, body.notes.as_deref()).await {
@@ -1089,13 +1180,8 @@ pub async fn resolve_review(
 pub async fn swarm_status(state: State<AppState>, _tenant: AuthenticatedTenant) -> impl IntoResponse {
     let depth = state.swarm.queue_depth().await.unwrap_or(0);
     // Read pool size from config env (falls back to 32 default)
-    let pool_size: u64 = std::env::var("NARAYAN__WORKER__POOL_SIZE")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(32);
-    let queue_backed = std::env::var("NARAYAN__REDIS__ENABLED")
-        .map(|v| v == "true")
-        .unwrap_or(false);
+    let pool_size: u64 = std::env::var("NARAYAN__WORKER__POOL_SIZE").ok().and_then(|v| v.parse().ok()).unwrap_or(32);
+    let queue_backed = std::env::var("NARAYAN__REDIS__ENABLED").map(|v| v == "true").unwrap_or(false);
     Json(serde_json::json!({
         "queue_depth":   depth,
         "pool_size":     pool_size,
@@ -1115,7 +1201,7 @@ pub async fn list_agent_citations(
     // Verify agent belongs to tenant first
     match state.store.get_agent(&tenant.tenant_id, &agent_id).await {
         Ok(None) => return err(StatusCode::NOT_FOUND, "agent not found"),
-        Err(e)   => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
         Ok(Some(_)) => {}
     }
 
@@ -1132,10 +1218,7 @@ pub async fn list_agent_citations(
 }
 
 /// GET /citations — all citations for this tenant (cross-agent, last 200).
-pub async fn list_tenant_citations(
-    State(state): State<AppState>,
-    tenant: AuthenticatedTenant,
-) -> impl IntoResponse {
+pub async fn list_tenant_citations(State(state): State<AppState>, tenant: AuthenticatedTenant) -> impl IntoResponse {
     if let Some(ref ct) = state.citation_tracker {
         match ct.get_for_tenant(&tenant.tenant_id, 200).await {
             Ok(cites) => {
@@ -1153,10 +1236,7 @@ pub async fn list_tenant_citations(
 // pattern. For production, back this with a DB table.
 
 /// GET /auto-approvals — list saved auto-approval rules for this tenant.
-pub async fn list_auto_approvals(
-    State(state): State<AppState>,
-    tenant: AuthenticatedTenant,
-) -> impl IntoResponse {
+pub async fn list_auto_approvals(State(state): State<AppState>, tenant: AuthenticatedTenant) -> impl IntoResponse {
     match state.auto_approvals.get_for_tenant(&tenant.tenant_id).await {
         Ok(rules) => {
             let count = rules.len();
@@ -1169,7 +1249,7 @@ pub async fn list_auto_approvals(
 #[derive(Deserialize)]
 pub struct CreateAutoApprovalRequest {
     pub rule_id: String,
-    pub notes:   Option<String>,
+    pub notes: Option<String>,
 }
 
 /// POST /auto-approvals — save an auto-approval rule.
@@ -1183,7 +1263,7 @@ pub async fn create_auto_approval(
     }
     match state.auto_approvals.upsert(&tenant.tenant_id, &body.rule_id, body.notes.as_deref()).await {
         Ok(rule) => (StatusCode::CREATED, Json(serde_json::json!({ "saved": true, "rule": rule }))).into_response(),
-        Err(e)   => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
 
@@ -1194,9 +1274,9 @@ pub async fn delete_auto_approval(
     Path(rule_id): Path<String>,
 ) -> impl IntoResponse {
     match state.auto_approvals.delete(&tenant.tenant_id, &rule_id).await {
-        Ok(true)  => Json(serde_json::json!({ "deleted": true })).into_response(),
+        Ok(true) => Json(serde_json::json!({ "deleted": true })).into_response(),
         Ok(false) => err(StatusCode::NOT_FOUND, "auto-approval rule not found"),
-        Err(e)    => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
 
@@ -1208,8 +1288,8 @@ pub async fn resolve_all_reviews(
 ) -> impl IntoResponse {
     let status = match body.status.as_str() {
         "approved" | "auto_approved" => crate::compliance::ReviewStatus::Approved,
-        "rejected"                   => crate::compliance::ReviewStatus::Rejected,
-        "changes_requested"          => crate::compliance::ReviewStatus::ChangesRequested,
+        "rejected" => crate::compliance::ReviewStatus::Rejected,
+        "changes_requested" => crate::compliance::ReviewStatus::ChangesRequested,
         _ => return err(StatusCode::BAD_REQUEST, "invalid status"),
     };
 
@@ -1244,11 +1324,35 @@ mod tests {
 
     #[test]
     fn test_register_request_validation_rejects_blank_fields() {
-        assert!(!register_request_is_valid(&RegisterRequest { name: "   ".into(), email: "team@example.com".into() }));
-        assert!(!register_request_is_valid(&RegisterRequest { name: "Narayan".into(), email: "\n\t".into() }));
+        assert!(!register_request_is_valid(&RegisterRequest {
+            name: "   ".into(),
+            username: "narayan".into(),
+            email: "team@example.com".into(),
+            password: "password123".into(),
+        }));
+        assert!(!register_request_is_valid(&RegisterRequest {
+            name: "Narayan".into(),
+            username: "".into(),
+            email: "team@example.com".into(),
+            password: "password123".into(),
+        }));
+        assert!(!register_request_is_valid(&RegisterRequest {
+            name: "Narayan".into(),
+            username: "narayan".into(),
+            email: "\n\t".into(),
+            password: "password123".into(),
+        }));
+        assert!(!register_request_is_valid(&RegisterRequest {
+            name: "Narayan".into(),
+            username: "narayan".into(),
+            email: "team@example.com".into(),
+            password: "short".into(),
+        }));
         assert!(register_request_is_valid(&RegisterRequest {
             name: "Narayan".into(),
+            username: "narayan".into(),
             email: "team@example.com".into(),
+            password: "password123".into(),
         }));
     }
 

@@ -2,29 +2,7 @@
 const BASE = import.meta.env.VITE_API_URL || '/api';
 
 function getToken() {
-  return localStorage.getItem('narayan_token') || localStorage.getItem('narayan_api_key');
-}
-
-// ── Auth refresh ────────────────────────────────────────────────────────────
-// If a request returns 401, try to exchange the stored api_key for a fresh JWT.
-// If no api_key exists, force re-login.
-async function maybeRefreshToken() {
-  const apiKey = localStorage.getItem('narayan_api_key');
-  if (!apiKey) return false;
-  try {
-    const res = await fetch(`${BASE}/auth/token`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ api_key: apiKey }),
-    });
-    if (!res.ok) return false;
-    const data = await res.json();
-    if (data.token) {
-      localStorage.setItem('narayan_token', data.token);
-      return true;
-    }
-  } catch {}
-  return false;
+  return localStorage.getItem('narayan_token');
 }
 
 async function req(method, path, body, isPublic = false) {
@@ -44,31 +22,9 @@ async function req(method, path, body, isPublic = false) {
     body: body ? JSON.stringify(body) : undefined,
   });
 
-  // Auto-refresh JWT on 401 and retry once
   if (res.status === 401 && !isPublic) {
-    const refreshed = await maybeRefreshToken();
-    if (refreshed) {
-      headers['Authorization'] = `Bearer ${getToken()}`;
-      const retry = await fetch(`${BASE}${path}`, {
-        method,
-        headers,
-        body: body ? JSON.stringify(body) : undefined,
-      });
-      if (retry.status === 401) {
-        // Refresh didn't help — force re-login
-        window.dispatchEvent(new CustomEvent('narayan:unauthenticated'));
-        throw new Error('Session expired. Please sign in again.');
-      }
-      if (!retry.ok) {
-        const err = await retry.text().catch(() => 'Unknown error');
-        throw new Error(err || `HTTP ${retry.status}`);
-      }
-      const ct2 = retry.headers.get('content-type') || '';
-      return ct2.includes('application/json') ? retry.json() : retry.text();
-    } else {
-      window.dispatchEvent(new CustomEvent('narayan:unauthenticated'));
-      throw new Error('Session expired. Please sign in again.');
-    }
+    window.dispatchEvent(new CustomEvent('narayan:unauthenticated'));
+    throw new Error('Session expired. Please sign in again.');
   }
 
   if (!res.ok) {
@@ -83,8 +39,10 @@ async function req(method, path, body, isPublic = false) {
 
 // ── Auth ───────────────────────────────────────────────────────────────────
 export const auth = {
-  register: (name, email) => req('POST', '/auth/register', { name, email }, true),
-  token:    (api_key)     => req('POST', '/auth/token',    { api_key },      true),
+  register: (name, username, email, password) =>
+    req('POST', '/auth/register', { name, username, email, password }, true),
+  login: (identifier, password) =>
+    req('POST', '/auth/login', { identifier, password }, true),
 };
 
 // ── Credentials ────────────────────────────────────────────────────────────

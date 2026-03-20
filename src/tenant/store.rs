@@ -23,8 +23,10 @@ impl TenantStore {
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS tenants (
                 id         TEXT PRIMARY KEY,
+                username   TEXT,
                 name       TEXT NOT NULL,
                 email      TEXT NOT NULL UNIQUE,
+                password_hash TEXT,
                 key_hash   TEXT NOT NULL,
                 key_prefix TEXT NOT NULL,
                 status     TEXT NOT NULL DEFAULT 'active',
@@ -35,8 +37,13 @@ impl TenantStore {
         )
         .execute(&self.pool)
         .await?;
-        sqlx::query("CREATE INDEX IF NOT EXISTS tenants_key_prefix ON tenants (key_prefix)")
+        sqlx::query("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS username TEXT").execute(&self.pool).await?;
+        sqlx::query("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS password_hash TEXT").execute(&self.pool).await?;
+        sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS tenants_username ON tenants (LOWER(username)) WHERE username IS NOT NULL")
             .execute(&self.pool).await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS tenants_key_prefix ON tenants (key_prefix)")
+            .execute(&self.pool)
+            .await?;
 
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS tenant_configs (
@@ -60,7 +67,8 @@ impl TenantStore {
         .execute(&self.pool)
         .await?;
         sqlx::query("CREATE INDEX IF NOT EXISTS tenant_policy_rules_tenant ON tenant_policy_rules (tenant_id)")
-            .execute(&self.pool).await?;
+            .execute(&self.pool)
+            .await?;
 
         Ok(())
     }
@@ -107,8 +115,10 @@ impl TenantStore {
 
     pub async fn create_tenant(
         &self,
+        username: String,
         name: String,
         email: String,
+        password_hash: String,
         key_hash: String,
         key_prefix: String,
     ) -> Result<Tenant> {
@@ -116,12 +126,14 @@ impl TenantStore {
         let id = new_id();
 
         sqlx::query(
-            r#"INSERT INTO tenants (id, name, email, key_hash, key_prefix, status, plan, created_at, updated_at)
-               VALUES ($1,$2,$3,$4,$5,'active','free',$6,$7)"#,
+            r#"INSERT INTO tenants (id, username, name, email, password_hash, key_hash, key_prefix, status, plan, created_at, updated_at)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,'active','free',$8,$9)"#,
         )
         .bind(&id)
+        .bind(&username)
         .bind(&name)
         .bind(&email)
+        .bind(&password_hash)
         .bind(&key_hash)
         .bind(&key_prefix)
         .bind(now)
@@ -139,6 +151,7 @@ impl TenantStore {
 
         Ok(Tenant {
             id,
+            username,
             name,
             email,
             key_hash,
@@ -154,7 +167,7 @@ impl TenantStore {
     /// Used to quickly narrow candidates before full hash comparison.
     pub async fn get_by_key_prefix(&self, prefix: &str) -> Result<Option<Tenant>> {
         let row = sqlx::query_as::<_, TenantRow>(
-            "SELECT id, name, email, key_hash, key_prefix, status, plan,
+            "SELECT id, username, name, email, key_hash, key_prefix, status, plan,
                     created_at, updated_at
              FROM tenants WHERE key_prefix = $1 AND status = 'active'",
         )
@@ -167,7 +180,7 @@ impl TenantStore {
 
     pub async fn get_by_id(&self, id: &str) -> Result<Option<Tenant>> {
         let row = sqlx::query_as::<_, TenantRow>(
-            "SELECT id, name, email, key_hash, key_prefix, status, plan,
+            "SELECT id, username, name, email, key_hash, key_prefix, status, plan,
                     created_at, updated_at
              FROM tenants WHERE id = $1",
         )
@@ -205,13 +218,30 @@ impl TenantStore {
 
     pub async fn list_all(&self) -> Result<Vec<Tenant>> {
         let rows = sqlx::query_as::<_, TenantRow>(
-            "SELECT id, name, email, key_hash, key_prefix, status, plan,
+            "SELECT id, username, name, email, key_hash, key_prefix, status, plan,
                     created_at, updated_at
              FROM tenants ORDER BY created_at DESC",
         )
         .fetch_all(&self.pool)
         .await?;
         Ok(rows.into_iter().map(row_to_tenant).collect())
+    }
+
+    pub async fn get_auth_by_identifier(&self, identifier: &str) -> Result<Option<TenantAuthRow>> {
+        let row = sqlx::query_as::<_, TenantAuthRow>(
+            "SELECT id, username, email, password_hash, plan
+               FROM tenants
+              WHERE status = 'active'
+                AND (
+                    LOWER(email) = LOWER($1)
+                    OR LOWER(COALESCE(username, '')) = LOWER($1)
+                )
+              LIMIT 1",
+        )
+        .bind(identifier.trim())
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
     }
 
     // ── Tenant config ───────────────────────────────────────────────────────
@@ -261,6 +291,7 @@ impl TenantStore {
 #[derive(FromRow)]
 struct TenantRow {
     id: String,
+    username: Option<String>,
     name: String,
     email: String,
     key_hash: String,
@@ -271,6 +302,15 @@ struct TenantRow {
     updated_at: chrono::DateTime<chrono::Utc>,
 }
 
+#[derive(FromRow)]
+pub struct TenantAuthRow {
+    pub id: String,
+    pub username: Option<String>,
+    pub email: String,
+    pub password_hash: Option<String>,
+    pub plan: String,
+}
+
 fn row_to_tenant(r: TenantRow) -> Tenant {
     let status = match r.status.as_str() {
         "suspended" => TenantStatus::Suspended,
@@ -278,13 +318,14 @@ fn row_to_tenant(r: TenantRow) -> Tenant {
         _ => TenantStatus::Active,
     };
     let plan = match r.plan.as_str() {
-        "go"         => TenantPlan::Go,
-        "pro"        => TenantPlan::Pro,
+        "go" => TenantPlan::Go,
+        "pro" => TenantPlan::Pro,
         "enterprise" => TenantPlan::Enterprise,
-        _            => TenantPlan::Free,
+        _ => TenantPlan::Free,
     };
     Tenant {
         id: r.id,
+        username: r.username.unwrap_or_else(|| r.email.split('@').next().unwrap_or_default().to_string()),
         name: r.name,
         email: r.email,
         key_hash: r.key_hash,

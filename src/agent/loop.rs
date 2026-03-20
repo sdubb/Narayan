@@ -10,7 +10,7 @@ use crate::{
         executor::Executor,
         planner::{Plan, Planner},
         preflight::{Preflight, PreflightResult},
-        prompts::StepHistory,
+        prompts::{is_direct_response_goal, StepHistory},
         reflector::Reflector,
     },
     cognition::control_loop::CognitiveControlLoop,
@@ -25,6 +25,69 @@ use crate::{
     tools::ToolRegistry,
     util::next_run_after,
 };
+
+fn truncate_for_log(value: &str, max_chars: usize) -> String {
+    let mut out = String::with_capacity(value.len().min(max_chars));
+    for ch in value.chars().take(max_chars) {
+        out.push(ch);
+    }
+    if value.chars().count() > max_chars {
+        out.push_str("...(truncated)");
+    }
+    out
+}
+
+fn completion_summary(state: &AgentState) -> String {
+    state
+        .final_answer()
+        .filter(|answer| !looks_like_placeholder(answer))
+        .or_else(|| state.metadata.get("last_reflection").and_then(|value| value.as_str()))
+        .filter(|answer| !looks_like_placeholder(answer))
+        .unwrap_or("goal achieved")
+        .to_string()
+}
+
+fn looks_like_placeholder(value: &str) -> bool {
+    let normalized = value.trim().to_ascii_lowercase();
+    normalized.is_empty()
+        || normalized == "goal complete"
+        || normalized == "goal achieved"
+        || normalized == "no output"
+        || normalized.starts_with("step complete")
+}
+
+fn step_history_summary(result: &crate::agent::executor::StepResult, fallback: &str) -> String {
+    if let Some(answer) = result.final_answer_candidate.as_deref().filter(|value| !looks_like_placeholder(value)) {
+        return answer.to_string();
+    }
+
+    if !result.tool_results.is_empty() {
+        let details = result
+            .tool_results
+            .iter()
+            .enumerate()
+            .map(|(index, tool_result)| {
+                let tool_name = result.tools_called.get(index).map(String::as_str).unwrap_or("tool");
+                let payload = if tool_result.output.is_null() {
+                    tool_result.error.clone().unwrap_or_else(|| "no output".into())
+                } else {
+                    serde_json::to_string(&tool_result.output).unwrap_or_default()
+                };
+                format!("{tool_name}: {payload}")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !details.trim().is_empty() {
+            return details;
+        }
+    }
+
+    if !looks_like_placeholder(&result.output) {
+        return result.output.clone();
+    }
+
+    fallback.to_string()
+}
 
 // ── Outcome ────────────────────────────────────────────────────────────────
 
@@ -97,6 +160,15 @@ impl AgentLoop {
         plan: &mut Option<Plan>,
         history: &mut StepHistory,
     ) -> Result<StepOutcome> {
+        tracing::info!(
+            agent_id = %state.id,
+            status = ?state.status,
+            current_step = state.current_step,
+            has_plan = plan.is_some(),
+            goal = %truncate_for_log(&state.goal, 200),
+            "agent loop step starting"
+        );
+
         // ── 1. Cognitive control — prevent infinite loops ──────────────────
         let control = CognitiveControlLoop::new(self.max_steps, self.timeout_secs);
         if !control.should_continue(state) {
@@ -143,7 +215,25 @@ impl AgentLoop {
                 })
             };
 
-            let new_plan = if let Some(skill) = maybe_skill {
+            let new_plan = if is_direct_response_goal(&state.goal) {
+                tracing::info!(
+                    agent_id = %state.id,
+                    goal = %state.goal,
+                    "agent loop selected direct-response fast path"
+                );
+                Plan {
+                    goal: state.goal.clone(),
+                    job_type: Some("general".into()),
+                    rationale: "Simple conversational request; answer directly without tools.".into(),
+                    steps: vec![crate::agent::planner::PlannedStep {
+                        index: 0,
+                        description: "Answer the user's message directly in chat.".into(),
+                        tool: None,
+                        tool_args: None,
+                        success_criteria: "User receives a direct answer.".into(),
+                    }],
+                }
+            } else if let Some(skill) = maybe_skill {
                 tracing::info!(
                     agent_id = %state.id,
                     skill    = %skill.name,
@@ -179,8 +269,12 @@ impl AgentLoop {
 
         // ── 5. Completion check ─────────────────────────────────────────────
         if current_plan.is_complete(state.current_step as usize) {
-            let summary =
-                state.metadata.get("last_reflection").and_then(|v| v.as_str()).unwrap_or("goal achieved").to_string();
+            let summary = completion_summary(state);
+            tracing::info!(
+                agent_id = %state.id,
+                summary = %truncate_for_log(&summary, 300),
+                "agent loop reached plan completion"
+            );
             state.mark_completed();
             self.event_bus.publish(AgentEvent::GoalComplete { agent_id: state.id.clone(), summary: summary.clone() });
             self.event_bus.close(&state.id);
@@ -194,6 +288,13 @@ impl AgentLoop {
             step_index: step.index,
             description: step.description.clone(),
         });
+        tracing::info!(
+            agent_id = %state.id,
+            step_index = step.index,
+            step_description = %step.description,
+            planner_hint = ?step.tool,
+            "agent loop executing step"
+        );
         state.mark_running();
 
         // ── 5a. Inject knowledge graph facts into history ───────────────────
@@ -217,6 +318,14 @@ impl AgentLoop {
         // ── 6. Execute step ────────────────────────────────────────────────
         // plane_guard validated inside executor before each tool call
         let result = self.executor.execute_step(state, &step_exec, current_plan, history).await?;
+        tracing::info!(
+            agent_id = %state.id,
+            step_index = step.index,
+            success = result.success,
+            tools_called = ?result.tools_called,
+            output = %truncate_for_log(&result.output, 400),
+            "agent loop executor result"
+        );
 
         // ── 7. Debug recording ─────────────────────────────────────────────
         {
@@ -231,6 +340,10 @@ impl AgentLoop {
                 serde_json::to_string(&result.tool_results).unwrap_or_default(),
             );
             state.metadata["debug_recording"] = serde_json::to_value(&recorder.steps).unwrap_or_default();
+        }
+
+        if let Some(candidate) = result.final_answer_candidate.clone() {
+            state.set_final_answer(candidate);
         }
 
         // ── 8. Delegation check ─────────────────────────────────────────────
@@ -253,11 +366,11 @@ impl AgentLoop {
         }
 
         // Emit tool result events
-        for tool_result in &result.tool_results {
+        for (index, tool_result) in result.tool_results.iter().enumerate() {
             self.event_bus.publish(AgentEvent::ToolResult {
                 agent_id: state.id.clone(),
                 step_index: step.index,
-                tool_name: "tool".into(),
+                tool_name: result.tools_called.get(index).cloned().unwrap_or_else(|| "tool".into()),
                 success: tool_result.success,
                 output_preview: crate::util::truncate(
                     &serde_json::to_string(&tool_result.output).unwrap_or_default(),
@@ -267,15 +380,50 @@ impl AgentLoop {
             });
         }
 
+        if is_direct_response_goal(&state.goal)
+            && current_plan.steps.len() == 1
+            && step.tool.is_none()
+            && result.success
+            && result.tool_results.is_empty()
+        {
+            let answer = state
+                .final_answer()
+                .map(str::to_string)
+                .unwrap_or_else(|| result.output.clone());
+            state.set_final_answer(answer.clone());
+            state.metadata["last_reflection"] = serde_json::Value::String(answer.clone());
+            state.metadata["key_findings"] = serde_json::json!([]);
+            history.push(step.index, step.description.clone(), true, &answer);
+            state.mark_completed();
+            self.event_bus.publish(AgentEvent::StepCompleted {
+                agent_id: state.id.clone(),
+                step_index: step.index,
+                success: true,
+                summary: "Direct response delivered".into(),
+            });
+            self.event_bus.publish(AgentEvent::GoalComplete { agent_id: state.id.clone(), summary: answer });
+            self.event_bus.close(&state.id);
+            return Ok(StepOutcome::Complete);
+        }
+
         // ── 9. Evaluate + Reflect (one combined LLM call) ──────────────────
         let retry_count = state.metadata.get("retry_count").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
         let eval = self.evaluator.evaluate_and_reflect(state, current_plan, &step, &result, retry_count).await?;
+        tracing::info!(
+            agent_id = %state.id,
+            step_index = step.index,
+            verdict = ?eval.verdict,
+            summary = %truncate_for_log(&eval.summary, 300),
+            should_revise = eval.should_revise,
+            "agent loop evaluation complete"
+        );
 
         state.metadata["last_reflection"] = serde_json::Value::String(eval.summary.clone());
         state.metadata["key_findings"] = serde_json::json!(eval.key_findings);
 
         // Update step history for next executor call
-        history.push(step.index, step.description.clone(), result.success, &eval.summary);
+        let history_summary = step_history_summary(&result, &eval.summary);
+        history.push(step.index, step.description.clone(), result.success, &history_summary);
 
         // ── 11. Knowledge graph — extract and store entities ────────────────
         {
@@ -473,9 +621,15 @@ impl AgentLoop {
                 Ok(StepOutcome::Continue { delay_secs: 0 })
             }
             EvalVerdict::GoalComplete => {
+                if state.final_answer().is_none() && !looks_like_placeholder(&eval.summary) {
+                    state.set_final_answer(eval.summary.clone());
+                }
+                let summary = completion_summary(state);
                 state.mark_completed();
-                self.event_bus
-                    .publish(AgentEvent::GoalComplete { agent_id: state.id.clone(), summary: eval.summary });
+                self.event_bus.publish(AgentEvent::GoalComplete {
+                    agent_id: state.id.clone(),
+                    summary,
+                });
                 self.event_bus.close(&state.id);
                 Ok(StepOutcome::Complete)
             }
@@ -799,6 +953,7 @@ mod tests {
                 step_index: 0,
                 success: true,
                 output: "delegated".into(),
+                final_answer_candidate: Some("delegated".into()),
                 tool_results: vec![ToolResult::ok(serde_json::json!({
                     "child_agent_ids": ["child-1", "child-2"]
                 }))],
@@ -836,6 +991,7 @@ mod tests {
                 step_index: 0,
                 success: true,
                 output: "STEP COMPLETE".into(),
+                final_answer_candidate: Some("STEP COMPLETE".into()),
                 tool_results: vec![],
                 tools_called: vec![],
             }])),
@@ -992,6 +1148,7 @@ mod tests {
                 step_index: 0,
                 success: true,
                 output: "STEP COMPLETE".into(),
+                final_answer_candidate: Some("STEP COMPLETE".into()),
                 tool_results: vec![],
                 tools_called: vec![],
             }])),
@@ -1055,6 +1212,7 @@ mod tests {
                 step_index: 0,
                 success: false,
                 output: "temporary failure".into(),
+                final_answer_candidate: Some("temporary failure".into()),
                 tool_results: vec![ToolResult::err("timeout")],
                 tools_called: vec!["shell".into()],
             }])),
@@ -1092,6 +1250,7 @@ mod tests {
                 step_index: 0,
                 success: false,
                 output: "STEP FAILED: permission denied".into(),
+                final_answer_candidate: None,
                 tool_results: vec![ToolResult::err("permission denied")],
                 tools_called: vec!["file_write".into()],
             }])),
@@ -1127,6 +1286,7 @@ mod tests {
                 step_index: 0,
                 success: true,
                 output: "done".into(),
+                final_answer_candidate: Some("done".into()),
                 tool_results: vec![],
                 tools_called: vec![],
             }])),

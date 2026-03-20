@@ -40,7 +40,7 @@ function extractText(ev) {
     ||ev.output_preview||ev.message||(ev.questions?.join(' / '))||ev.sub_goal||'';
 }
 function streamAgent(agentId, onEvent, onError) {
-  const token = localStorage.getItem('narayan_token')||localStorage.getItem('narayan_api_key');
+  const token = localStorage.getItem('narayan_token');
   const BASE  = import.meta.env.VITE_API_URL||'/api';
   let active  = true; const ctrl = new AbortController();
   (async () => {
@@ -310,7 +310,7 @@ function ReviewQueueCard({event, agentId}) {
     setResolving(true); setErr('');
     try {
       const BASE  = import.meta.env.VITE_API_URL||'/api';
-      const token = localStorage.getItem('narayan_token')||localStorage.getItem('narayan_api_key');
+      const token = localStorage.getItem('narayan_token');
       const finalNote = noteOverride ?? (note.trim() || `Resolved (${status}) from UI`);
       await fetch(`${BASE}/reviews/${event.review_id}/resolve`, {
         method:'POST',
@@ -549,7 +549,7 @@ function AgentResultView({agentId, terminalEvent}) {
   }
 
   const isSuccess   = terminalEvent?.type==='goal_complete';
-  const summary     = terminalEvent?.summary||detail?.metadata?.last_reflection||'';
+  const summary     = terminalEvent?.summary||detail?.final_answer||detail?.metadata?.final_answer||detail?.metadata?.last_reflection||'';
   const keyFindings = detail?.metadata?.key_findings||[];
 
   return (
@@ -986,7 +986,23 @@ export default function ChatPage({onNavigate}) {
   },[]);
 
   useEffect(()=>{ if(!selectedId&&agentList.length>0) setSelectedId(agentList[0].id); },[agentList]);
-  useEffect(()=>{ if(!selectedId) return; agents.get(selectedId).then(setSelectedAgent).catch(()=>{}); },[selectedId]);
+  useEffect(()=>{
+    if(!selectedId) return;
+
+    let cancelled = false;
+    const refresh = () => {
+      agents.get(selectedId).then(agent => {
+        if(!cancelled) setSelectedAgent(agent);
+      }).catch(()=>{});
+    };
+
+    refresh();
+    const interval = setInterval(refresh, 2000);
+    return ()=>{
+      cancelled = true;
+      clearInterval(interval);
+    };
+  },[selectedId]);
 
   function onStatusChange(id,status) {
     setAgentStatuses(p=>({...p,[id]:status}));
@@ -1009,7 +1025,9 @@ export default function ChatPage({onNavigate}) {
       setInput(''); setImages([]);
       if(textareaRef.current) textareaRef.current.style.height='auto';
       await loadAgents(true);
+      setSelectedAgent(null);
       setSelectedId(res.agent_id);
+      agents.get(res.agent_id).then(setSelectedAgent).catch(()=>{});
     } catch(e){
       // 402 = step budget exhausted — surface upgrade prompt
       if(e.message.startsWith('PAYMENT_REQUIRED:')) {
@@ -1021,9 +1039,11 @@ export default function ChatPage({onNavigate}) {
     finally{setSending(false);}
   }
 
-  const currentStatus = agentStatuses[selectedId]||selectedAgent?.status;
+  const selectedFromList = selectedId ? agentList.find(agent => agent.id===selectedId) : null;
+  const currentStatus = agentStatuses[selectedId]||selectedAgent?.status||selectedFromList?.status;
   const isTerminal    = TERMINAL.has(currentStatus);
   const terminalEvent = terminalEvents[selectedId];
+  const visibleAgent  = selectedAgent||selectedFromList;
 
   return (
     <div className="flex h-screen bg-bg overflow-hidden">
@@ -1090,16 +1110,16 @@ export default function ChatPage({onNavigate}) {
       <main className="flex flex-col flex-1 min-w-0">
 
         {/* Header */}
-        {selectedAgent ? (
+        {visibleAgent ? (
           <div className="flex items-center justify-between px-6 py-3 border-b border-border bg-bg-card/80 backdrop-blur shrink-0">
             <div className="min-w-0">
-              <p className="text-[13px] font-medium text-tx-1 truncate max-w-lg">{selectedAgent.goal}</p>
+              <p className="text-[13px] font-medium text-tx-1 truncate max-w-lg">{visibleAgent.goal}</p>
               <div className="flex items-center gap-2 mt-0.5 text-[11px] text-tx-4">
-                <span className="font-mono">{selectedAgent.id.slice(0,12)}…</span>
+                <span className="font-mono">{visibleAgent.id.slice(0,12)}…</span>
                 <span>·</span>
-                <span>step {selectedAgent.current_step}</span>
+                <span>step {visibleAgent.current_step}</span>
                 <span>·</span>
-                <span>{timeAgo(selectedAgent.created_at)}</span>
+                <span>{timeAgo(visibleAgent.created_at)}</span>
               </div>
             </div>
             <div className="flex items-center gap-2 shrink-0">

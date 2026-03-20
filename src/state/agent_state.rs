@@ -47,6 +47,8 @@ pub struct AgentState {
     /// read/updated without deserializing the entire metadata JSONB blob.
     #[serde(default)]
     pub plan: Option<Plan>,
+    #[serde(default)]
+    pub final_answer: Option<String>,
     pub metadata: serde_json::Value,
     /// If this is a child agent, the parent's agent_id.
     pub parent_agent_id: Option<String>,
@@ -71,6 +73,7 @@ impl AgentState {
             updated_at: now,
             started_at: None,
             plan: None,
+            final_answer: None,
             metadata: serde_json::Value::Object(Default::default()),
             parent_agent_id: None,
             pending_children: Vec::new(),
@@ -120,6 +123,30 @@ impl AgentState {
 
     pub fn mark_failed(&mut self) {
         self.status = AgentStatus::Failed;
+        self.updated_at = Utc::now();
+    }
+
+    pub fn final_answer(&self) -> Option<&str> {
+        self.final_answer
+            .as_deref()
+            .or_else(|| self.metadata.get("final_answer").and_then(|value| value.as_str()))
+    }
+
+    pub fn set_final_answer(&mut self, answer: impl Into<String>) {
+        let answer = answer.into().trim().to_string();
+        if answer.is_empty() {
+            return;
+        }
+        self.final_answer = Some(answer.clone());
+        self.metadata["final_answer"] = serde_json::Value::String(answer);
+        self.updated_at = Utc::now();
+    }
+
+    pub fn clear_final_answer(&mut self) {
+        self.final_answer = None;
+        if let Some(metadata) = self.metadata.as_object_mut() {
+            metadata.remove("final_answer");
+        }
         self.updated_at = Utc::now();
     }
 

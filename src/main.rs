@@ -61,8 +61,20 @@ use workspace::manager::WorkspaceManager;
 
 const DEFAULT_EMBED_PROVIDER: &str = "stub";
 const DEFAULT_BROWSER_POOL_SIZE: usize = 4;
-const KNOWN_PROVIDERS: [&str; 10] =
-    ["anthropic", "openai", "gemini", "ollama", "openrouter", "copilot", "glm", "novita", "sglang", "compatible"];
+const KNOWN_PROVIDERS: [&str; 12] = [
+    "anthropic",
+    "openai",
+    "groq",
+    "gemini",
+    "nvidia",
+    "ollama",
+    "openrouter",
+    "copilot",
+    "glm",
+    "novita",
+    "sglang",
+    "compatible",
+];
 
 fn read_embed_config() -> (String, String, Option<String>) {
     let provider = std::env::var("NARAYAN_EMBED_PROVIDER").unwrap_or_else(|_| DEFAULT_EMBED_PROVIDER.into());

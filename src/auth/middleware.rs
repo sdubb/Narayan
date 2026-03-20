@@ -8,19 +8,12 @@ use axum::{
     Json,
 };
 
-use crate::{
-    auth::apikey::{extract_prefix, verify_key},
-    tenant::{
-        model::{AuthenticatedTenant, TenantPlan},
-        TenantStore,
-    },
-};
+use crate::tenant::model::{AuthenticatedTenant, TenantPlan};
 
 // ── Shared auth state injected into Axum ──────────────────────────────────
 
 #[derive(Clone)]
 pub struct AuthState {
-    pub tenant_store: Arc<TenantStore>,
     pub jwt_secret: String,
 }
 
@@ -67,13 +60,7 @@ pub async fn auth_middleware(
         }
     };
 
-    // Try API key first (starts with "nar_")
-    let authenticated = if token.starts_with("nar_") {
-        validate_api_key(&token, &auth.tenant_store).await
-    } else {
-        // Try JWT
-        validate_jwt(&token, &auth.jwt_secret)
-    };
+    let authenticated = validate_jwt(&token, &auth.jwt_secret);
 
     match authenticated {
         Ok(tenant) => {
@@ -84,26 +71,14 @@ pub async fn auth_middleware(
     }
 }
 
-async fn validate_api_key(raw: &str, store: &TenantStore) -> Result<AuthenticatedTenant, anyhow::Error> {
-    let prefix = extract_prefix(raw).ok_or_else(|| anyhow::anyhow!("invalid API key format"))?;
-
-    let tenant = store.get_by_key_prefix(prefix).await?.ok_or_else(|| anyhow::anyhow!("invalid API key"))?;
-
-    if !verify_key(raw, &tenant.key_hash) {
-        anyhow::bail!("invalid API key");
-    }
-
-    Ok(AuthenticatedTenant { tenant_id: tenant.id, plan: tenant.plan })
-}
-
 fn validate_jwt(token: &str, secret: &str) -> Result<AuthenticatedTenant, anyhow::Error> {
     let claims = crate::auth::jwt::validate_token(token, secret)?;
 
     let plan = match claims.plan.as_str() {
-        "go"         => TenantPlan::Go,
-        "pro"        => TenantPlan::Pro,
+        "go" => TenantPlan::Go,
+        "pro" => TenantPlan::Pro,
         "enterprise" => TenantPlan::Enterprise,
-        _            => TenantPlan::Free,
+        _ => TenantPlan::Free,
     };
 
     Ok(AuthenticatedTenant { tenant_id: claims.sub, plan })

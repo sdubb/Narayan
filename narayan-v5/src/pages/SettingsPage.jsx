@@ -13,7 +13,9 @@ import clsx from 'clsx';
 const PROVIDERS = [
   { id:'anthropic',  label:'Anthropic',  models:['claude-sonnet-4-20250514','claude-opus-4-20250514','claude-haiku-4-5-20251001'] },
   { id:'openai',     label:'OpenAI',     models:['gpt-4o','gpt-4o-mini','o1','o3-mini'] },
+  { id:'groq',       label:'Groq',       models:['llama-3.3-70b-versatile','llama-3.1-8b-instant','mixtral-8x7b-32768'] },
   { id:'gemini',     label:'Gemini',     models:['gemini-2.0-flash','gemini-2.0-pro','gemini-1.5-pro'] },
+  { id:'nvidia',     label:'NVIDIA',     models:['meta/llama-3.1-70b-instruct','meta/llama-3.1-8b-instruct','nvidia/llama-3.1-nemotron-70b-instruct'] },
   { id:'openrouter', label:'OpenRouter', models:['openai/gpt-4o','anthropic/claude-3-5-sonnet','meta-llama/llama-3.3-70b-instruct'] },
   { id:'ollama',     label:'Ollama',     models:['llama3.3','qwen2.5-coder','deepseek-r1'] },
   { id:'compatible', label:'Compatible', models:['custom-model'] },

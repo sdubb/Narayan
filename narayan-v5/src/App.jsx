@@ -9,9 +9,8 @@ export default function App() {
   const [planError, setPlanError] = useState(''); // step-limit 402 errors surfaced globally
 
   useEffect(() => {
-    const token  = localStorage.getItem('narayan_token');
-    const apiKey = localStorage.getItem('narayan_api_key');
-    if (!token && !apiKey) { setPage('auth'); return; }
+    const token = localStorage.getItem('narayan_token');
+    if (!token) { setPage('auth'); return; }
     health.check()
       .then(() => setPage('chat'))
       .catch(() => setPage('chat'));
@@ -27,9 +26,8 @@ export default function App() {
     return () => window.removeEventListener('narayan:unauthenticated', handleUnauth);
   }, []);
 
-  function onAuth({ token, api_key, tenant_id }) {
+  function onAuth({ token, tenant_id }) {
     if (token)     localStorage.setItem('narayan_token',     token);
-    if (api_key)   localStorage.setItem('narayan_api_key',   api_key);
     if (tenant_id) localStorage.setItem('narayan_tenant_id', tenant_id);
     setPage('chat');
   }

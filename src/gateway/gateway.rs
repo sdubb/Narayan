@@ -17,6 +17,17 @@ use crate::{
     },
 };
 
+fn truncate_for_log(value: &str, max_chars: usize) -> String {
+    let mut out = String::with_capacity(value.len().min(max_chars));
+    for ch in value.chars().take(max_chars) {
+        out.push(ch);
+    }
+    if value.chars().count() > max_chars {
+        out.push_str("...(truncated)");
+    }
+    out
+}
+
 /// A request flowing into the LLM Gateway from an agent.
 #[derive(Debug, Clone)]
 pub struct GatewayRequest {
@@ -228,6 +239,32 @@ impl LlmGateway for NarayanGateway {
             "gateway routing request"
         );
 
+        let message_preview: Vec<String> = request
+            .messages
+            .iter()
+            .enumerate()
+            .map(|(idx, msg)| {
+                format!(
+                    "#{idx} role={:?} content={}",
+                    msg.role,
+                    truncate_for_log(&msg.content, 800)
+                )
+            })
+            .collect();
+        let tool_names: Vec<&str> = request.tools.iter().map(|tool| tool.name.as_str()).collect();
+
+        tracing::info!(
+            "gateway request payload agent_id={} tenant_id={} provider={} complexity={:?} message_count={} tool_count={} messages={:?} tools={:?}",
+            request.agent_id,
+            request.tenant_id,
+            provider_name,
+            request.complexity,
+            request.messages.len(),
+            request.tools.len(),
+            message_preview,
+            tool_names
+        );
+
         // 4. Rate limit (per provider name, shared across tenant)
         self.rate_limiter.acquire(&provider_name).await;
 
@@ -253,6 +290,29 @@ impl LlmGateway for NarayanGateway {
             input_tokens   = response.input_tokens,
             output_tokens  = response.output_tokens,
             "gateway call complete"
+        );
+
+        let tool_summaries: Vec<String> = response
+            .tool_calls
+            .iter()
+            .map(|tool| {
+                format!(
+                    "{} {}",
+                    tool.name,
+                    truncate_for_log(&tool.arguments.to_string(), 600)
+                )
+            })
+            .collect();
+
+        tracing::info!(
+            "gateway response payload agent_id={} tenant_id={} provider={} input_tokens={} output_tokens={} content={:?} tool_calls={:?}",
+            request.agent_id,
+            request.tenant_id,
+            provider_name,
+            response.input_tokens,
+            response.output_tokens,
+            response.content.as_deref().map(|text| truncate_for_log(text, 1200)),
+            tool_summaries
         );
 
         // 7. Cache response

@@ -4,6 +4,17 @@ use crate::tools::{ParameterSchema, Tool, ToolResult};
 
 pub struct FileWriteTool;
 
+fn normalize_text_content(content: &str) -> String {
+    if content.contains('\n') || content.contains('\r') || !content.contains("\\") {
+        return content.to_string();
+    }
+
+    content
+        .replace("\\r\\n", "\r\n")
+        .replace("\\n", "\n")
+        .replace("\\t", "\t")
+}
+
 #[async_trait]
 impl Tool for FileWriteTool {
     fn name(&self) -> &str {
@@ -46,7 +57,7 @@ impl Tool for FileWriteTool {
                 .decode(&content)
                 .map_err(|e| anyhow::anyhow!("base64 decode: {e}"))?
         } else {
-            content.as_bytes().to_vec()
+            normalize_text_content(&content).into_bytes()
         };
 
         if append {
@@ -116,5 +127,11 @@ mod tests {
 
         let content = std::fs::read_to_string(&file_path).unwrap();
         assert_eq!(content, "second content");
+    }
+
+    #[test]
+    fn test_normalize_escaped_newlines() {
+        let content = normalize_text_content("alpha\\nbeta\\ngamma");
+        assert_eq!(content, "alpha\nbeta\ngamma");
     }
 }

@@ -4,6 +4,17 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+fn truncate_for_log(value: &str, max_chars: usize) -> String {
+    let mut out = String::with_capacity(value.len().min(max_chars));
+    for ch in value.chars().take(max_chars) {
+        out.push(ch);
+    }
+    if value.chars().count() > max_chars {
+        out.push_str("...(truncated)");
+    }
+    out
+}
+
 // ── Message types ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -106,6 +117,12 @@ impl Provider for AnthropicProvider {
                 .unwrap_or_default(),
         });
 
+        tracing::info!(
+            "provider request payload provider=anthropic model={} payload={}",
+            self.model,
+            truncate_for_log(&payload.to_string(), 4000)
+        );
+
         let resp = client
             .post("https://api.anthropic.com/v1/messages")
             .header("x-api-key", &self.api_key)
@@ -116,6 +133,12 @@ impl Provider for AnthropicProvider {
             .await?
             .json::<serde_json::Value>()
             .await?;
+
+        tracing::info!(
+            "provider response payload provider=anthropic model={} response={}",
+            self.model,
+            truncate_for_log(&resp.to_string(), 4000)
+        );
 
         let content = resp["content"][0]["text"].as_str().map(String::from);
 
@@ -177,6 +200,14 @@ impl Provider for OpenAiProvider {
             payload["tools"] = serde_json::json!(oai_tools);
         }
 
+        tracing::info!(
+            "provider request payload provider={} model={} base_url={} payload={}",
+            self.name(),
+            self.model,
+            self.base_url,
+            truncate_for_log(&payload.to_string(), 4000)
+        );
+
         let resp = client
             .post(format!("{}/v1/chat/completions", self.base_url))
             .bearer_auth(&self.api_key)
@@ -185,6 +216,14 @@ impl Provider for OpenAiProvider {
             .await?
             .json::<serde_json::Value>()
             .await?;
+
+        tracing::info!(
+            "provider response payload provider={} model={} base_url={} response={}",
+            self.name(),
+            self.model,
+            self.base_url,
+            truncate_for_log(&resp.to_string(), 4000)
+        );
 
         let choice = &resp["choices"][0]["message"];
         let content = choice["content"].as_str().map(String::from);
@@ -284,8 +323,10 @@ pub fn build_provider(name: &str, api_key: String, model: String) -> Option<Arc<
     match name {
         "anthropic" => Some(Arc::new(AnthropicProvider::new(api_key, model))),
         "openai" => Some(Arc::new(OpenAiProvider::new(api_key, model))),
+        "groq" => Some(Arc::new(OpenAiProvider::new(api_key, model).with_base_url("https://api.groq.com/openai".into()))),
         "ollama" => Some(Arc::new(OllamaProvider::new(api_key, model))),
         "gemini" => Some(Arc::new(GeminiProviderAdapter::new(api_key, model))),
+        "nvidia" => Some(Arc::new(OpenAiProvider::new(api_key, model).with_base_url("https://integrate.api.nvidia.com".into()))),
         "openrouter" => Some(Arc::new(OpenRouterProviderAdapter::new(api_key, model))),
         "copilot" => Some(Arc::new(CopilotProviderAdapter::new(api_key, model))),
         "glm" => Some(Arc::new(GlmProviderAdapter::new(api_key, model))),

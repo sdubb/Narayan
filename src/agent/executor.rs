@@ -9,6 +9,7 @@
 //! All three checks are opt-in via AgentServices — if a service is None the step
 //! is skipped with zero overhead (no Arc dereference cost either).
 
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -17,7 +18,7 @@ use async_trait::async_trait;
 use crate::{
     agent::{
         planner::{Plan, PlannedStep},
-        prompts::{ExecutorPrompt, JobType, StepHistory},
+        prompts::{is_direct_response_goal, ExecutorPrompt, JobType, StepHistory},
     },
     events::{AgentEvent, EventBus},
     gateway::{GatewayRequest, LlmGateway, TaskComplexity},
@@ -26,20 +27,194 @@ use crate::{
         rules::{PolicyAction, PolicyRuleSet},
         PolicyDecision,
     },
-    providers::Message,
+    providers::{Message, ToolCall},
     segments::AgentServices,
     state::AgentState,
     tenant::TenantStore,
     tools::{selector::select_tools_for_step, ToolRegistry, ToolResult},
 };
 
+fn truncate_for_log(value: &str, max_chars: usize) -> String {
+    let mut out = String::with_capacity(value.len().min(max_chars));
+    for ch in value.chars().take(max_chars) {
+        out.push(ch);
+    }
+    if value.chars().count() > max_chars {
+        out.push_str("...(truncated)");
+    }
+    out
+}
+
 #[derive(Debug)]
 pub struct StepResult {
     pub step_index: usize,
     pub success: bool,
     pub output: String,
+    pub final_answer_candidate: Option<String>,
     pub tool_results: Vec<ToolResult>,
     pub tools_called: Vec<String>,
+}
+
+fn sanitize_final_answer_candidate(output: &str) -> Option<String> {
+    let trimmed = output.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("no output") || trimmed.starts_with("STEP FAILED:") {
+        return None;
+    }
+
+    let answer = trimmed
+        .strip_suffix("STEP COMPLETE")
+        .map(str::trim)
+        .unwrap_or(trimmed)
+        .trim();
+
+    if answer.is_empty() {
+        None
+    } else {
+        Some(answer.to_string())
+    }
+}
+
+fn merge_tool_arguments(planned: &serde_json::Value, actual: &serde_json::Value) -> serde_json::Value {
+    match (planned, actual) {
+        (serde_json::Value::Object(planned_map), serde_json::Value::Object(actual_map)) => {
+            let mut merged = planned_map.clone();
+            for (key, value) in actual_map {
+                let merged_value = match (planned_map.get(key), value) {
+                    (Some(planned_child), serde_json::Value::Object(_)) => merge_tool_arguments(planned_child, value),
+                    _ => value.clone(),
+                };
+                if !merged_value.is_null() {
+                    merged.insert(key.clone(), merged_value);
+                }
+            }
+            serde_json::Value::Object(merged)
+        }
+        (_, serde_json::Value::Null) => planned.clone(),
+        (_, actual_value) => actual_value.clone(),
+    }
+}
+
+fn normalize_tool_call(mut tool_call: ToolCall) -> ToolCall {
+    if tool_call.name == "file_write" {
+        if let Some(path) = tool_call.arguments.get("path").and_then(|value| value.as_str()) {
+            if path.to_lowercase().ends_with(".pdf") {
+                let path = path.to_string();
+                let title = Path::new(&path)
+                    .file_stem()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("Document")
+                    .to_string();
+                let content = tool_call
+                    .arguments
+                    .get("content")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                tool_call.name = "pdf_create".into();
+                tool_call.arguments = serde_json::json!({
+                    "path": path,
+                    "title": title,
+                    "content": content,
+                });
+            }
+        }
+    }
+    tool_call
+}
+
+fn resolve_workspace_relative_path(path: &str, workspace_path: &str) -> String {
+    let path_buf = Path::new(path);
+    if path_buf.is_absolute() || path.starts_with("./workspace/") || path.starts_with("workspace/") {
+        path.to_string()
+    } else {
+        Path::new(workspace_path).join(path_buf).display().to_string()
+    }
+}
+
+fn normalize_tool_args_for_workspace(tool_name: &str, args: &mut serde_json::Value, workspace_path: &str) {
+    let Some(object) = args.as_object_mut() else {
+        return;
+    };
+
+    let absolutize_key = |object: &mut serde_json::Map<String, serde_json::Value>, key: &str| {
+        if let Some(path) = object.get(key).and_then(|value| value.as_str()) {
+            object.insert(
+                key.to_string(),
+                serde_json::Value::String(resolve_workspace_relative_path(path, workspace_path)),
+            );
+        }
+    };
+
+    match tool_name {
+        "file_read" | "file_write" | "file_edit" | "pdf_read" | "decompress" => {
+            absolutize_key(object, "path");
+        }
+        "pdf_create" => {
+            if let Some(path) = object.get("path").and_then(|value| value.as_str()) {
+                object.insert(
+                    "path".into(),
+                    serde_json::Value::String(resolve_workspace_relative_path(path, workspace_path)),
+                );
+            } else if let Some(filename) = object.get("filename").and_then(|value| value.as_str()) {
+                object.insert(
+                    "path".into(),
+                    serde_json::Value::String(resolve_workspace_relative_path(filename, workspace_path)),
+                );
+            }
+        }
+        "compress" => {
+            absolutize_key(object, "output");
+            if let Some(path) = object.get("input").and_then(|value| value.as_str()) {
+                let resolved = resolve_workspace_relative_path(path, workspace_path);
+                object.insert("input".into(), serde_json::Value::String(resolved.clone()));
+                if !object.contains_key("paths") {
+                    object.insert("paths".into(), serde_json::json!([resolved]));
+                }
+            }
+            if let Some(paths) = object.get_mut("paths").and_then(|value| value.as_array_mut()) {
+                for value in paths {
+                    if let Some(path) = value.as_str() {
+                        *value = serde_json::Value::String(resolve_workspace_relative_path(path, workspace_path));
+                    }
+                }
+            }
+        }
+        "code_run" => {
+            let workspace = object
+                .get("workspace")
+                .and_then(|value| value.as_str())
+                .map(|path| resolve_workspace_relative_path(path, workspace_path))
+                .unwrap_or_else(|| workspace_path.to_string());
+            object.insert("workspace".into(), serde_json::Value::String(workspace));
+        }
+        _ => {}
+    }
+}
+
+fn make_planned_tool_call(step: &PlannedStep) -> Option<ToolCall> {
+    Some(ToolCall {
+        id: format!("planned-step-{}", step.index),
+        name: step.tool.clone()?,
+        arguments: step.tool_args.clone().unwrap_or_else(|| serde_json::json!({})),
+    })
+}
+
+fn is_answer_only_step(step: &PlannedStep) -> bool {
+    if step.tool.is_some() {
+        return false;
+    }
+
+    let description = step.description.to_lowercase();
+    let answer_markers = [
+        "reply",
+        "answer",
+        "respond",
+        "return",
+        "tell the user",
+        "provide the user",
+    ];
+
+    answer_markers.iter().any(|marker| description.contains(marker))
 }
 
 #[async_trait]
@@ -95,6 +270,44 @@ impl LlmExecutor {
             PolicyRuleSet::new(tenant_id.into())
         }
     }
+
+    async fn synthesize_final_answer(
+        &self,
+        state: &AgentState,
+        step: &PlannedStep,
+        history: &StepHistory,
+        tool_results: &[ToolResult],
+    ) -> Result<Option<String>> {
+        let history_text = history.summarise();
+        let system = ExecutorPrompt::synthesis_system().to_string();
+        let user = ExecutorPrompt::synthesis_user(state, step, &history_text, tool_results);
+
+        tracing::info!(
+            agent_id = %state.id,
+            step_index = step.index,
+            system_prompt = %truncate_for_log(&system, 1200),
+            user_prompt = %truncate_for_log(&user, 1200),
+            "executor synthesis request prepared"
+        );
+
+        let request = GatewayRequest::new(
+            state.id.clone(),
+            state.tenant_id.clone(),
+            TaskComplexity::Simple,
+            vec![Message::system(system), Message::user(user)],
+        )
+        .no_cache();
+
+        let resp = self.gateway.chat(request).await?;
+        tracing::info!(
+            agent_id = %state.id,
+            step_index = step.index,
+            response_content = ?resp.content.as_deref().map(|text| truncate_for_log(text, 1200)),
+            "executor synthesis response received"
+        );
+
+        Ok(resp.content.and_then(|content| sanitize_final_answer_candidate(&content)))
+    }
 }
 
 #[async_trait]
@@ -107,8 +320,13 @@ impl Executor for LlmExecutor {
         history: &StepHistory,
     ) -> Result<StepResult> {
         let job_type = JobType::detect(&state.goal);
-
-        let tool_specs = select_tools_for_step(&self.tools, step, &job_type, &[]);
+        let direct_response_mode = is_direct_response_goal(&state.goal) && plan.steps.len() == 1 && step.tool.is_none();
+        let answer_only_step = !direct_response_mode && is_answer_only_step(step);
+        let tool_specs = if direct_response_mode || answer_only_step {
+            Vec::new()
+        } else {
+            select_tools_for_step(&self.tools, step, &job_type, &[])
+        };
 
         tracing::debug!(
             agent_id    = %state.id,
@@ -117,11 +335,45 @@ impl Executor for LlmExecutor {
             planner_hint = ?step.tool,
             "executor: selected tools for step"
         );
+        tracing::info!(
+            agent_id = %state.id,
+            step_index = step.index,
+            step_description = %step.description,
+            planner_hint = ?step.tool,
+            tools = ?tool_specs.iter().map(|tool| tool.name.clone()).collect::<Vec<_>>(),
+            "executor request prepared"
+        );
 
         let history_text = history.summarise();
-        let system      = ExecutorPrompt::system(state, plan);
-        let user        = ExecutorPrompt::user_step(step, &history_text, &[]);
-        let complexity  = TaskComplexity::infer(&step.description);
+        let (system, user, complexity) = if direct_response_mode {
+            (
+                ExecutorPrompt::direct_response_system().to_string(),
+                ExecutorPrompt::direct_response_user(state, &history_text),
+                TaskComplexity::Simple,
+            )
+        } else if answer_only_step {
+            (
+                ExecutorPrompt::synthesis_system().to_string(),
+                ExecutorPrompt::synthesis_user(state, step, &history_text, &[]),
+                TaskComplexity::Simple,
+            )
+        } else {
+            (
+                ExecutorPrompt::system(state, plan),
+                ExecutorPrompt::user_step(state, step, &history_text, &[]),
+                TaskComplexity::infer(&step.description),
+            )
+        };
+        tracing::info!(
+            agent_id = %state.id,
+            step_index = step.index,
+            complexity = ?complexity,
+            direct_response_mode,
+            answer_only_step,
+            system_prompt = %truncate_for_log(&system, 1200),
+            user_prompt = %truncate_for_log(&user, 1200),
+            "executor prompts prepared"
+        );
 
         let request = GatewayRequest::new(
             state.id.clone(),
@@ -133,9 +385,30 @@ impl Executor for LlmExecutor {
         .no_cache();
 
         let resp = self.gateway.chat(request).await?;
+        tracing::info!(
+            agent_id = %state.id,
+            step_index = step.index,
+            response_content = ?resp.content.as_deref().map(|text| truncate_for_log(text, 1200)),
+            tool_calls = ?resp.tool_calls.iter().map(|tool| format!("{} {}", tool.name, truncate_for_log(&tool.arguments.to_string(), 400))).collect::<Vec<_>>(),
+            "executor response received"
+        );
 
         let mut tool_results = Vec::new();
         let mut tools_called = Vec::new();
+        let mut tool_calls = resp.tool_calls.clone();
+
+        if !direct_response_mode && !answer_only_step && tool_calls.is_empty() {
+            if let Some(planned_call) = make_planned_tool_call(step) {
+                tracing::info!(
+                    agent_id = %state.id,
+                    step_index = step.index,
+                    tool = %planned_call.name,
+                    args = %truncate_for_log(&planned_call.arguments.to_string(), 400),
+                    "executor falling back to planner-provided tool args"
+                );
+                tool_calls.push(planned_call);
+            }
+        }
 
         // Infer plan tier for policy context (falls back to "free" if not set)
         let plan_tier = state
@@ -148,8 +421,31 @@ impl Executor for LlmExecutor {
         // Merged policy ruleset — loaded from DB per-tenant (falls back to empty if no store)
         let tenant_rules = self.tenant_rules(&state.tenant_id).await;
 
-        for tool_call in &resp.tool_calls {
+        for raw_tool_call in &tool_calls {
+            let mut tool_call = normalize_tool_call(raw_tool_call.clone());
+            if step.tool.as_deref() == Some(tool_call.name.as_str()) {
+                if let Some(planned_args) = &step.tool_args {
+                    tool_call.arguments = merge_tool_arguments(planned_args, &tool_call.arguments);
+                }
+            }
+            normalize_tool_args_for_workspace(&tool_call.name, &mut tool_call.arguments, &state.workspace_path);
+
             tools_called.push(tool_call.name.clone());
+            if let Some(ref bus) = self.event_bus {
+                bus.publish(AgentEvent::ToolCalled {
+                    agent_id: state.id.clone(),
+                    step_index: step.index,
+                    tool_name: tool_call.name.clone(),
+                    args_preview: truncate_for_log(&tool_call.arguments.to_string(), 200),
+                });
+            }
+            tracing::info!(
+                agent_id = %state.id,
+                step_index = step.index,
+                tool = %tool_call.name,
+                args = %truncate_for_log(&tool_call.arguments.to_string(), 400),
+                "executor invoking tool"
+            );
 
             // ── 1. PII redaction — scrub args before they leave the process ──────
             let clean_args = if let Some(ref pii) = self.services.pii {
@@ -310,10 +606,27 @@ impl Executor for LlmExecutor {
         }
 
         let all_ok  = tool_results.iter().all(|r| r.success);
-        let output  = resp.content.unwrap_or_else(|| "no output".into());
+        let mut output = resp.content.unwrap_or_else(|| "no output".into());
+        let is_final_step = plan.is_complete(step.index + 1);
+        let mut final_answer_candidate = sanitize_final_answer_candidate(&output);
+
+        if !direct_response_mode && is_final_step && (!tool_results.is_empty() || final_answer_candidate.is_none()) {
+            if let Some(synthesized) = self.synthesize_final_answer(state, step, history, &tool_results).await? {
+                output = synthesized.clone();
+                final_answer_candidate = Some(synthesized);
+            }
+        }
+
         let success = (tool_results.is_empty() || all_ok) && !output.contains("STEP FAILED");
 
-        Ok(StepResult { step_index: step.index, success, output, tool_results, tools_called })
+        Ok(StepResult {
+            step_index: step.index,
+            success,
+            output,
+            final_answer_candidate,
+            tool_results,
+            tools_called,
+        })
     }
 }
 

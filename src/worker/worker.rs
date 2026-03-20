@@ -89,11 +89,17 @@ impl Worker {
             .ok_or_else(|| anyhow::anyhow!("agent {} not found", task.agent_id))?;
 
         let mut plan: Option<Plan> = state.plan.take();
-        let mut history = StepHistory::new();
+        let mut history: StepHistory = state
+            .metadata
+            .get("step_history")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok())
+            .unwrap_or_default();
 
         let outcome = self.agent_loop.run_step(&mut state, &mut plan, &mut history).await?;
 
         state.plan = plan;
+        state.metadata["step_history"] = serde_json::to_value(&history).unwrap_or_default();
         self.store.upsert_agent(&state).await?;
         self.metrics.step_completed_for_tenant(&state.tenant_id);
 

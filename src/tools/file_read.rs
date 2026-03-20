@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use crate::tools::{ParameterSchema, Tool, ToolResult};
 
 const MAX_SIZE: u64 = 10 * 1024 * 1024; // 10 MiB
+const MAX_DIRECTORY_ENTRIES: usize = 50;
 
 pub struct FileReadTool;
 
@@ -32,6 +33,41 @@ impl Tool for FileReadTool {
             Ok(m) => m,
             Err(e) => return Ok(ToolResult::err(format!("cannot stat '{}': {}", path.display(), e))),
         };
+        if meta.is_dir() {
+            let mut entries = tokio::fs::read_dir(&path)
+                .await
+                .map_err(|e| anyhow::anyhow!("read_dir '{}': {}", path.display(), e))?;
+            let mut children = Vec::new();
+            let mut total_entries = 0usize;
+
+            while let Some(entry) = entries
+                .next_entry()
+                .await
+                .map_err(|e| anyhow::anyhow!("read_dir entry '{}': {}", path.display(), e))?
+            {
+                total_entries += 1;
+                if children.len() >= MAX_DIRECTORY_ENTRIES {
+                    continue;
+                }
+
+                let child_path = entry.path();
+                let child_meta = entry.metadata().await.ok();
+                children.push(serde_json::json!({
+                    "path": child_path.display().to_string(),
+                    "name": entry.file_name().to_string_lossy().to_string(),
+                    "is_dir": child_meta.as_ref().map(|m| m.is_dir()).unwrap_or(false),
+                    "size_bytes": child_meta.as_ref().map(|m| m.len()),
+                }));
+            }
+
+            return Ok(ToolResult::ok(serde_json::json!({
+                "path": path.display().to_string(),
+                "is_directory": true,
+                "entry_count": total_entries,
+                "entries": children,
+                "hint": "This path is a directory. Choose a concrete file path before using file_read again, or use glob_search/content_search to locate files inside it."
+            })));
+        }
         if meta.len() > MAX_SIZE {
             return Ok(ToolResult::err(format!("file too large ({} bytes, max 10 MiB)", meta.len())));
         }
@@ -104,5 +140,25 @@ mod tests {
             .await
             .unwrap();
         assert!(!result.success, "expected error for nonexistent file");
+    }
+
+    #[tokio::test]
+    async fn test_read_directory_returns_listing_and_hint() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("notes.txt"), "hello").unwrap();
+        std::fs::create_dir(tmp.path().join("nested")).unwrap();
+
+        let tool = FileReadTool;
+        let result = tool
+            .execute(serde_json::json!({
+                "path": tmp.path().display().to_string()
+            }))
+            .await
+            .unwrap();
+
+        assert!(result.success, "directory reads should guide recovery instead of hard failing");
+        assert_eq!(result.output["is_directory"].as_bool(), Some(true));
+        assert!(result.output["entries"].as_array().unwrap().len() >= 2);
+        assert!(result.output["hint"].as_str().unwrap().contains("glob_search"));
     }
 }

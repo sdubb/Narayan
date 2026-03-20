@@ -5,11 +5,22 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    agent::prompts::{JobType, PlannerPrompt},
+    agent::prompts::{is_direct_response_goal, JobType, PlannerPrompt},
     gateway::{GatewayRequest, LlmGateway, TaskComplexity},
     providers::Message,
     state::AgentState,
 };
+
+fn truncate_for_log(value: &str, max_chars: usize) -> String {
+    let mut out = String::with_capacity(value.len().min(max_chars));
+    for ch in value.chars().take(max_chars) {
+        out.push(ch);
+    }
+    if value.chars().count() > max_chars {
+        out.push_str("...(truncated)");
+    }
+    out
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlannedStep {
@@ -59,6 +70,26 @@ impl LlmPlanner {
 #[async_trait]
 impl Planner for LlmPlanner {
     async fn create_plan(&self, state: &AgentState, context: &str, available_tools: &[&str]) -> Result<Plan> {
+        if is_direct_response_goal(&state.goal) {
+            tracing::info!(
+                agent_id = %state.id,
+                goal = %state.goal,
+                "planner selected direct-response fast path"
+            );
+            return Ok(Plan {
+                goal: state.goal.clone(),
+                job_type: Some("general".into()),
+                rationale: "Simple conversational request; answer the user directly without tools.".into(),
+                steps: vec![PlannedStep {
+                    index: 0,
+                    description: "Answer the user's message directly in chat.".into(),
+                    tool: None,
+                    tool_args: None,
+                    success_criteria: "User receives a complete direct answer.".into(),
+                }],
+            });
+        }
+
         let job_type = JobType::detect(&state.goal);
 
         let system = PlannerPrompt::system(&job_type);
@@ -70,6 +101,14 @@ impl Planner for LlmPlanner {
             job_type = job_type.label(),
             "creating plan"
         );
+        tracing::info!(
+            agent_id = %state.id,
+            goal = %state.goal,
+            job_type = job_type.label(),
+            context = %truncate_for_log(context, 400),
+            manifest = %truncate_for_log(&manifest, 1200),
+            "planner request prepared"
+        );
 
         let request = GatewayRequest::new(
             state.id.clone(),
@@ -80,12 +119,18 @@ impl Planner for LlmPlanner {
 
         let resp = self.gateway.chat(request).await?;
         let raw = resp.content.unwrap_or_default();
+        tracing::info!(
+            agent_id = %state.id,
+            response = %truncate_for_log(&raw, 1200),
+            "planner response received"
+        );
 
         // Strip markdown code fences if model wrapped the JSON
         let cleaned = raw.trim().trim_start_matches("```json").trim_start_matches("```").trim_end_matches("```").trim();
 
         match serde_json::from_str::<Plan>(cleaned) {
-            Ok(plan) => {
+            Ok(mut plan) => {
+                normalize_plan(&mut plan);
                 tracing::info!(
                     agent_id = %state.id,
                     steps    = plan.steps.len(),
@@ -134,7 +179,8 @@ impl Planner for LlmPlanner {
         let cleaned = raw.trim().trim_start_matches("```json").trim_start_matches("```").trim_end_matches("```").trim();
 
         match serde_json::from_str::<Plan>(cleaned) {
-            Ok(revised) => {
+            Ok(mut revised) => {
+                normalize_plan(&mut revised);
                 tracing::info!(
                     agent_id  = %state.id,
                     new_steps = revised.steps.len(),
@@ -146,6 +192,15 @@ impl Planner for LlmPlanner {
                 tracing::warn!(agent_id = %state.id, "plan revision failed to parse, keeping original");
                 Ok(plan.clone())
             }
+        }
+    }
+}
+
+fn normalize_plan(plan: &mut Plan) {
+    for step in &mut plan.steps {
+        let normalized = step.tool.as_deref().map(str::trim).map(str::to_lowercase);
+        if matches!(normalized.as_deref(), Some("") | Some("null") | Some("none")) {
+            step.tool = None;
         }
     }
 }

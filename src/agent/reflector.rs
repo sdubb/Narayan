@@ -171,7 +171,14 @@ mod tests {
     }
 
     fn make_result(success: bool, output: &str) -> StepResult {
-        StepResult { step_index: 0, success, output: output.into(), tool_results: vec![], tools_called: vec![] }
+        StepResult {
+            step_index: 0,
+            success,
+            output: output.into(),
+            final_answer_candidate: Some(output.into()),
+            tool_results: vec![],
+            tools_called: vec![],
+        }
     }
 
     #[tokio::test]

@@ -1,0 +1,1 @@
+def fibonacci(n):\n    fib_sequence = [0, 1]\n    while len(fib_sequence) < n:\n        fib_sequence.append(fib_sequence[-1] + fib_sequence[-2])\n    return fib_sequence\n\n# Calculate the first 10 Fibonacci numbers\nresult = fibonacci(10)\n\n# Save the result to fib.json\nimport json\nwith open(

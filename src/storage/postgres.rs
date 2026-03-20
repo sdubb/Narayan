@@ -29,9 +29,7 @@ impl PostgresStore {
 
     pub async fn migrate(&self) -> Result<()> {
         // pgvector extension — optional, warn if unavailable
-        let _ = sqlx::query("CREATE EXTENSION IF NOT EXISTS vector")
-            .execute(&self.pool)
-            .await;
+        let _ = sqlx::query("CREATE EXTENSION IF NOT EXISTS vector").execute(&self.pool).await;
 
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS agents (
@@ -48,6 +46,7 @@ impl PostgresStore {
                 updated_at       TIMESTAMPTZ NOT NULL,
                 started_at       TIMESTAMPTZ,
                 plan             JSONB,
+                final_answer     TEXT,
                 metadata         JSONB NOT NULL DEFAULT '{}',
                 parent_agent_id  TEXT,
                 pending_children JSONB NOT NULL DEFAULT '[]'
@@ -55,15 +54,26 @@ impl PostgresStore {
         )
         .execute(&self.pool)
         .await?;
+        sqlx::query("ALTER TABLE agents ADD COLUMN IF NOT EXISTS final_answer TEXT")
+            .execute(&self.pool)
+            .await?;
 
-        sqlx::query("CREATE INDEX IF NOT EXISTS agents_next_run ON agents (next_run) WHERE status IN ('pending', 'waiting')")
-            .execute(&self.pool).await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS agents_next_run ON agents (next_run) WHERE status IN ('pending', 'waiting')",
+        )
+        .execute(&self.pool)
+        .await?;
         sqlx::query("CREATE INDEX IF NOT EXISTS agents_tenant ON agents (tenant_id, status)")
-            .execute(&self.pool).await?;
-        sqlx::query("CREATE INDEX IF NOT EXISTS agents_parent ON agents (parent_agent_id) WHERE parent_agent_id IS NOT NULL")
-            .execute(&self.pool).await?;
+            .execute(&self.pool)
+            .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS agents_parent ON agents (parent_agent_id) WHERE parent_agent_id IS NOT NULL",
+        )
+        .execute(&self.pool)
+        .await?;
         sqlx::query("CREATE INDEX IF NOT EXISTS agents_delegating ON agents (status) WHERE status = 'delegating'")
-            .execute(&self.pool).await?;
+            .execute(&self.pool)
+            .await?;
 
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS goals (
@@ -78,8 +88,7 @@ impl PostgresStore {
         )
         .execute(&self.pool)
         .await?;
-        sqlx::query("CREATE INDEX IF NOT EXISTS goals_tenant ON goals (tenant_id)")
-            .execute(&self.pool).await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS goals_tenant ON goals (tenant_id)").execute(&self.pool).await?;
 
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS workspaces (
@@ -96,9 +105,30 @@ impl PostgresStore {
         .execute(&self.pool)
         .await?;
         sqlx::query("CREATE INDEX IF NOT EXISTS workspaces_tenant ON workspaces (tenant_id)")
-            .execute(&self.pool).await?;
+            .execute(&self.pool)
+            .await?;
         sqlx::query("CREATE INDEX IF NOT EXISTS workspaces_created ON workspaces (created_at) WHERE archived = FALSE")
-            .execute(&self.pool).await?;
+            .execute(&self.pool)
+            .await?;
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS costs (
+                id                TEXT PRIMARY KEY,
+                tenant_id         TEXT NOT NULL,
+                agent_id          TEXT,
+                model             TEXT,
+                input_tokens      BIGINT NOT NULL DEFAULT 0,
+                output_tokens     BIGINT NOT NULL DEFAULT 0,
+                total_cost_usd    DOUBLE PRECISION NOT NULL DEFAULT 0,
+                period_start      TIMESTAMPTZ NOT NULL DEFAULT date_trunc('month', NOW()),
+                created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS costs_tenant_period ON costs (tenant_id, period_start)")
+            .execute(&self.pool)
+            .await?;
 
         Ok(())
     }
@@ -111,8 +141,8 @@ impl PostgresStore {
             INSERT INTO agents (
                 id, tenant_id, goal, status, current_task, current_step,
                 workspace_path, memory_ref, next_run, created_at, updated_at,
-                started_at, plan, metadata, parent_agent_id, pending_children
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+                started_at, plan, final_answer, metadata, parent_agent_id, pending_children
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
             ON CONFLICT (id) DO UPDATE SET
                 goal             = EXCLUDED.goal,
                 status           = EXCLUDED.status,
@@ -124,6 +154,7 @@ impl PostgresStore {
                 updated_at       = EXCLUDED.updated_at,
                 started_at       = COALESCE(agents.started_at, EXCLUDED.started_at),
                 plan             = EXCLUDED.plan,
+                final_answer     = EXCLUDED.final_answer,
                 metadata         = EXCLUDED.metadata,
                 pending_children = EXCLUDED.pending_children
         "#,
@@ -141,6 +172,7 @@ impl PostgresStore {
         .bind(state.updated_at)
         .bind(state.started_at)
         .bind(state.plan.as_ref().and_then(|p| serde_json::to_value(p).ok()))
+        .bind(state.final_answer.as_deref())
         .bind(&state.metadata)
         .bind(&state.parent_agent_id)
         .bind(serde_json::json!(state.pending_children))
@@ -364,11 +396,14 @@ fn row_to_agent_state(row: &PgRow) -> AgentState {
         .and_then(|v| serde_json::from_value(v).ok())
         .unwrap_or_default();
 
-    let plan = row
-        .try_get::<Option<serde_json::Value>, _>("plan")
+    let plan =
+        row.try_get::<Option<serde_json::Value>, _>("plan").ok().flatten().and_then(|v| serde_json::from_value(v).ok());
+    let metadata: serde_json::Value = row.get("metadata");
+    let final_answer = row
+        .try_get::<Option<String>, _>("final_answer")
         .ok()
         .flatten()
-        .and_then(|v| serde_json::from_value(v).ok());
+        .or_else(|| metadata.get("final_answer").and_then(|value| value.as_str()).map(str::to_string));
 
     AgentState {
         id: row.get("id"),
@@ -384,7 +419,8 @@ fn row_to_agent_state(row: &PgRow) -> AgentState {
         updated_at: row.get::<DateTime<Utc>, _>("updated_at"),
         started_at: row.try_get::<Option<DateTime<Utc>>, _>("started_at").ok().flatten(),
         plan,
-        metadata: row.get("metadata"),
+        final_answer,
+        metadata,
         parent_agent_id: row.get("parent_agent_id"),
         pending_children,
     }

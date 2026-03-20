@@ -7,6 +7,14 @@ use crate::tools::{ParameterSchema, Tool, ToolResult};
 pub struct CompressTool;
 pub struct DecompressTool;
 
+fn parse_paths(value: &serde_json::Value) -> Vec<String> {
+    if let Some(paths) = value.as_array() {
+        return paths.iter().filter_map(|v| v.as_str().map(String::from)).collect();
+    }
+
+    value.as_str().map(|path| vec![path.to_string()]).unwrap_or_default()
+}
+
 #[async_trait]
 impl Tool for CompressTool {
     fn name(&self) -> &str {
@@ -32,8 +40,7 @@ impl Tool for CompressTool {
             Some(o) => o.to_string(),
             None => return Ok(ToolResult::err("'output' required")),
         };
-        let paths: Vec<String> =
-            args["paths"].as_array().unwrap_or(&vec![]).iter().filter_map(|v| v.as_str().map(String::from)).collect();
+        let paths = parse_paths(&args["paths"]);
         if paths.is_empty() {
             return Ok(ToolResult::err("'paths' must not be empty"));
         }
@@ -255,5 +262,11 @@ mod tests {
             .await
             .unwrap();
         assert!(!result.success, "expected error for empty paths");
+    }
+
+    #[test]
+    fn test_parse_paths_accepts_single_string() {
+        let paths = parse_paths(&serde_json::json!("payload.txt"));
+        assert_eq!(paths, vec!["payload.txt"]);
     }
 }

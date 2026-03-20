@@ -14,6 +14,17 @@ use crate::{
     state::AgentState,
 };
 
+fn truncate_for_log(value: &str, max_chars: usize) -> String {
+    let mut out = String::with_capacity(value.len().min(max_chars));
+    for ch in value.chars().take(max_chars) {
+        out.push(ch);
+    }
+    if value.chars().count() > max_chars {
+        out.push_str("...(truncated)");
+    }
+    out
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EvalVerdict {
     Continue,
@@ -92,9 +103,27 @@ impl Evaluator for LlmEvaluator {
     ) -> Result<EvalReflection> {
         // ── Fast-path: final step succeeded — no LLM call needed ─────────────
         if plan.is_complete(state.current_step as usize + 1) && result.success {
+            let summary = result
+                .final_answer_candidate
+                .clone()
+                .or_else(|| {
+                    let trimmed = result.output.trim();
+                    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("no output") {
+                        None
+                    } else {
+                        Some(trimmed.to_string())
+                    }
+                })
+                .unwrap_or_else(|| "goal complete".into());
+            tracing::info!(
+                agent_id = %state.id,
+                step_index = step.index,
+                output = %truncate_for_log(&result.output, 400),
+                "evaluator fast-path goal complete"
+            );
             return Ok(EvalReflection {
                 verdict: EvalVerdict::GoalComplete,
-                summary: "goal complete".into(),
+                summary,
                 key_findings: vec![],
                 should_revise: false,
                 revision_feedback: String::new(),
@@ -103,6 +132,12 @@ impl Evaluator for LlmEvaluator {
 
         // ── Fast-path: unambiguous success mid-plan ───────────────────────────
         if result.success && result.tool_results.iter().all(|r| r.success) && !result.output.contains("STEP FAILED") {
+            tracing::info!(
+                agent_id = %state.id,
+                step_index = step.index,
+                output = %truncate_for_log(&result.output, 400),
+                "evaluator fast-path continue"
+            );
             return Ok(EvalReflection {
                 verdict: EvalVerdict::Continue,
                 // Lightweight summary without an LLM call — good enough for
@@ -144,6 +179,12 @@ impl Evaluator for LlmEvaluator {
 
         let resp = self.gateway.chat(request).await?;
         let raw = resp.content.unwrap_or_default();
+        tracing::info!(
+            agent_id = %state.id,
+            step_index = step.index,
+            raw_response = %truncate_for_log(&raw, 1200),
+            "evaluator response received"
+        );
         let cleaned = raw.trim().trim_start_matches("```json").trim_start_matches("```").trim_end_matches("```").trim();
 
         #[derive(serde::Deserialize)]
@@ -258,6 +299,7 @@ mod tests {
             step_index: 0,
             success: true,
             output: "STEP COMPLETE".into(),
+            final_answer_candidate: Some("STEP COMPLETE".into()),
             tool_results: vec![ToolResult::ok(serde_json::json!({"ok": true}))],
             tools_called: vec!["shell".into()],
         }
@@ -268,6 +310,7 @@ mod tests {
             step_index: 0,
             success: false,
             output: "STEP FAILED: timeout".into(),
+            final_answer_candidate: None,
             tool_results: vec![ToolResult::err("timeout")],
             tools_called: vec!["shell".into()],
         }
