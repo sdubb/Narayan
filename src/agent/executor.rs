@@ -18,7 +18,7 @@ use async_trait::async_trait;
 use crate::{
     agent::{
         planner::{Plan, PlannedStep},
-        prompts::{is_direct_response_goal, ExecutorPrompt, JobType, StepHistory},
+        prompts::{build_conversation_history, is_direct_response_goal, ExecutorPrompt, JobType, StepHistory},
     },
     events::{AgentEvent, EventBus},
     gateway::{GatewayRequest, LlmGateway, TaskComplexity},
@@ -30,6 +30,7 @@ use crate::{
     providers::{Message, ToolCall},
     segments::AgentServices,
     state::AgentState,
+    storage::PostgresStore,
     tenant::TenantStore,
     tools::{selector::select_tools_for_step, ToolRegistry, ToolResult},
 };
@@ -234,6 +235,7 @@ pub struct LlmExecutor {
     services:     Arc<AgentServices>,
     tenant_store: Option<Arc<TenantStore>>,
     event_bus:    Option<Arc<EventBus>>,
+    store:        Option<Arc<PostgresStore>>,
 }
 
 impl LlmExecutor {
@@ -242,7 +244,7 @@ impl LlmExecutor {
         tools:        Arc<ToolRegistry>,
         services:     Arc<AgentServices>,
     ) -> Self {
-        Self { gateway, tools, services, tenant_store: None, event_bus: None }
+        Self { gateway, tools, services, tenant_store: None, event_bus: None, store: None }
     }
 
     /// Attach a TenantStore so policy rules are loaded from DB per-tenant.
@@ -257,9 +259,34 @@ impl LlmExecutor {
         self
     }
 
+    /// Attach a PostgresStore so conversation history can be loaded.
+    pub fn with_store(mut self, store: Arc<PostgresStore>) -> Self {
+        self.store = Some(store);
+        self
+    }
+
     /// Convenience constructor for tests that don't need services or DB.
     pub fn without_services(gateway: Arc<dyn LlmGateway>, tools: Arc<ToolRegistry>) -> Self {
         Self::new(gateway, tools, Arc::new(AgentServices::none()))
+    }
+
+    /// Load conversation history for an agent if it belongs to a conversation.
+    async fn conversation_history(&self, state: &AgentState) -> String {
+        let conv_id = match &state.conversation_id {
+            Some(id) => id,
+            None => return String::new(),
+        };
+        let store = match &self.store {
+            Some(s) => s,
+            None => return String::new(),
+        };
+        match store.list_agents_in_conversation(&state.tenant_id, conv_id).await {
+            Ok(agents) => build_conversation_history(&agents, &state.id),
+            Err(e) => {
+                tracing::warn!(agent_id = %state.id, error = %e, "failed to load conversation history");
+                String::new()
+            }
+        }
     }
 
     /// Load tenant policy rules — from DB if TenantStore is available, else empty.
@@ -345,10 +372,11 @@ impl Executor for LlmExecutor {
         );
 
         let history_text = history.summarise();
+        let conv_history = self.conversation_history(state).await;
         let (system, user, complexity) = if direct_response_mode {
             (
                 ExecutorPrompt::direct_response_system().to_string(),
-                ExecutorPrompt::direct_response_user(state, &history_text),
+                ExecutorPrompt::direct_response_user(state, &history_text, &conv_history),
                 TaskComplexity::Simple,
             )
         } else if answer_only_step {
@@ -360,7 +388,7 @@ impl Executor for LlmExecutor {
         } else {
             (
                 ExecutorPrompt::system(state, plan),
-                ExecutorPrompt::user_step(state, step, &history_text, &[]),
+                ExecutorPrompt::user_step(state, step, &history_text, &[], &conv_history),
                 TaskComplexity::infer(&step.description),
             )
         };

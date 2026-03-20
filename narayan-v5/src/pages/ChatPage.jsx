@@ -8,7 +8,7 @@ import {
   Eye, FileCheck, Bell, AlertTriangle, Database,
   Cpu, GitBranch, Search, Link2,
 } from 'lucide-react';
-import { agents, citations as citationsApi, reviews as reviewsApi, autoApprovals, swarm } from '../api';
+import { agents, conversations as conversationsApi, citations as citationsApi, reviews as reviewsApi, autoApprovals, swarm } from '../api';
 import clsx from 'clsx';
 
 // ── Status config ─────────────────────────────────────────────────────────
@@ -911,24 +911,23 @@ function EventFeed({agentId, initialStatus, onStatusChange, onTerminal, onNaviga
 }
 
 // ═══════════════════════════════════════════════════════════
-// ── AGENT ROW (sidebar) ──────────────────────────────────
+// ── CONVERSATION ROW (sidebar) ───────────────────────────
 // ═══════════════════════════════════════════════════════════
-function AgentRow({agent, selected, onClick}) {
-  const cfg = STATUS[agent.status]||STATUS.pending;
+function ConversationRow({conv, selected, onClick, latestStatus}) {
+  const cfg = STATUS[latestStatus]||STATUS.pending;
+  const title = conv.title || 'New conversation';
   return (
     <button onClick={onClick}
       className={clsx('w-full text-left px-3 py-2.5 rounded-lg transition-all',
         selected?'bg-bg-active':'hover:bg-bg-hover')}>
       <div className="flex items-center gap-2 mb-0.5">
         <div className={clsx('size-1.5 rounded-full shrink-0',cfg.dot,cfg.spin&&'animate-pulse')}/>
-        <p className="text-[13px] text-tx-1 truncate flex-1">{agent.goal}</p>
+        <p className="text-[13px] text-tx-1 truncate flex-1">{title}</p>
       </div>
       <div className="flex items-center gap-2 text-[11px] text-tx-4 pl-3.5">
-        <span>step {agent.current_step}</span>
+        <span>{conv.agent_count||0} message{(conv.agent_count||0)!==1?'s':''}</span>
         <span>·</span>
-        <span>{timeAgo(agent.created_at)}</span>
-        <span>·</span>
-        <span>{cfg.label}</span>
+        <span>{timeAgo(conv.updated_at)}</span>
       </div>
     </button>
   );
@@ -948,70 +947,158 @@ function ImageChip({file, onRemove}) {
 }
 
 // ═══════════════════════════════════════════════════════════
+// ── CONVERSATION THREAD VIEW ────────────────────────────
+// Shows all agents in a conversation as message pairs
+// ═══════════════════════════════════════════════════════════
+function ConversationThread({convId, agentStatuses, terminalEvents, onStatusChange, onTerminal, onNavigateSettings}) {
+  const [convAgents, setConvAgents] = useState([]);
+  const bottomRef = useRef(null);
+
+  useEffect(()=>{
+    if(!convId) return;
+    let cancelled = false;
+    const refresh = () => {
+      conversationsApi.get(convId).then(data=>{
+        if(!cancelled) setConvAgents(data.agents||[]);
+      }).catch(()=>{});
+    };
+    refresh();
+    const iv = setInterval(refresh, 3000);
+    return ()=>{ cancelled=true; clearInterval(iv); };
+  },[convId]);
+
+  useEffect(()=>{ bottomRef.current?.scrollIntoView({behavior:'smooth'}); },[convAgents]);
+
+  if(!convAgents.length) return (
+    <div className="flex flex-col items-center justify-center h-full text-center px-8">
+      <p className="font-serif text-2xl text-tx-1 mb-2">What should your agent do?</p>
+      <p className="text-[13px] text-tx-3 max-w-xs leading-relaxed">
+        Send a message to start the conversation.
+      </p>
+    </div>
+  );
+
+  return (
+    <div className="px-6 py-4 space-y-6">
+      {convAgents.map((agent, idx)=>{
+        const status = agentStatuses[agent.id]||agent.status;
+        const isTerminal = TERMINAL.has(status);
+        const terminalEvent = terminalEvents[agent.id];
+        const isLast = idx===convAgents.length-1;
+        return (
+          <div key={agent.id} className="animate-in">
+            {/* User message bubble */}
+            <div className="flex justify-end mb-3">
+              <div className="max-w-lg rounded-2xl rounded-br-md bg-tx-1 text-bg-card px-4 py-3">
+                <p className="text-[13px] leading-relaxed whitespace-pre-wrap">{agent.goal}</p>
+                <p className="text-[10px] opacity-60 mt-1">{timeAgo(agent.created_at)}</p>
+              </div>
+            </div>
+
+            {/* Agent response */}
+            <div className="flex justify-start">
+              <div className="max-w-2xl w-full">
+                <div className="flex items-center gap-2 mb-1.5">
+                  <Bot size={14} className="text-accent shrink-0"/>
+                  <span className="text-[11px] font-semibold text-tx-3 uppercase tracking-wide">Narayan</span>
+                  {(()=>{
+                    const cfg = STATUS[status]||STATUS.pending;
+                    return (
+                      <span className="inline-flex items-center gap-1 text-[10px] text-tx-4">
+                        <span className={clsx('size-1.5 rounded-full',cfg.dot,cfg.spin&&'animate-pulse')}/>
+                        {cfg.label}
+                      </span>
+                    );
+                  })()}
+                </div>
+
+                {isTerminal ? (
+                  <div className="rounded-2xl rounded-bl-md border border-border bg-bg-card p-4">
+                    {agent.final_answer ? (
+                      <p className="text-[13px] text-tx-1 leading-relaxed whitespace-pre-wrap">{agent.final_answer}</p>
+                    ) : terminalEvent?.summary ? (
+                      <p className="text-[13px] text-tx-1 leading-relaxed whitespace-pre-wrap">{terminalEvent.summary}</p>
+                    ) : status==='failed' ? (
+                      <p className="text-[13px] text-err">{terminalEvent?.reason || 'Agent failed'}</p>
+                    ) : (
+                      <p className="text-[13px] text-tx-3">Completed</p>
+                    )}
+                  </div>
+                ) : isLast ? (
+                  <div className="rounded-2xl rounded-bl-md border border-border bg-bg-card overflow-hidden">
+                    <div className="px-4 py-2">
+                      <EventFeed agentId={agent.id}
+                        initialStatus={status}
+                        onStatusChange={s=>onStatusChange(agent.id,s)}
+                        onTerminal={ev=>onTerminal(agent.id,ev)}
+                        onNavigateSettings={onNavigateSettings}/>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="rounded-2xl rounded-bl-md border border-border bg-bg-card p-4">
+                    <p className="text-[13px] text-tx-3">{agent.final_answer || 'Processing...'}</p>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      })}
+      <div ref={bottomRef}/>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════
 // ── MAIN CHAT PAGE ───────────────────────────────────────
 // ═══════════════════════════════════════════════════════════
 export default function ChatPage({onNavigate}) {
-  const [agentList,setAgentList]           = useState([]);
-  const [selectedId,setSelectedId]         = useState(null);
-  const [selectedAgent,setSelectedAgent]   = useState(null);
+  const [convList,setConvList]             = useState([]);
+  const [selectedConvId,setSelectedConvId] = useState(null);
   const [input,setInput]                   = useState('');
   const [images,setImages]                 = useState([]);
   const [sending,setSending]               = useState(false);
-  const [loadingAgents,setLoadingAgents]   = useState(true);
+  const [loading,setLoading]               = useState(true);
   const [error,setError]                   = useState('');
   const [agentStatuses,setAgentStatuses]   = useState({});
   const [terminalEvents,setTerminalEvents] = useState({});
   const [pendingReviews,setPendingReviews] = useState([]);
   const [swarmDepth,setSwarmDepth]         = useState(null);
+  const [convLatestStatus,setConvLatestStatus] = useState({});
   const fileRef     = useRef(null);
   const textareaRef = useRef(null);
   const pollRef     = useRef(null);
 
-  const loadAgents = useCallback(async(silent=false)=>{
-    if(!silent) setLoadingAgents(true);
-    try{const r=await agents.list();setAgentList(r.agents||[]);}
+  const loadConversations = useCallback(async(silent=false)=>{
+    if(!silent) setLoading(true);
+    try{
+      const r = await conversationsApi.list();
+      setConvList(r.conversations||[]);
+    }
     catch(e){if(!silent)setError(e.message);}
-    finally{if(!silent)setLoadingAgents(false);}
+    finally{if(!silent)setLoading(false);}
   },[]);
 
   useEffect(()=>{
-    loadAgents();
+    loadConversations();
     const poll = () => {
       reviewsApi.list().then(r=>setPendingReviews((r.reviews||[]).filter(rv=>rv.status==='pending'))).catch(()=>{});
       swarm.status().then(s=>setSwarmDepth(s.queue_depth??null)).catch(()=>{});
     };
     poll();
-    pollRef.current = setInterval(()=>{ loadAgents(true); poll(); },12000);
+    pollRef.current = setInterval(()=>{ loadConversations(true); poll(); },12000);
     return()=>clearInterval(pollRef.current);
   },[]);
 
-  useEffect(()=>{ if(!selectedId&&agentList.length>0) setSelectedId(agentList[0].id); },[agentList]);
-  useEffect(()=>{
-    if(!selectedId) return;
+  // Auto-select first conversation
+  useEffect(()=>{ if(!selectedConvId&&convList.length>0) setSelectedConvId(convList[0].id); },[convList]);
 
-    let cancelled = false;
-    const refresh = () => {
-      agents.get(selectedId).then(agent => {
-        if(!cancelled) setSelectedAgent(agent);
-      }).catch(()=>{});
-    };
-
-    refresh();
-    const interval = setInterval(refresh, 2000);
-    return ()=>{
-      cancelled = true;
-      clearInterval(interval);
-    };
-  },[selectedId]);
-
-  function onStatusChange(id,status) {
-    setAgentStatuses(p=>({...p,[id]:status}));
-    setAgentList(p=>p.map(a=>a.id===id?{...a,status}:a));
-    if(selectedAgent?.id===id) setSelectedAgent(a=>a?{...a,status}:a);
+  function onStatusChange(agentId, status) {
+    setAgentStatuses(p=>({...p,[agentId]:status}));
   }
-  function onTerminal(id,ev) {
-    setTerminalEvents(p=>({...p,[id]:ev}));
-    onStatusChange(id,ev.type==='goal_complete'?'completed':'failed');
+  function onTerminal(agentId, ev) {
+    setTerminalEvents(p=>({...p,[agentId]:ev}));
+    onStatusChange(agentId, ev.type==='goal_complete'?'completed':'failed');
   }
 
   async function send() {
@@ -1021,15 +1108,13 @@ export default function ChatPage({onNavigate}) {
       const imgs = await Promise.all(images.map(f=>new Promise(res=>{
         const r=new FileReader(); r.onload=()=>res({name:f.name,data:r.result}); r.readAsDataURL(f);
       })));
-      const res = await agents.createGoal(input.trim(),imgs);
+      const res = await agents.createGoal(input.trim(), imgs, selectedConvId);
       setInput(''); setImages([]);
       if(textareaRef.current) textareaRef.current.style.height='auto';
-      await loadAgents(true);
-      setSelectedAgent(null);
-      setSelectedId(res.agent_id);
-      agents.get(res.agent_id).then(setSelectedAgent).catch(()=>{});
+      // If we were on null (new conversation), select the new one
+      if(!selectedConvId) setSelectedConvId(res.conversation_id);
+      await loadConversations(true);
     } catch(e){
-      // 402 = step budget exhausted — surface upgrade prompt
       if(e.message.startsWith('PAYMENT_REQUIRED:')) {
         setError('PLAN_LIMIT');
       } else {
@@ -1039,11 +1124,7 @@ export default function ChatPage({onNavigate}) {
     finally{setSending(false);}
   }
 
-  const selectedFromList = selectedId ? agentList.find(agent => agent.id===selectedId) : null;
-  const currentStatus = agentStatuses[selectedId]||selectedAgent?.status||selectedFromList?.status;
-  const isTerminal    = TERMINAL.has(currentStatus);
-  const terminalEvent = terminalEvents[selectedId];
-  const visibleAgent  = selectedAgent||selectedFromList;
+  const selectedConv = selectedConvId ? convList.find(c=>c.id===selectedConvId) : null;
 
   return (
     <div className="flex h-screen bg-bg overflow-hidden">
@@ -1074,27 +1155,28 @@ export default function ChatPage({onNavigate}) {
         </div>
 
         <div className="flex-1 overflow-y-auto p-2 space-y-0.5">
-          {loadingAgents ? (
+          {loading ? (
             <div className="flex items-center justify-center py-8">
               <Loader2 size={16} className="text-tx-4 animate-spin"/>
             </div>
-          ) : agentList.length===0 ? (
+          ) : convList.length===0 ? (
             <div className="px-3 py-8 text-center">
-              <p className="text-[13px] text-tx-3">No agents yet.</p>
-              <p className="text-[11px] text-tx-4 mt-1">Create your first goal.</p>
+              <p className="text-[13px] text-tx-3">No conversations yet.</p>
+              <p className="text-[11px] text-tx-4 mt-1">Send your first message below.</p>
             </div>
-          ) : agentList.map(agent=>(
-            <AgentRow key={agent.id}
-              agent={{...agent,status:agentStatuses[agent.id]||agent.status}}
-              selected={agent.id===selectedId}
-              onClick={()=>setSelectedId(agent.id)}/>
+          ) : convList.map(conv=>(
+            <ConversationRow key={conv.id}
+              conv={conv}
+              selected={conv.id===selectedConvId}
+              latestStatus={convLatestStatus[conv.id]||'completed'}
+              onClick={()=>setSelectedConvId(conv.id)}/>
           ))}
         </div>
 
         <div className="p-2 border-t border-border space-y-1">
-          <button onClick={()=>{setSelectedId(null);setSelectedAgent(null);textareaRef.current?.focus();}}
+          <button onClick={()=>{setSelectedConvId(null);textareaRef.current?.focus();}}
             className="w-full flex items-center gap-2 rounded-lg px-3 py-2 text-[13px] text-tx-3 hover:text-tx-1 hover:bg-bg-hover transition-all">
-            <Plus size={13}/> New goal
+            <Plus size={13}/> New conversation
           </button>
           {swarmDepth !== null && swarmDepth > 0 && (
             <div className="flex items-center gap-2 rounded-lg px-3 py-1.5 text-[11px] text-tx-4">
@@ -1110,62 +1192,33 @@ export default function ChatPage({onNavigate}) {
       <main className="flex flex-col flex-1 min-w-0">
 
         {/* Header */}
-        {visibleAgent ? (
+        {selectedConv ? (
           <div className="flex items-center justify-between px-6 py-3 border-b border-border bg-bg-card/80 backdrop-blur shrink-0">
             <div className="min-w-0">
-              <p className="text-[13px] font-medium text-tx-1 truncate max-w-lg">{visibleAgent.goal}</p>
+              <p className="text-[13px] font-medium text-tx-1 truncate max-w-lg">{selectedConv.title||'Conversation'}</p>
               <div className="flex items-center gap-2 mt-0.5 text-[11px] text-tx-4">
-                <span className="font-mono">{visibleAgent.id.slice(0,12)}…</span>
+                <span>{selectedConv.agent_count||0} message{(selectedConv.agent_count||0)!==1?'s':''}</span>
                 <span>·</span>
-                <span>step {visibleAgent.current_step}</span>
-                <span>·</span>
-                <span>{timeAgo(visibleAgent.created_at)}</span>
+                <span>{timeAgo(selectedConv.updated_at)}</span>
               </div>
-            </div>
-            <div className="flex items-center gap-2 shrink-0">
-              {(()=>{
-                const s=currentStatus||'pending'; const cfg=STATUS[s]||STATUS.pending;
-                return (
-                  <span className="inline-flex items-center gap-1.5 rounded-full border border-border px-2.5 py-1 text-[11px] font-medium text-tx-2 bg-bg">
-                    <span className={clsx('size-1.5 rounded-full',cfg.dot,cfg.spin&&'animate-pulse')}/>
-                    {cfg.label}
-                  </span>
-                );
-              })()}
-              {(currentStatus==='running'||currentStatus==='waiting')&&(
-                <button onClick={()=>agents.pause(selectedId).then(()=>onStatusChange(selectedId,'paused')).catch(()=>{})}
-                  className="p-1.5 rounded-lg border border-border text-tx-3 hover:text-warn hover:border-warn/40 hover:bg-warn-soft transition-all" title="Pause">
-                  <Pause size={13}/>
-                </button>
-              )}
-              {currentStatus==='paused'&&(
-                <button onClick={()=>agents.resume(selectedId).then(()=>onStatusChange(selectedId,'waiting')).catch(()=>{})}
-                  className="p-1.5 rounded-lg border border-border text-tx-3 hover:text-ok hover:border-ok/40 hover:bg-ok-soft transition-all" title="Resume">
-                  <Play size={13}/>
-                </button>
-              )}
             </div>
           </div>
         ) : (
           <div className="px-6 py-3 border-b border-border bg-bg-card/80 shrink-0">
-            <p className="text-[13px] text-tx-3">Create a new goal or select an agent</p>
+            <p className="text-[13px] text-tx-3">New conversation</p>
           </div>
         )}
 
         {/* Content */}
         <div className="flex-1 overflow-y-auto">
-          {selectedId ? (
-            isTerminal ? (
-              <AgentResultView key={selectedId} agentId={selectedId} terminalEvent={terminalEvent}/>
-            ) : (
-              <div className="px-6 py-2">
-                <EventFeed key={selectedId} agentId={selectedId}
-                  initialStatus={currentStatus}
-                  onStatusChange={s=>onStatusChange(selectedId,s)}
-                  onTerminal={ev=>onTerminal(selectedId,ev)}
-                  onNavigateSettings={()=>onNavigate('settings')}/>
-              </div>
-            )
+          {selectedConvId ? (
+            <ConversationThread
+              convId={selectedConvId}
+              agentStatuses={agentStatuses}
+              terminalEvents={terminalEvents}
+              onStatusChange={onStatusChange}
+              onTerminal={onTerminal}
+              onNavigateSettings={()=>onNavigate('settings')}/>
           ) : (
             <div className="flex flex-col items-center justify-center h-full text-center px-8">
               <p className="font-serif text-2xl text-tx-1 mb-2">What should your agent do?</p>
@@ -1217,7 +1270,7 @@ export default function ChatPage({onNavigate}) {
             <textarea ref={textareaRef} value={input}
               onChange={e=>setInput(e.target.value)}
               onKeyDown={e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();}}}
-              placeholder="Describe a goal for a new agent…"
+              placeholder="Send a message…"
               rows={1}
               className="flex-1 bg-transparent text-[13px] text-tx-1 placeholder-tx-4 outline-none resize-none leading-relaxed max-h-32"
               style={{overflow:input.split('\n').length>4?'auto':'hidden'}}
@@ -1229,7 +1282,7 @@ export default function ChatPage({onNavigate}) {
             </button>
           </div>
           <p className="text-[11px] text-tx-4 mt-2 text-center">
-            Each message creates a new autonomous agent · Shift+Enter for newline
+            {selectedConvId ? 'Follow-up messages continue this conversation' : 'Start a new conversation'} · Shift+Enter for newline
           </p>
         </div>
       </main>

@@ -50,56 +50,26 @@ pub fn is_direct_response_goal(goal: &str) -> bool {
     }
 
     let lower = trimmed.to_lowercase();
-    let word_count = lower.split_whitespace().count();
-    let blocked_keywords = [
-        "file", "folder", "directory", "repo", "repository", "workspace", "shell", "command",
-        "run ", "execute", "edit", "write to", "save", "create file", "delete", "rename",
-        "fetch", "browse", "search", "web", "http", "api", "curl", "database", "sql",
-        "docker", "kubernetes", "git", "commit", "push", "pull request", "email", "slack",
-        "notion", "spreadsheet", "csv", "pdf", "image", "screenshot", "install", "deploy",
-    ];
 
-    if blocked_keywords.iter().any(|keyword| lower.contains(keyword)) {
-        return false;
-    }
+    // Only bypass the planner for trivial greetings and pure arithmetic.
+    // Everything else goes through normal planning so the LLM can decide
+    // whether tools/connectors are needed.
 
     let greetings = [
-        "hi",
-        "hello",
-        "hey",
-        "yo",
-        "good morning",
-        "good afternoon",
-        "good evening",
+        "hi", "hello", "hey", "yo",
+        "good morning", "good afternoon", "good evening",
+        "thanks", "thank you", "bye", "goodbye",
     ];
-    if greetings.iter().any(|greeting| lower == *greeting) {
+    if greetings.iter().any(|g| lower == *g) {
         return true;
     }
 
-    let conversational_starts = [
-        "what is",
-        "what's",
-        "who is",
-        "who's",
-        "why is",
-        "why does",
-        "how do",
-        "how does",
-        "can you",
-        "could you",
-        "please",
-        "say ",
-        "reply ",
-        "write ",
-        "explain ",
-        "summarize ",
-        "summarise ",
-    ];
+    // Pure arithmetic expressions like "2+2" or "15 * 3"
+    if lower.chars().all(|ch| ch.is_ascii_digit() || " +-*/().=".contains(ch)) {
+        return true;
+    }
 
-    word_count <= 14
-        && (lower.chars().all(|ch| ch.is_ascii_digit() || "+-*/().=? ".contains(ch))
-            || lower.ends_with('?')
-            || conversational_starts.iter().any(|prefix| lower.starts_with(prefix)))
+    false
 }
 
 impl JobType {
@@ -456,6 +426,49 @@ impl JobType {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// CONVERSATION HISTORY
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Build a conversation history string from prior agents in the same conversation.
+/// Takes the list of agents ordered by created_at ASC.
+/// Only includes agents that came *before* the current agent (by created_at).
+/// Limits to the most recent 10 prior messages to avoid context overflow.
+pub fn build_conversation_history(
+    prior_agents: &[AgentState],
+    current_agent_id: &str,
+) -> String {
+    let priors: Vec<&AgentState> = prior_agents
+        .iter()
+        .filter(|a| a.id != current_agent_id)
+        .collect();
+
+    if priors.is_empty() {
+        return String::new();
+    }
+
+    // Take last 10
+    let start = priors.len().saturating_sub(10);
+    let recent = &priors[start..];
+
+    let mut history = String::from("CONVERSATION HISTORY (prior messages in this thread):\n");
+    for (i, agent) in recent.iter().enumerate() {
+        let answer = agent
+            .final_answer()
+            .unwrap_or("(still in progress)")
+            .chars()
+            .take(500)
+            .collect::<String>();
+        history.push_str(&format!(
+            "[Message {}] User: {}\nNarayan: {}\n\n",
+            i + 1,
+            agent.goal,
+            answer,
+        ));
+    }
+    history
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // PLANNER PROMPTS
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -639,9 +652,20 @@ CONSTRAINTS:
 
     /// User message for initial plan creation.
     /// Uses tool_manifest (grouped categories) instead of a flat list.
-    pub fn user_create(state: &AgentState, context: &str, tool_manifest: &str) -> String {
+    pub fn user_create(
+        state: &AgentState,
+        context: &str,
+        tool_manifest: &str,
+        conversation_history: &str,
+    ) -> String {
+        let conv_ctx = if conversation_history.is_empty() {
+            String::new()
+        } else {
+            format!("\n{conversation_history}\n")
+        };
         format!(
-            "GOAL: {goal}\n\nWORKSPACE: {ws}\n\nADDITIONAL CONTEXT:\n{ctx}\n\n{manifest}\n\nCreate the plan now.",
+            "{conv_ctx}GOAL: {goal}\n\nWORKSPACE: {ws}\n\nADDITIONAL CONTEXT:\n{ctx}\n\n{manifest}\n\nCreate the plan now.",
+            conv_ctx = conv_ctx,
             goal = state.goal,
             ws = state.workspace_path,
             ctx = if context.is_empty() { "none" } else { context },
@@ -677,11 +701,23 @@ Reply directly to the user's message.
 - If the user greeting is simple, answer simply and warmly."#
     }
 
-    pub fn direct_response_user(state: &AgentState, history_summary: &str) -> String {
-        if history_summary.trim().is_empty() {
+    pub fn direct_response_user(
+        state: &AgentState,
+        history_summary: &str,
+        conversation_history: &str,
+    ) -> String {
+        let mut parts = Vec::new();
+        if !conversation_history.is_empty() {
+            parts.push(conversation_history.to_string());
+        }
+        if !history_summary.trim().is_empty() {
+            parts.push(format!("Step context:\n{history_summary}"));
+        }
+        if parts.is_empty() {
             state.goal.clone()
         } else {
-            format!("Conversation context:\n{history_summary}\n\nLatest user message:\n{}", state.goal)
+            parts.push(format!("Latest user message:\n{}", state.goal));
+            parts.join("\n\n")
         }
     }
 
@@ -843,7 +879,14 @@ EXECUTION RULES:
         step: &PlannedStep,
         history_summary: &str,
         previous_tool_results: &[&str],
+        conversation_history: &str,
     ) -> String {
+        let conv_ctx = if conversation_history.is_empty() {
+            String::new()
+        } else {
+            format!("{conversation_history}\n")
+        };
+
         let history_ctx = if history_summary.is_empty() {
             String::new()
         } else {
@@ -881,7 +924,8 @@ EXECUTION RULES:
             .unwrap_or_default();
 
         format!(
-            "USER GOAL:\n{goal}\n\nCURRENT STEP [{idx}]: {desc}{planned_tool}{planned_tool_args}{history}{tools}\n\nExecute this step now.",
+            "{conv_ctx}USER GOAL:\n{goal}\n\nCURRENT STEP [{idx}]: {desc}{planned_tool}{planned_tool_args}{history}{tools}\n\nExecute this step now.",
+            conv_ctx = conv_ctx,
             goal = state.goal,
             idx = step.index,
             desc = step.description,

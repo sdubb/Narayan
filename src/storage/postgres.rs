@@ -2,10 +2,21 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use sqlx::{postgres::PgRow, PgPool, Row};
 
+use serde::Serialize;
+
 use crate::{
     state::{AgentState, AgentStatus, GoalState, GoalStatus},
     workspace::{manager::WorkspaceInfo, resolver::WorkspaceMode},
 };
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Conversation {
+    pub id: String,
+    pub tenant_id: String,
+    pub title: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
 
 pub struct PostgresStore {
     pool: PgPool,
@@ -130,6 +141,34 @@ impl PostgresStore {
             .execute(&self.pool)
             .await?;
 
+        // ── Conversations ────────────────────────────────────────────────
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS conversations (
+                id         TEXT PRIMARY KEY,
+                tenant_id  TEXT NOT NULL,
+                title      TEXT,
+                created_at TIMESTAMPTZ NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS conversations_tenant ON conversations (tenant_id, updated_at DESC)",
+        )
+        .execute(&self.pool)
+        .await?;
+
+        // Add conversation_id column to agents table
+        sqlx::query("ALTER TABLE agents ADD COLUMN IF NOT EXISTS conversation_id TEXT")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS agents_conversation ON agents (conversation_id) WHERE conversation_id IS NOT NULL",
+        )
+        .execute(&self.pool)
+        .await?;
+
         Ok(())
     }
 
@@ -141,8 +180,9 @@ impl PostgresStore {
             INSERT INTO agents (
                 id, tenant_id, goal, status, current_task, current_step,
                 workspace_path, memory_ref, next_run, created_at, updated_at,
-                started_at, plan, final_answer, metadata, parent_agent_id, pending_children
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+                started_at, plan, final_answer, metadata, parent_agent_id, pending_children,
+                conversation_id
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
             ON CONFLICT (id) DO UPDATE SET
                 goal             = EXCLUDED.goal,
                 status           = EXCLUDED.status,
@@ -156,7 +196,8 @@ impl PostgresStore {
                 plan             = EXCLUDED.plan,
                 final_answer     = EXCLUDED.final_answer,
                 metadata         = EXCLUDED.metadata,
-                pending_children = EXCLUDED.pending_children
+                pending_children = EXCLUDED.pending_children,
+                conversation_id  = EXCLUDED.conversation_id
         "#,
         )
         .bind(&state.id)
@@ -176,6 +217,7 @@ impl PostgresStore {
         .bind(&state.metadata)
         .bind(&state.parent_agent_id)
         .bind(serde_json::json!(state.pending_children))
+        .bind(&state.conversation_id)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -262,6 +304,82 @@ impl PostgresStore {
         .fetch_one(&self.pool)
         .await?;
         Ok(row.get::<i64, _>("cnt"))
+    }
+
+    // ── Conversation CRUD ──────────────────────────────────────────────────
+
+    pub async fn create_conversation(&self, id: &str, tenant_id: &str, title: Option<&str>) -> Result<()> {
+        let now = Utc::now();
+        sqlx::query(
+            "INSERT INTO conversations (id, tenant_id, title, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(id)
+        .bind(tenant_id)
+        .bind(title)
+        .bind(now)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn get_conversation(&self, tenant_id: &str, id: &str) -> Result<Option<Conversation>> {
+        let row = sqlx::query("SELECT * FROM conversations WHERE id = $1 AND tenant_id = $2")
+            .bind(id)
+            .bind(tenant_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.map(|r| Conversation {
+            id: r.get("id"),
+            tenant_id: r.get("tenant_id"),
+            title: r.get("title"),
+            created_at: r.get("created_at"),
+            updated_at: r.get("updated_at"),
+        }))
+    }
+
+    pub async fn list_conversations(&self, tenant_id: &str) -> Result<Vec<Conversation>> {
+        let rows = sqlx::query(
+            "SELECT * FROM conversations WHERE tenant_id = $1 ORDER BY updated_at DESC LIMIT 100",
+        )
+        .bind(tenant_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|r| Conversation {
+                id: r.get("id"),
+                tenant_id: r.get("tenant_id"),
+                title: r.get("title"),
+                created_at: r.get("created_at"),
+                updated_at: r.get("updated_at"),
+            })
+            .collect())
+    }
+
+    pub async fn touch_conversation(&self, id: &str) -> Result<()> {
+        sqlx::query("UPDATE conversations SET updated_at = NOW() WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn list_agents_in_conversation(
+        &self,
+        tenant_id: &str,
+        conversation_id: &str,
+    ) -> Result<Vec<AgentState>> {
+        let rows = sqlx::query(
+            "SELECT * FROM agents WHERE tenant_id = $1 AND conversation_id = $2
+             ORDER BY created_at ASC",
+        )
+        .bind(tenant_id)
+        .bind(conversation_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(|r| row_to_agent_state(r)).collect())
     }
 
     // ── Goal CRUD ───────────────────────────────────────────────────────────
@@ -423,6 +541,7 @@ fn row_to_agent_state(row: &PgRow) -> AgentState {
         metadata,
         parent_agent_id: row.get("parent_agent_id"),
         pending_children,
+        conversation_id: row.try_get("conversation_id").ok().flatten(),
     }
 }
 

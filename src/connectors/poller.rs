@@ -298,7 +298,7 @@ impl ConnectorPoller {
     /// Create agent goals for new events, skipping duplicates.
     pub async fn process_goals(&self, tenant_id: &str, goals: Vec<String>) {
         for goal in goals {
-            match self.manager.create_goal(tenant_id.to_string(), goal.clone()).await {
+            match self.manager.create_goal(tenant_id.to_string(), goal.clone(), None).await {
                 Ok((_, agent)) => tracing::info!(tenant_id, agent_id = %agent.id, "connector poll created agent"),
                 Err(e)         => tracing::warn!(tenant_id, error = %e, goal = %goal, "connector poll failed to create agent"),
             }

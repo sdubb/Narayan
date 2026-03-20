@@ -58,8 +58,12 @@ export const routing = { update: (config) => req('PUT', '/routing', config) };
 
 // ── Goals / Agents ─────────────────────────────────────────────────────────
 export const agents = {
-  createGoal: (description, images = []) =>
-    req('POST', '/goals', { description, images }),
+  createGoal: (description, images = [], conversationId = null) =>
+    req('POST', '/goals', {
+      description,
+      images,
+      ...(conversationId ? { conversation_id: conversationId } : {}),
+    }),
   list:    () => req('GET', '/agents'),
   get:     (id) => req('GET', `/agents/${id}`),
   logs:    (id) => req('GET', `/agents/${id}/logs`),
@@ -68,6 +72,12 @@ export const agents = {
   clarify: (id, answers, freeform) =>
     req('POST', `/agents/${id}/clarify`, { answers, freeform }),
   replay:  (id) => req('GET', `/agents/${id}/replay`),
+};
+
+// ── Conversations ─────────────────────────────────────────────────────────
+export const conversations = {
+  list: () => req('GET', '/conversations'),
+  get:  (id) => req('GET', `/conversations/${id}`),
 };
 
 // ── Reviews ────────────────────────────────────────────────────────────────

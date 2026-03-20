@@ -57,7 +57,13 @@ impl AgentManager {
 
     /// Create a new goal and root agent, scoped to `tenant_id`.
     /// Automatically starts SLA tracking if an SlaTracker is active for this segment.
-    pub async fn create_goal(&self, tenant_id: String, description: String) -> Result<(GoalState, AgentState)> {
+    /// If `conversation_id` is provided, the agent is linked to that conversation.
+    pub async fn create_goal(
+        &self,
+        tenant_id: String,
+        description: String,
+        conversation_id: Option<String>,
+    ) -> Result<(GoalState, AgentState)> {
         let goal_id  = new_id();
         let agent_id = new_id();
 
@@ -74,6 +80,8 @@ impl AgentManager {
 
         let (goal, mut agent_state) =
             build_goal_and_agent(goal_id, agent_id, tenant_id.clone(), description.clone(), workspace_path);
+
+        agent_state.conversation_id = conversation_id;
 
         // ── SLA start — stamp deadline on agent state at creation time ────────
         if let Some(ref sla) = self.services.sla {

@@ -373,11 +373,12 @@ async fn main() -> Result<()> {
     let knowledge_graph: Arc<Mutex<KnowledgeGraph>> = Arc::new(Mutex::new(KnowledgeGraph::new()));
 
     // ── Agent runtime ──────────────────────────────────────────────────────
-    let planner   = Arc::new(LlmPlanner::new(gateway.clone()));
+    let planner   = Arc::new(LlmPlanner::new(gateway.clone()).with_store(store.clone()));
     let executor  = Arc::new(
         LlmExecutor::new(gateway.clone(), tool_registry.clone(), agent_services.clone())
             .with_tenant_store(tenant_store.clone())
             .with_event_bus(event_bus.clone())
+            .with_store(store.clone())
     );
     let evaluator = Arc::new(LlmEvaluator::new(gateway.clone()));
     let reflector = Arc::new(LlmReflector::new(gateway.clone(), planner.clone()));

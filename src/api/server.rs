@@ -67,6 +67,9 @@ pub fn build_router(
         .route("/routing", put(update_routing))
         // Goals & agents
         .route("/goals", post(create_goal))
+        // Conversations
+        .route("/conversations", get(list_conversations))
+        .route("/conversations/:id", get(get_conversation))
         .route("/agents", get(list_agents))
         .route("/agents/:id", get(get_agent))
         .route("/agents/:id/logs", get(get_agent_logs))

@@ -54,6 +54,9 @@ pub struct AgentState {
     pub parent_agent_id: Option<String>,
     /// Child agent IDs spawned by this agent (for delegation).
     pub pending_children: Vec<String>,
+    /// Conversation thread this agent belongs to.
+    #[serde(default)]
+    pub conversation_id: Option<String>,
 }
 
 impl AgentState {
@@ -77,6 +80,7 @@ impl AgentState {
             metadata: serde_json::Value::Object(Default::default()),
             parent_agent_id: None,
             pending_children: Vec::new(),
+            conversation_id: None,
         }
     }
 

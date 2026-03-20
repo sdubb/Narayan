@@ -580,12 +580,15 @@ pub async fn get_costs(State(state): State<AppState>, tenant: AuthenticatedTenan
 #[derive(Deserialize)]
 pub struct CreateGoalRequest {
     pub description: String,
+    /// Omit to auto-create a new conversation. Provide to continue an existing one.
+    pub conversation_id: Option<String>,
 }
 
 #[derive(Serialize)]
 pub struct CreateGoalResponse {
     pub goal_id: String,
     pub agent_id: String,
+    pub conversation_id: String,
 }
 
 /// POST /goals
@@ -640,7 +643,36 @@ pub async fn create_goal(
         }
     }
 
-    match state.manager.create_goal(tenant.tenant_id.clone(), body.description.clone()).await {
+    // ── Resolve or create conversation ──────────────────────────────────────
+    let conv_id = if let Some(ref cid) = body.conversation_id {
+        // Verify conversation exists and belongs to this tenant
+        match state.store.get_conversation(&tenant.tenant_id, cid).await {
+            Ok(Some(_)) => {
+                let _ = state.store.touch_conversation(cid).await;
+                cid.clone()
+            }
+            Ok(None) => return err(StatusCode::NOT_FOUND, "conversation not found"),
+            Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        }
+    } else {
+        // Auto-create a new conversation
+        let cid = crate::util::new_id();
+        let title: String = body.description.chars().take(80).collect();
+        if let Err(e) = state
+            .store
+            .create_conversation(&cid, &tenant.tenant_id, Some(&title))
+            .await
+        {
+            return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+        }
+        cid
+    };
+
+    match state
+        .manager
+        .create_goal(tenant.tenant_id.clone(), body.description.clone(), Some(conv_id.clone()))
+        .await
+    {
         Ok((goal, agent)) => {
             state.metrics.goal_created();
             let _ = state
@@ -649,14 +681,104 @@ pub async fn create_goal(
                     &tenant.tenant_id,
                     Some(&agent.id),
                     crate::audit::AuditAction::GoalCreated,
-                    serde_json::json!({ "goal_id": goal.id, "description": body.description }),
+                    serde_json::json!({
+                        "goal_id": goal.id,
+                        "description": body.description,
+                        "conversation_id": conv_id,
+                    }),
                     None,
                 )
                 .await;
-            (StatusCode::CREATED, Json(CreateGoalResponse { goal_id: goal.id, agent_id: agent.id })).into_response()
+            (
+                StatusCode::CREATED,
+                Json(CreateGoalResponse {
+                    goal_id: goal.id,
+                    agent_id: agent.id,
+                    conversation_id: conv_id,
+                }),
+            )
+                .into_response()
         }
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
+}
+
+// ── Conversations ─────────────────────────────────────────────────────────
+
+/// GET /conversations — list conversations for this tenant.
+pub async fn list_conversations(
+    State(state): State<AppState>,
+    tenant: AuthenticatedTenant,
+) -> impl IntoResponse {
+    match state.store.list_conversations(&tenant.tenant_id).await {
+        Ok(conversations) => {
+            // For each conversation, count agents
+            let mut items = Vec::with_capacity(conversations.len());
+            for conv in &conversations {
+                let agent_count = state
+                    .store
+                    .list_agents_in_conversation(&tenant.tenant_id, &conv.id)
+                    .await
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+                items.push(serde_json::json!({
+                    "id":          conv.id,
+                    "title":       conv.title,
+                    "created_at":  conv.created_at.to_rfc3339(),
+                    "updated_at":  conv.updated_at.to_rfc3339(),
+                    "agent_count": agent_count,
+                }));
+            }
+            Json(serde_json::json!({ "conversations": items })).into_response()
+        }
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+/// GET /conversations/:id — conversation detail with all agent summaries.
+pub async fn get_conversation(
+    State(state): State<AppState>,
+    tenant: AuthenticatedTenant,
+    Path(conv_id): Path<String>,
+) -> impl IntoResponse {
+    let conv = match state.store.get_conversation(&tenant.tenant_id, &conv_id).await {
+        Ok(Some(c)) => c,
+        Ok(None) => return err(StatusCode::NOT_FOUND, "conversation not found"),
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    };
+
+    let agents_result = state
+        .store
+        .list_agents_in_conversation(&tenant.tenant_id, &conv_id)
+        .await;
+    let agents_list = match agents_result {
+        Ok(a) => a,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    };
+
+    let agents_json: Vec<serde_json::Value> = agents_list
+        .iter()
+        .map(|a| {
+            serde_json::json!({
+                "id":           a.id,
+                "goal":         a.goal,
+                "status":       format!("{:?}", a.status).to_lowercase(),
+                "current_step": a.current_step,
+                "final_answer": a.final_answer(),
+                "created_at":   a.created_at.to_rfc3339(),
+                "updated_at":   a.updated_at.to_rfc3339(),
+            })
+        })
+        .collect();
+
+    Json(serde_json::json!({
+        "id":          conv.id,
+        "title":       conv.title,
+        "created_at":  conv.created_at.to_rfc3339(),
+        "updated_at":  conv.updated_at.to_rfc3339(),
+        "agents":      agents_json,
+    }))
+    .into_response()
 }
 
 // ── Agents ─────────────────────────────────────────────────────────────────
@@ -669,13 +791,14 @@ pub async fn list_agents(State(state): State<AppState>, tenant: AuthenticatedTen
                 .iter()
                 .map(|a| {
                     serde_json::json!({
-                        "id":           a.id,
-                        "goal":         a.goal,
-                        "status":       format!("{:?}", a.status).to_lowercase(),
-                        "current_step": a.current_step,
-                        "next_run":     a.next_run.to_rfc3339(),
-                        "created_at":   a.created_at.to_rfc3339(),
-                        "updated_at":   a.updated_at.to_rfc3339(),
+                        "id":              a.id,
+                        "goal":            a.goal,
+                        "status":          format!("{:?}", a.status).to_lowercase(),
+                        "current_step":    a.current_step,
+                        "next_run":        a.next_run.to_rfc3339(),
+                        "created_at":      a.created_at.to_rfc3339(),
+                        "updated_at":      a.updated_at.to_rfc3339(),
+                        "conversation_id": a.conversation_id,
                     })
                 })
                 .collect();
@@ -1070,7 +1193,7 @@ pub async fn connector_inbound(
     };
 
     // ── Create an agent for the goal ──────────────────────────────────────
-    match state.manager.create_goal(tenant.tenant_id.clone(), goal_str.clone()).await {
+    match state.manager.create_goal(tenant.tenant_id.clone(), goal_str.clone(), None).await {
         Ok((goal, agent)) => {
             // Emit ConnectorTrigger SSE so the frontend can show the trigger card
             state.event_bus_handle.publish(crate::events::AgentEvent::ConnectorTrigger {

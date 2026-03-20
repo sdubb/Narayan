@@ -5,10 +5,11 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    agent::prompts::{is_direct_response_goal, JobType, PlannerPrompt},
+    agent::prompts::{build_conversation_history, is_direct_response_goal, JobType, PlannerPrompt},
     gateway::{GatewayRequest, LlmGateway, TaskComplexity},
     providers::Message,
     state::AgentState,
+    storage::PostgresStore,
 };
 
 fn truncate_for_log(value: &str, max_chars: usize) -> String {
@@ -59,11 +60,35 @@ pub trait Planner: Send + Sync {
 
 pub struct LlmPlanner {
     gateway: Arc<dyn LlmGateway>,
+    store: Option<Arc<PostgresStore>>,
 }
 
 impl LlmPlanner {
     pub fn new(gateway: Arc<dyn LlmGateway>) -> Self {
-        Self { gateway }
+        Self { gateway, store: None }
+    }
+
+    pub fn with_store(mut self, store: Arc<PostgresStore>) -> Self {
+        self.store = Some(store);
+        self
+    }
+
+    async fn conversation_history(&self, state: &AgentState) -> String {
+        let conv_id = match &state.conversation_id {
+            Some(id) => id,
+            None => return String::new(),
+        };
+        let store = match &self.store {
+            Some(s) => s,
+            None => return String::new(),
+        };
+        match store.list_agents_in_conversation(&state.tenant_id, conv_id).await {
+            Ok(agents) => build_conversation_history(&agents, &state.id),
+            Err(e) => {
+                tracing::warn!(agent_id = %state.id, error = %e, "failed to load conversation history for planner");
+                String::new()
+            }
+        }
     }
 }
 
@@ -94,7 +119,8 @@ impl Planner for LlmPlanner {
 
         let system = PlannerPrompt::system(&job_type);
         let manifest = crate::tools::selector::tool_manifest_from_names(available_tools);
-        let user = PlannerPrompt::user_create(state, context, &manifest);
+        let conv_history = self.conversation_history(state).await;
+        let user = PlannerPrompt::user_create(state, context, &manifest, &conv_history);
 
         tracing::debug!(
             agent_id = %state.id,
