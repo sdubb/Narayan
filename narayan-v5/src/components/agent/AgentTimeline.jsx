@@ -1,7 +1,7 @@
-import { useState, useEffect, useRef, useMemo } from 'react';
+import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { AnimatePresence } from 'framer-motion';
 import clsx from 'clsx';
-import { Activity, Loader2, Network, Layers, Zap, Wrench, RotateCcw, Bell, Cpu } from 'lucide-react';
+import { Activity, Loader2, Network, Layers, Zap, Wrench, RotateCcw, Bell, Cpu, StopCircle } from 'lucide-react';
 import { useAgentTimeline } from '../../hooks/useAgentTimeline';
 import { PhaseBar } from '../layout';
 import { PlanCard, StepCard, ClarificationCard, ReviewCard, GoalCompleteCard, GoalFailedCard, ConnectorTriggerCard, PolicyCard, CitationCard } from '../cards';
@@ -24,7 +24,7 @@ function Badge({ label, color = 'gray', icon: Icon }) {
   );
 }
 
-function RunOverview({ events, liveStatus }) {
+function RunOverview({ events, liveStatus, onCancel, cancelling }) {
   const stats = events.reduce((acc, ev) => {
     if (ev.type === 'step_started') acc.steps += 1;
     if (ev.type === 'tool_called') acc.tools += 1;
@@ -33,6 +33,7 @@ function RunOverview({ events, liveStatus }) {
     return acc;
   }, { steps: 0, tools: 0, retries: 0, reviews: 0 });
   const plan = events.find(ev => ev.type === 'plan_created');
+  const isTerminalStatus = ['completed', 'failed'].includes(liveStatus);
   return (
     <div className="mb-3 rounded-xl border border-border bg-bg-card px-3.5 py-3 flex flex-wrap items-center gap-2">
       <Badge label={liveStatus} color={liveStatus === 'failed' ? 'red' : liveStatus === 'completed' ? 'green' : 'blue'} icon={Activity} />
@@ -42,6 +43,17 @@ function RunOverview({ events, liveStatus }) {
       <Badge label={`${stats.tools} tools`} color="gray" icon={Wrench} />
       {stats.retries > 0 && <Badge label={`${stats.retries} retries`} color="amber" icon={RotateCcw} />}
       {stats.reviews > 0 && <Badge label={`${stats.reviews} review`} color="amber" icon={Bell} />}
+      {!isTerminalStatus && onCancel && (
+        <button
+          onClick={onCancel}
+          disabled={cancelling}
+          className="ml-auto inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-1 rounded shrink-0 tracking-wide uppercase border border-err/25 bg-err-soft text-err hover:bg-err/10 transition-all"
+          title="Stop this agent"
+        >
+          {cancelling ? <Loader2 size={10} className="animate-spin" /> : <StopCircle size={10} />}
+          Stop
+        </button>
+      )}
     </div>
   );
 }
@@ -71,6 +83,7 @@ function ThinkingDots() {
 
 export default function AgentTimeline({ agentId, initialStatus, onStatusChange, onTerminal, onNavigateSettings }) {
   const bottomRef = useRef(null);
+  const [cancelling, setCancelling] = useState(false);
   const [agentDetail, setAgentDetail] = useState(null);
   const [replayMode, setReplayMode] = useState(false);
   const [visibleUpTo, setVisibleUpTo] = useState(Infinity);
@@ -95,6 +108,20 @@ export default function AgentTimeline({ agentId, initialStatus, onStatusChange, 
       return sum;
     }, 0);
   }, [events]);
+
+  const handleCancel = useCallback(async () => {
+    if (!agentId || cancelling) return;
+    setCancelling(true);
+    try {
+      await agentsApi.cancel(agentId);
+      onStatusChange?.('failed');
+      onTerminal?.({ type: 'goal_failed', reason: 'Cancelled by user' });
+    } catch {
+      // ignore
+    } finally {
+      setCancelling(false);
+    }
+  }, [agentId, cancelling, onStatusChange, onTerminal]);
 
   if (events.length === 0 && !questions.length) {
     return (
@@ -124,7 +151,7 @@ export default function AgentTimeline({ agentId, initialStatus, onStatusChange, 
         </div>
       )}
 
-      <RunOverview events={events} liveStatus={liveStatus} />
+      <RunOverview events={events} liveStatus={liveStatus} onCancel={handleCancel} cancelling={cancelling} />
       <ConnectionBanner meta={connectionMeta} />
 
       {/* Cost counter */}

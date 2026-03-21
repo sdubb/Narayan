@@ -84,6 +84,7 @@ pub fn build_router(
         .route("/agents/:id/plan/edit", post(edit_plan))
         .route("/agents/:id/pause", post(pause_agent))
         .route("/agents/:id/resume", post(resume_agent))
+        .route("/agents/:id/cancel", post(cancel_agent))
         .route("/agents/:id/clarify", post(submit_clarification))
         .route("/agents/:id/replay", get(replay_agent))
         .route("/agents/:id/citations", get(list_agent_citations))

@@ -1,8 +1,9 @@
-import { useState } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import clsx from 'clsx';
 import { Settings, LogOut, Bell, Plus, GitBranch, Loader2 } from 'lucide-react';
 import AgentListItem from '../sidebar/AgentListItem';
 import SkillAutocomplete from '../sidebar/SkillAutocomplete';
+import { conversations as conversationsApi } from '../../api';
 
 function dateGroup(iso) {
   const d = new Date(iso);
@@ -17,9 +18,51 @@ function dateGroup(iso) {
 export default function Sidebar({
   conversations, selectedId, onSelect, onNewConversation,
   onNavigate, pendingReviews = [], swarmDepth, convLatestStatus = {},
-  loading, skills = [],
+  loading, skills = [], onRefresh,
 }) {
   const [goalInput, setGoalInput] = useState('');
+  const [convAgents, setConvAgents] = useState({}); // { convId: [agent, ...] }
+
+  // Fetch agents for all conversations to show in expandable list
+  const fetchConvAgents = useCallback(async () => {
+    if (!conversations?.length) return;
+    const results = {};
+    // Only fetch for recent conversations (limit to 10 to avoid spamming)
+    const recent = conversations.slice(0, 10);
+    await Promise.all(
+      recent.map(conv =>
+        conversationsApi.get(conv.id)
+          .then(data => { results[conv.id] = data.agents || []; })
+          .catch(() => { results[conv.id] = []; })
+      )
+    );
+    setConvAgents(prev => ({ ...prev, ...results }));
+  }, [conversations]);
+
+  useEffect(() => {
+    fetchConvAgents();
+    // Refresh every 8 seconds to catch status changes
+    const iv = setInterval(fetchConvAgents, 8000);
+    return () => clearInterval(iv);
+  }, [fetchConvAgents]);
+
+  function handleAgentCancelled(agentId) {
+    // Optimistically remove from active status and refresh
+    setConvAgents(prev => {
+      const updated = { ...prev };
+      for (const convId of Object.keys(updated)) {
+        updated[convId] = updated[convId].map(a =>
+          a.id === agentId ? { ...a, status: 'failed' } : a
+        );
+      }
+      return updated;
+    });
+    // Trigger a refresh from parent after a short delay
+    setTimeout(() => {
+      fetchConvAgents();
+      onRefresh?.();
+    }, 500);
+  }
 
   const grouped = {};
   (conversations || []).forEach(conv => {
@@ -94,6 +137,8 @@ export default function Sidebar({
                   selected={conv.id === selectedId}
                   latestStatus={convLatestStatus[conv.id] || 'completed'}
                   onClick={() => onSelect(conv.id)}
+                  agents={convAgents[conv.id] || []}
+                  onAgentCancelled={handleAgentCancelled}
                 />
               ))}
             </div>

@@ -8,7 +8,7 @@
 use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
 use reqwest::Client;
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use crate::billing::provider::{BillingEvent, BillingPlan, BillingProvider, CheckoutSession, ProviderSubscription};
 

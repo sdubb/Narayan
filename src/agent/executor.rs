@@ -24,7 +24,7 @@ use crate::{
     gateway::{GatewayRequest, LlmGateway, TaskComplexity},
     policy::{
         engine::PolicyContext,
-        rules::{PolicyAction, PolicyRuleSet},
+        rules::PolicyRuleSet,
         PolicyDecision,
     },
     providers::{Message, ToolCall},

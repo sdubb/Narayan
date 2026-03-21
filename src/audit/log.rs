@@ -25,6 +25,9 @@ pub enum AuditAction {
     AgentPaused,
     AgentResumed,
     AgentClarified,
+    PlanApproved,
+    PlanRejected,
+    PlanEdited,
     // ── Execution ────────────────────────────────────────────────
     StepStarted,
     StepCompleted,

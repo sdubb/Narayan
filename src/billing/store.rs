@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use sqlx::Row;
 
-use crate::billing::provider::{BillingEvent, BillingPlan, BillingProvider, ProviderSubscription};
+use crate::billing::provider::{BillingEvent, BillingPlan, BillingProvider};
 
 // ── DB row types ──────────────────────────────────────────────────────────
 

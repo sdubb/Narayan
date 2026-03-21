@@ -17,7 +17,7 @@ use serde::Deserialize;
 
 use crate::{
     api::routes::AppState,
-    billing::{BillingPlan, BillingStore},
+    billing::BillingPlan,
     tenant::model::AuthenticatedTenant,
 };
 
@@ -175,7 +175,7 @@ pub async fn handle_webhook(
 pub async fn purchase_credits(
     State(state): State<AppState>,
     tenant: AuthenticatedTenant,
-    Json(body): Json<CheckoutRequest>,
+    Json(_body): Json<CheckoutRequest>,
 ) -> impl IntoResponse {
     let provider = match state.billing.default_provider() {
         Some(p) => p,

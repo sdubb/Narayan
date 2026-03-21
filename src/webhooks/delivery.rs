@@ -169,6 +169,10 @@ fn event_type_name(event: &AgentEvent) -> String {
         AgentEvent::ChildrenComplete { .. } => "children_complete",
         AgentEvent::GoalComplete { .. } => "goal_complete",
         AgentEvent::GoalFailed { .. } => "goal_failed",
+        AgentEvent::LlmCostUpdate { .. } => "llm_cost_update",
+        AgentEvent::PlanApproved { .. } => "plan_approved",
+        AgentEvent::PlanRejected { .. } => "plan_rejected",
+        AgentEvent::PlanEdited { .. } => "plan_edited",
     }
     .to_string()
 }

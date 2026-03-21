@@ -92,6 +92,7 @@ export const agents = {
     req('POST', `/agents/${id}/clarify`, { answers, freeform }),
   replay:  (id) => req('GET', `/agents/${id}/replay`),
   children: (id) => req('GET', `/agents/${id}/children`),
+  cancel:  (id) => req('POST', `/agents/${id}/cancel`),
 };
 
 // ── Workspace ─────────────────────────────────────────────────────────────

@@ -1048,9 +1048,10 @@ pub async fn approve_plan(
 
     let _ = state.audit_log.append(
         &tenant.tenant_id,
-        &agent_id,
-        "plan_approved",
+        Some(&agent_id),
+        crate::audit::AuditAction::PlanApproved,
         serde_json::json!({}),
+        None,
     ).await;
 
     Json(serde_json::json!({"status": "approved", "agent_id": agent_id})).into_response()
@@ -1083,9 +1084,10 @@ pub async fn reject_plan(
 
     let _ = state.audit_log.append(
         &tenant.tenant_id,
-        &agent_id,
-        "plan_rejected",
+        Some(&agent_id),
+        crate::audit::AuditAction::PlanRejected,
         serde_json::json!({"feedback": feedback}),
+        None,
     ).await;
 
     Json(serde_json::json!({"status": "rejected", "agent_id": agent_id})).into_response()
@@ -1122,9 +1124,10 @@ pub async fn edit_plan(
 
     let _ = state.audit_log.append(
         &tenant.tenant_id,
-        &agent_id,
-        "plan_edited",
+        Some(&agent_id),
+        crate::audit::AuditAction::PlanEdited,
         serde_json::json!({"step_count": step_count}),
+        None,
     ).await;
 
     Json(serde_json::json!({"status": "edited", "agent_id": agent_id, "step_count": step_count})).into_response()
@@ -1163,6 +1166,44 @@ pub async fn resume_agent(
             a.updated_at = chrono::Utc::now();
             match state.store.upsert_agent(&a).await {
                 Ok(_) => Json(serde_json::json!({ "resumed": true })).into_response(),
+                Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+            }
+        }
+        Ok(None) => err(StatusCode::NOT_FOUND, "agent not found"),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+/// POST /agents/:id/cancel — cancel an active agent, marking it as failed.
+/// Frees up the agent slot so the tenant can create new agents.
+pub async fn cancel_agent(
+    State(state): State<AppState>,
+    tenant: AuthenticatedTenant,
+    Path(agent_id): Path<String>,
+) -> impl IntoResponse {
+    match state.store.get_agent(&tenant.tenant_id, &agent_id).await {
+        Ok(Some(mut a)) => {
+            // Only cancel agents that are not already terminal
+            if matches!(a.status, AgentStatus::Completed | AgentStatus::Failed) {
+                return err(StatusCode::BAD_REQUEST, "agent is already in a terminal state");
+            }
+            a.status = AgentStatus::Failed;
+            a.final_answer = Some("Cancelled by user".to_string());
+            a.updated_at = chrono::Utc::now();
+            match state.store.upsert_agent(&a).await {
+                Ok(_) => {
+                    let _ = state
+                        .audit_log
+                        .append(
+                            &tenant.tenant_id,
+                            Some(&agent_id),
+                            crate::audit::AuditAction::GoalFailed,
+                            serde_json::json!({ "reason": "cancelled_by_user" }),
+                            None,
+                        )
+                        .await;
+                    Json(serde_json::json!({ "cancelled": true, "agent_id": agent_id })).into_response()
+                }
                 Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
             }
         }

@@ -244,6 +244,7 @@ export default function ChatPage({ onNavigate }) {
         swarmDepth={swarmDepth}
         convLatestStatus={convLatestStatus}
         loading={loading}
+        onRefresh={() => loadConversations(true)}
       />
 
       {/* ── Main area ────────────────────────────────────────── */}
