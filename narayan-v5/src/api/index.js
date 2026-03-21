@@ -91,6 +91,14 @@ export const agents = {
   clarify: (id, answers, freeform) =>
     req('POST', `/agents/${id}/clarify`, { answers, freeform }),
   replay:  (id) => req('GET', `/agents/${id}/replay`),
+  children: (id) => req('GET', `/agents/${id}/children`),
+};
+
+// ── Workspace ─────────────────────────────────────────────────────────────
+export const workspace = {
+  files: (agentId) => req('GET', `/agents/${agentId}/workspace/files`),
+  tree:  (agentId) => req('GET', `/agents/${agentId}/workspace/tree`),
+  file:  (agentId, path) => req('GET', `/agents/${agentId}/workspace/files/${encodeURIComponent(path)}`),
 };
 
 // ── Conversations ─────────────────────────────────────────────────────────

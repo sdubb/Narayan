@@ -41,6 +41,116 @@ function nextStatusFromEvent(type) {
   }[type];
 }
 
+// ── Group flat events into structured data ────────────────────────────────
+function buildGroupedEvents(events) {
+  const grouped = {
+    preflight: { started: false, passed: false, failed: false, failReason: '', questions: [] },
+    plan: { stepCount: 0, rationale: '', jobType: '', steps: [] },
+    steps: [],
+    delegation: { children: [], allComplete: false },
+    terminal: { type: null, summary: '', reason: '' },
+  };
+
+  let currentStepIndex = -1;
+
+  for (const ev of events) {
+    const t = ev.type;
+
+    // Preflight
+    if (t === 'preflight_started') grouped.preflight.started = true;
+    if (t === 'preflight_passed') grouped.preflight.passed = true;
+    if (t === 'preflight_failed') { grouped.preflight.failed = true; grouped.preflight.failReason = ev.reason || ''; }
+    if (t === 'clarification_needed') grouped.preflight.questions = ev.questions || [];
+    if (t === 'clarification_received') grouped.preflight.questions = [];
+
+    // Plan
+    if (t === 'plan_created') {
+      grouped.plan.stepCount = ev.step_count || 0;
+      grouped.plan.rationale = ev.rationale || '';
+      grouped.plan.jobType = ev.job_type || '';
+      grouped.plan.steps = ev.steps || [];
+    }
+
+    // Steps
+    if (t === 'step_started') {
+      currentStepIndex = grouped.steps.length;
+      grouped.steps.push({
+        index: ev.step_index ?? grouped.steps.length,
+        description: ev.description || '',
+        tools: [],
+        policy: [],
+        citations: [],
+        piiEvents: [],
+        slaEvents: [],
+        reviews: [],
+        completed: false,
+        summary: '',
+        retrying: false,
+        retryDelay: 0,
+        retryReason: '',
+      });
+    }
+
+    const step = currentStepIndex >= 0 ? grouped.steps[currentStepIndex] : null;
+
+    if (t === 'tool_called' && step) {
+      step.tools.push({ name: ev.tool_name, args_preview: ev.args_preview, output_preview: null, success: null, error: null });
+    }
+    if (t === 'tool_result' && step) {
+      const tool = step.tools.find(t2 => t2.name === ev.tool_name && t2.success === null);
+      if (tool) {
+        tool.output_preview = ev.output_preview;
+        tool.success = ev.success;
+        tool.error = ev.error;
+      } else {
+        step.tools.push({ name: ev.tool_name, args_preview: null, output_preview: ev.output_preview, success: ev.success, error: ev.error });
+      }
+    }
+    if (t === 'policy_decision' && step) {
+      step.policy.push({ decision: ev.decision, rule_id: ev.rule_id, reason: ev.reason, risk_level: ev.risk_level, tool: ev.tool });
+    }
+    if (t === 'pii_redacted' && step) {
+      step.piiEvents.push({ tool: ev.tool, fields_redacted: ev.fields_redacted || [] });
+    }
+    if (t === 'sla_check' && step) {
+      step.slaEvents.push({ pct_elapsed: ev.pct_elapsed, message: ev.message, action: ev.action, deadline: ev.deadline });
+    }
+    if (t === 'citation_recorded' && step) {
+      step.citations.push({ claim: ev.claim, source_ref: ev.source_ref, source_type: ev.source_type, confidence: ev.confidence, step_index: ev.step_index });
+    }
+    if (t === 'review_required' && step) {
+      step.reviews.push({ review_id: ev.review_id, summary: ev.summary, reason: ev.reason, rule_id: ev.rule_id });
+    }
+    if (t === 'step_completed' && step) {
+      step.completed = true;
+      step.summary = ev.summary || '';
+    }
+    if (t === 'step_retrying' && step) {
+      step.retrying = true;
+      step.retryDelay = ev.delay_secs || 10;
+      step.retryReason = ev.reason || '';
+    }
+
+    // Delegation
+    if (t === 'child_spawned') {
+      grouped.delegation.children.push({ child_agent_id: ev.child_agent_id, sub_goal: ev.sub_goal });
+    }
+    if (t === 'children_complete') {
+      grouped.delegation.allComplete = true;
+    }
+
+    // Terminal
+    if (t === 'goal_complete') {
+      grouped.terminal = { type: 'complete', summary: ev.summary || '', reason: '' };
+    }
+    if (t === 'goal_failed') {
+      grouped.terminal = { type: 'failed', summary: '', reason: ev.reason || '' };
+    }
+  }
+
+  return grouped;
+}
+
 export function useAgentTimeline(agentId, initialStatus, { onStatusChange, onTerminal } = {}) {
   const [events, setEvents] = useState([]);
   const [questions, setQuestions] = useState([]);
@@ -72,24 +182,14 @@ export function useAgentTimeline(agentId, initialStatus, { onStatusChange, onTer
   function appendEvent(event) {
     setEvents((current) => {
       const key = JSON.stringify({
-        type: event.type,
-        step_index: event.step_index,
-        tool_name: event.tool_name,
-        description: event.description,
-        summary: event.summary,
-        reason: event.reason,
-        ts: event.ts,
-        historical: event.historical,
+        type: event.type, step_index: event.step_index, tool_name: event.tool_name,
+        description: event.description, summary: event.summary, reason: event.reason,
+        ts: event.ts, historical: event.historical,
       });
       const alreadyExists = current.some((item) => JSON.stringify({
-        type: item.type,
-        step_index: item.step_index,
-        tool_name: item.tool_name,
-        description: item.description,
-        summary: item.summary,
-        reason: item.reason,
-        ts: item.ts,
-        historical: item.historical,
+        type: item.type, step_index: item.step_index, tool_name: item.tool_name,
+        description: item.description, summary: item.summary, reason: item.reason,
+        ts: item.ts, historical: item.historical,
       }) === key);
       return alreadyExists ? current : [...current, event];
     });
@@ -125,12 +225,8 @@ export function useAgentTimeline(agentId, initialStatus, { onStatusChange, onTer
         const replay = await agents.replay(agentId);
         if (cancelled || !mountedRef.current) return;
         const replayEvents = replayToEvents(replay);
-        if (replayEvents.length) {
-          setEvents(replayEvents);
-        }
-      } catch {
-        // Replay is optional; live stream still proceeds.
-      }
+        if (replayEvents.length) setEvents(replayEvents);
+      } catch {}
     }
 
     function scheduleReconnect(lastError) {
@@ -140,23 +236,12 @@ export function useAgentTimeline(agentId, initialStatus, { onStatusChange, onTer
       setRetryAttempt(nextAttempt);
       retryAttemptRef.current = nextAttempt;
       setConnectionState('reconnecting');
-      appendEvent({
-        type: 'stream_status',
-        ts: nowTs(),
-        summary: `Stream disconnected. Reconnecting in ${Math.round(delay / 1000)}s.`,
-        detail: lastError?.message || '',
-      });
-      reconnectTimer.current = setTimeout(() => {
-        if (!cancelled) connect();
-      }, delay);
+      appendEvent({ type: 'stream_status', ts: nowTs(), summary: `Reconnecting in ${Math.round(delay / 1000)}s.`, detail: lastError?.message || '' });
+      reconnectTimer.current = setTimeout(() => { if (!cancelled) connect(); }, delay);
     }
 
     function connect() {
-      if (cancelled || isTerminalStatus(initialStatus)) {
-        setConnectionState('idle');
-        return;
-      }
-
+      if (cancelled || isTerminalStatus(initialStatus)) { setConnectionState('idle'); return; }
       cleanupStream();
       setConnectionState('live');
       streamRef.current = openAgentStream(
@@ -170,17 +255,9 @@ export function useAgentTimeline(agentId, initialStatus, { onStatusChange, onTer
           setRetryAttempt(0);
           retryAttemptRef.current = 0;
 
-          if (event.type === 'clarification_needed' && event.questions) {
-            setQuestions(event.questions);
-          }
-
+          if (event.type === 'clarification_needed' && event.questions) setQuestions(event.questions);
           if (event.type === 'tool_result' && event.tool_name === 'suggest_connectors') {
-            try {
-              const payload = JSON.parse(event.raw_output || '{}');
-              if (payload.groups) setConnectorGroups(payload.groups);
-            } catch {
-              // ignore parse failures
-            }
+            try { const p = JSON.parse(event.raw_output || '{}'); if (p.groups) setConnectorGroups(p.groups); } catch {}
           }
 
           const next = nextStatusFromEvent(event.type);
@@ -199,39 +276,24 @@ export function useAgentTimeline(agentId, initialStatus, { onStatusChange, onTer
         (error) => {
           if (cancelled || !mountedRef.current) return;
           setIsThinking(false);
-          if (error?.message?.includes('sign in again')) {
-            setConnectionState('auth_lost');
-            return;
-          }
+          if (error?.message?.includes('sign in again')) { setConnectionState('auth_lost'); return; }
           appendEvent({ type: 'stream_error', ts: nowTs(), summary: error?.message || 'Stream error' });
           scheduleReconnect(error);
         },
       );
     }
 
-    hydrateReplay().finally(() => {
-      if (!cancelled) connect();
-    });
+    hydrateReplay().finally(() => { if (!cancelled) connect(); });
 
-    return () => {
-      cancelled = true;
-      cleanupStream();
-      clearTimeout(thinkTimer.current);
-    };
+    return () => { cancelled = true; cleanupStream(); clearTimeout(thinkTimer.current); };
   }, [agentId, initialStatus]);
 
-  const connectionMeta = useMemo(
-    () => ({ state: connectionState, retryAttempt }),
-    [connectionState, retryAttempt],
-  );
+  const connectionMeta = useMemo(() => ({ state: connectionState, retryAttempt }), [connectionState, retryAttempt]);
+
+  const groupedEvents = useMemo(() => buildGroupedEvents(events), [events]);
 
   return {
-    events,
-    questions,
-    connectorGroups,
-    liveStatus,
-    isThinking,
-    setQuestions,
-    connectionMeta,
+    events, questions, connectorGroups, liveStatus, isThinking,
+    setQuestions, connectionMeta, groupedEvents,
   };
 }

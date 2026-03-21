@@ -5,8 +5,7 @@ import SettingsPage from './pages/SettingsPage';
 import { health }   from './api';
 
 export default function App() {
-  const [page, setPage]       = useState('loading');
-  const [planError, setPlanError] = useState(''); // step-limit 402 errors surfaced globally
+  const [page, setPage] = useState('loading');
 
   useEffect(() => {
     const token = localStorage.getItem('narayan_token');
@@ -63,5 +62,5 @@ export default function App() {
 
   if (page === 'auth')     return <AuthPage onAuth={onAuth} />;
   if (page === 'settings') return <SettingsPage onBack={() => setPage('chat')} />;
-  return <ChatPage onNavigate={onNavigate} onPlanError={setPlanError} />;
+  return <ChatPage onNavigate={onNavigate} />;
 }
