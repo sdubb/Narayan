@@ -7,9 +7,11 @@ import {
   ExternalLink, Plug, BookOpen, Layers, ArrowRight,
   Eye, FileCheck, Bell, AlertTriangle, Database,
   Cpu, GitBranch, Search, Link2,
+  Wrench,
 } from 'lucide-react';
 import { agents, conversations as conversationsApi, citations as citationsApi, reviews as reviewsApi, autoApprovals, swarm } from '../api';
 import clsx from 'clsx';
+import { useAgentTimeline } from '../hooks/useAgentTimeline';
 
 // ── Status config ─────────────────────────────────────────────────────────
 const STATUS = {
@@ -35,29 +37,41 @@ function timeAgo(iso) {
 function nowTs() {
   return new Date().toLocaleTimeString('en',{hour12:false,hour:'2-digit',minute:'2-digit',second:'2-digit'});
 }
-function extractText(ev) {
-  return ev.summary||ev.description||ev.reason||ev.rationale
-    ||ev.output_preview||ev.message||(ev.questions?.join(' / '))||ev.sub_goal||'';
+function normalizeQuestion(question, index) {
+  if (typeof question === 'string') {
+    return {
+      id: `question_${index}`,
+      prompt: question,
+      placeholder: 'Your answer…',
+      helperText: '',
+      options: [],
+      required: true,
+      secret: false,
+      connectorType: '',
+      actionLabel: '',
+    };
+  }
+  const options = Array.isArray(question?.options)
+    ? question.options.map((option) => typeof option === 'string' ? option : option?.label).filter(Boolean)
+    : [];
+  return {
+    id: question?.id || `question_${index}`,
+    prompt: question?.prompt || question?.question || `Question ${index + 1}`,
+    placeholder: question?.placeholder || 'Your answer…',
+    helperText: question?.helper_text || question?.helperText || '',
+    options,
+    required: question?.required !== false,
+    secret: Boolean(question?.secret),
+    connectorType: question?.connector_type || question?.connectorType || '',
+    actionLabel: question?.action_label || question?.actionLabel || '',
+  };
 }
-function streamAgent(agentId, onEvent, onError) {
-  const token = localStorage.getItem('narayan_token');
-  const BASE  = import.meta.env.VITE_API_URL||'/api';
-  let active  = true; const ctrl = new AbortController();
-  (async () => {
-    try {
-      const res = await fetch(`${BASE}/agents/${agentId}/stream`,{headers:{Authorization:`Bearer ${token}`},signal:ctrl.signal});
-      if (!res.ok){onError?.(new Error(`HTTP ${res.status}`));return;}
-      const reader=res.body.getReader(),decoder=new TextDecoder(); let buf='';
-      while(active){
-        const{done,value}=await reader.read(); if(done)break;
-        buf+=decoder.decode(value,{stream:true});
-        const parts=buf.split('\n\n'); buf=parts.pop()??'';
-        for(const part of parts) for(const line of part.split('\n'))
-          if(line.startsWith('data: ')){const d=line.slice(6).trim();if(d&&d!=='[DONE]')try{onEvent(JSON.parse(d));}catch{}}
-      }
-    } catch(e){if(e.name!=='AbortError')onError?.(e);}
-  })();
-  return{close:()=>{active=false;ctrl.abort();}};
+function extractText(ev) {
+  const questions = Array.isArray(ev.questions)
+    ? ev.questions.map((question, index) => normalizeQuestion(question, index).prompt).join(' / ')
+    : '';
+  return ev.summary||ev.description||ev.reason||ev.rationale
+    ||ev.output_preview||ev.message||questions||ev.sub_goal||'';
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -96,13 +110,14 @@ function PhaseLabel({text}) {
 // ═══════════════════════════════════════════════════════════
 // ── STEP ROW (generic) ───────────────────────────────────
 // ═══════════════════════════════════════════════════════════
-function StepRow({badge, badgeColor, badgeIcon, title, detail, code, timestamp, success, collapsible, children}) {
+function StepRow({badge, badgeColor, badgeIcon, icon, title, detail, code, timestamp, success, collapsible, children}) {
   const [open, setOpen] = useState(true);
   const hasExtra = collapsible && children;
+  const rowIcon = badgeIcon || icon;
   return (
     <div className="flex items-start gap-2.5 py-2.5 border-b border-border/50 last:border-0 animate-in group">
       <div className="pt-0.5 shrink-0">
-        <Badge label={badge} color={badgeColor} icon={badgeIcon}/>
+        <Badge label={badge} color={badgeColor} icon={rowIcon}/>
       </div>
       <div className="flex-1 min-w-0">
         <div className="flex items-start justify-between gap-2">
@@ -123,6 +138,15 @@ function StepRow({badge, badgeColor, badgeIcon, title, detail, code, timestamp, 
         {hasExtra && open && <div className="mt-1.5">{children}</div>}
       </div>
     </div>
+  );
+}
+
+function DetailBlock({value}) {
+  if (!value) return null;
+  return (
+    <pre className="overflow-x-auto rounded-lg bg-bg-active px-3 py-2 text-[11px] leading-relaxed text-tx-2 font-mono whitespace-pre-wrap break-words border border-border/60">
+      {value}
+    </pre>
   );
 }
 
@@ -162,24 +186,60 @@ function PlanCard({event}) {
   return (
     <SegmentCard color="blue" icon={Layers} label={`Plan ready — ${event.step_count} steps`}>
       <div className="py-2.5">
+        <div className="flex flex-wrap items-center gap-2 mb-2">
+          {event.job_type && <Badge label={event.job_type.replace(/_/g,' ')} color="blue" icon={Cpu}/>}
+          <Badge label={`${event.step_count} steps`} color="gray" icon={Layers}/>
+        </div>
         {event.rationale && <p className="text-[12px] text-tx-2 leading-relaxed mb-2">{event.rationale}</p>}
         <button onClick={()=>setOpen(o=>!o)} className="flex items-center gap-1.5 text-[11px] text-info/80 hover:text-info transition-colors">
           <ChevronDown size={11} className={clsx('transition-transform', !open&&'-rotate-90')}/>
           {open ? 'Hide steps' : 'Show steps'}
         </button>
         {open && event.steps?.length>0 && (
-          <div className="mt-2 space-y-1">
+          <div className="mt-2 space-y-2">
             {event.steps.map((s,i)=>(
-              <div key={i} className="flex items-start gap-2 text-[11px]">
-                <span className="font-mono text-accent/70 shrink-0 w-5 text-right">{i}</span>
-                <span className="text-tx-2 flex-1">{s.description}</span>
-                {s.tool && <span className="font-mono text-tx-4 shrink-0">{s.tool}</span>}
+              <div key={i} className="rounded-lg border border-border/60 bg-bg-card px-2.5 py-2">
+                <div className="flex items-start gap-2 text-[11px]">
+                  <span className="font-mono text-accent/70 shrink-0 w-5 text-right">{s.step_index ?? i}</span>
+                  <span className="text-tx-2 flex-1 leading-relaxed">{s.description}</span>
+                  {s.tool && <span className="font-mono text-tx-4 shrink-0">{s.tool}</span>}
+                </div>
+                {(s.success_criteria || s.condition) && (
+                  <div className="mt-2 space-y-1 text-[11px]">
+                    {s.success_criteria && <p className="text-tx-3"><span className="text-tx-4">Done when:</span> {s.success_criteria}</p>}
+                    {s.condition && <p className="text-tx-3"><span className="text-tx-4">Runs if:</span> <span className="font-mono">{s.condition}</span></p>}
+                  </div>
+                )}
               </div>
             ))}
           </div>
         )}
       </div>
     </SegmentCard>
+  );
+}
+
+function RunOverview({events, liveStatus}) {
+  const stats = events.reduce((acc, ev) => {
+    if (ev.type === 'step_started') acc.steps += 1;
+    if (ev.type === 'tool_called') acc.tools += 1;
+    if (ev.type === 'step_retrying') acc.retries += 1;
+    if (ev.type === 'review_required') acc.reviews += 1;
+    return acc;
+  }, {steps:0, tools:0, retries:0, reviews:0});
+  const plan = events.find((ev)=>ev.type==='plan_created');
+  return (
+    <div className="mb-3 rounded-xl border border-border bg-bg-card px-3.5 py-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <Badge label={(STATUS[liveStatus]||STATUS.pending).label} color={liveStatus==='failed'?'red':liveStatus==='completed'?'green':'blue'} icon={Activity}/>
+        {plan?.job_type && <Badge label={plan.job_type.replace(/_/g,' ')} color="violet" icon={Cpu}/>}
+        {plan?.step_count != null && <Badge label={`${plan.step_count} planned`} color="gray" icon={Layers}/>}
+        <Badge label={`${stats.steps} started`} color="gray" icon={Zap}/>
+        <Badge label={`${stats.tools} tools`} color="gray" icon={Wrench}/>
+        {stats.retries>0 && <Badge label={`${stats.retries} retries`} color="amber" icon={RotateCcw}/>}
+        {stats.reviews>0 && <Badge label={`${stats.reviews} review`} color="amber" icon={Bell}/>}
+      </div>
+    </div>
   );
 }
 
@@ -469,11 +529,16 @@ function ConnectorCard({group, onNavigateSettings}) {
 // ═══════════════════════════════════════════════════════════
 // ── CLARIFY CARD (existing, restyled) ────────────────────
 // ═══════════════════════════════════════════════════════════
-function ClarifyCard({agentId, questions, onDone}) {
-  const [answers,setAnswers]     = useState(questions.map(()=>''));
+function ClarifyCard({agentId, questions, onDone, onNavigateSettings}) {
+  const normalizedQuestions = questions.map(normalizeQuestion);
+  const [answers,setAnswers]     = useState(normalizedQuestions.map(()=>'')); 
   const [loading,setLoading]     = useState(false);
   const [submitted,setSubmitted] = useState(false);
   const [err,setErr]             = useState('');
+
+  useEffect(()=>{
+    setAnswers(normalizedQuestions.map(()=>'')); setSubmitted(false); setErr('');
+  },[questions]);
 
   async function submit() {
     setLoading(true); setErr('');
@@ -481,6 +546,10 @@ function ClarifyCard({agentId, questions, onDone}) {
     catch(e){setErr(e.message);}
     finally{setLoading(false);}
   }
+
+  const hasMissingRequired = normalizedQuestions.some((question, index) =>
+    question.required && !answers[index]?.trim()
+  );
 
   if(submitted) return (
     <SegmentCard color="green" icon={CheckCircle2} label="Answers received — agent resuming">
@@ -491,18 +560,46 @@ function ClarifyCard({agentId, questions, onDone}) {
   return (
     <SegmentCard color="amber" icon={Bot} label="Needs clarification">
       <div className="py-3 space-y-3">
-        {questions.map((q,i)=>(
-          <div key={i}>
-            <p className="text-[13px] text-tx-1 mb-1.5">{q}</p>
+        {normalizedQuestions.map((question,i)=>(
+          <div key={question.id || i} className="space-y-1.5">
+            <div className="flex items-center gap-2">
+              <p className="text-[13px] text-tx-1">{question.prompt}</p>
+              {question.secret && <Badge label="secret" color="amber" icon={Lock}/>}
+              {question.connectorType && <Badge label={question.connectorType} color="blue" icon={Plug}/>}
+            </div>
+            {question.helperText && <p className="text-[11px] text-tx-3 leading-relaxed">{question.helperText}</p>}
+            {question.connectorType && onNavigateSettings && (
+              <button
+                onClick={onNavigateSettings}
+                className="inline-flex items-center gap-1.5 text-[11px] font-medium text-accent hover:text-accent-text transition-colors"
+              >
+                {question.actionLabel || `Connect ${question.connectorType} in Settings`}
+                <ArrowRight size={10}/>
+              </button>
+            )}
             <input value={answers[i]}
               onChange={e=>{const n=[...answers];n[i]=e.target.value;setAnswers(n);}}
               onKeyDown={e=>{if(e.key==='Enter')submit();}}
-              placeholder="Your answer…"
+              type={question.secret ? 'password' : 'text'}
+              placeholder={question.placeholder}
               className="w-full rounded-lg border border-border bg-bg-card px-3 py-2 text-[13px] text-tx-1 placeholder-tx-4 outline-none focus:border-border-md focus:ring-2 focus:ring-accent/10 transition-all"/>
+            {question.options.length>0 && (
+              <div className="flex flex-wrap gap-2 pt-1">
+                {question.options.map(option=>(
+                  <button
+                    key={option}
+                    onClick={()=>{const n=[...answers];n[i]=option;setAnswers(n);}}
+                    className="rounded-full border border-border px-2.5 py-1 text-[11px] text-tx-2 hover:border-border-md hover:bg-bg-hover transition-colors"
+                  >
+                    {option}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         ))}
         {err&&<p className="text-[11px] text-err">{err}</p>}
-        <button onClick={submit} disabled={loading||answers.every(a=>!a.trim())}
+        <button onClick={submit} disabled={loading||hasMissingRequired}
           className="flex items-center gap-2 rounded-lg bg-tx-1 px-4 py-2 text-[12px] font-medium text-bg-card hover:bg-tx-2 disabled:opacity-50 transition-all">
           {loading?<Loader2 size={11} className="animate-spin"/>:<Send size={11}/>}
           Submit answers
@@ -705,25 +802,46 @@ function renderEvent(ev, idx, agentId, onNavigateSettings) {
   if (ev.type==='step_started') return (
     <StepRow key={idx} badge={`step ${ev.step_index??''}`} badgeColor="gray" icon={Zap} timestamp={ts}
       title={ev.description||`Step ${ev.step_index} started`}
-      detail={ev.tool ? `Tool: ${ev.tool}` : undefined}/>
+      detail={ev.tool ? `Tool: ${ev.tool}` : undefined}
+      collapsible={Boolean(ev.success_criteria || ev.condition)}>
+      <div className="space-y-2">
+        {ev.success_criteria && <p className="text-[11px] text-tx-3"><span className="text-tx-4">Done when:</span> {ev.success_criteria}</p>}
+        {ev.condition && <p className="text-[11px] text-tx-3"><span className="text-tx-4">Runs if:</span> <span className="font-mono">{ev.condition}</span></p>}
+      </div>
+    </StepRow>
   );
   if (ev.type==='tool_called') return (
     <StepRow key={idx} badge="calling" badgeColor="amber" timestamp={ts}
       title={`Calling ${ev.tool_name||'tool'}…`}
-      detail={ev.args_preview ? `Args: ${ev.args_preview}` : undefined}/>
+      detail={ev.step_description || undefined}
+      code={ev.args_preview ? `args: ${ev.args_preview}` : undefined}
+      collapsible={Boolean(ev.args_preview)}>
+      <DetailBlock value={ev.args_preview}/>
+    </StepRow>
   );
   if (ev.type==='tool_result') return (
     <StepRow key={idx} badge="tool" badgeColor={ev.success?'green':'amber'} timestamp={ts}
       title={ev.tool_name ? `${ev.tool_name} → ${ev.success?'success':'failed'}` : 'Tool executed'}
-      detail={ev.output_preview} success={ev.success}/>
+      detail={ev.error || undefined}
+      code={ev.output_preview ? `output: ${ev.output_preview}` : undefined}
+      success={ev.success}
+      collapsible={Boolean(ev.output_preview || ev.error)}>
+      <div className="space-y-2">
+        {ev.error && <DetailBlock value={ev.error}/>}
+        {ev.output_preview && <DetailBlock value={ev.output_preview}/>}
+      </div>
+    </StepRow>
   );
   if (ev.type==='step_completed') return (
     <StepRow key={idx} badge="done" badgeColor="green" icon={CheckCircle2} timestamp={ts}
-      title={ev.summary||`Step ${ev.step_index??''} completed`} success={true}/>
+      title={ev.summary||`Step ${ev.step_index??''} completed`}
+      detail={ev.description || undefined}
+      success={true}/>
   );
   if (ev.type==='step_retrying') return (
     <StepRow key={idx} badge="retry" badgeColor="amber" icon={RotateCcw} timestamp={ts}
-      title={`Retrying in ${ev.delay_secs||10}s`} detail={ev.reason}/>
+      title={`Retrying in ${ev.delay_secs||10}s`}
+      detail={`${ev.reason || 'Transient failure'}${ev.retry_count ? ` • retry ${ev.retry_count}` : ''}`}/>
   );
 
   // ── Lag warning ───────────────────────────────────────────
@@ -746,6 +864,19 @@ function renderEvent(ev, idx, agentId, onNavigateSettings) {
   );
 
   // ── Terminal events ───────────────────────────────────────
+  if (ev.type==='replay_step') return (
+    <StepRow key={idx} badge={`history ${ev.step_index??''}`} badgeColor="blue" icon={Clock} timestamp={ts}
+      title={ev.description||`Recovered step ${ev.step_index??''}`}
+      detail="Recovered from saved execution history"
+      collapsible={Boolean(ev.output_preview)}>
+      <DetailBlock value={ev.output_preview}/>
+    </StepRow>
+  );
+  if (ev.type==='stream_status') return (
+    <StepRow key={idx} badge="stream" badgeColor="amber" icon={Network} timestamp={ts}
+      title={ev.summary||'Stream status update'}
+      detail={ev.detail||undefined}/>
+  );
   if (ev.type==='goal_complete') return (
     <div key={idx} className="flex items-start gap-2.5 py-3 mt-2 rounded-xl border border-ok/25 bg-ok-soft px-3.5 animate-in">
       <CheckCircle2 size={15} className="text-ok mt-0.5 shrink-0"/>
@@ -785,7 +916,6 @@ function renderEvent(ev, idx, agentId, onNavigateSettings) {
 function groupByPhase(events) {
   const groups = [];
   let currentPhase = null;
-  let currentStep  = null;
 
   for (const ev of events) {
     // Determine if this event starts a new phase label
@@ -794,12 +924,13 @@ function groupByPhase(events) {
       phaseLabel = 'Preflight';
     } else if (ev.type==='planning_started'||ev.type==='plan_created') {
       phaseLabel = 'Planning';
+    } else if (ev.type==='replay_step') {
+      phaseLabel = 'Recovered history';
     } else if (ev.type==='connector_trigger') {
       phaseLabel = `${ev.connector_type||'Connector'} trigger`;
     } else if (ev.type==='step_started') {
       const desc = ev.description ? ` — ${ev.description.slice(0,40)}${ev.description.length>40?'…':''}` : '';
       phaseLabel = `Step ${ev.step_index??''}${desc}`;
-      currentStep = ev.step_index;
     } else if ((ev.type==='goal_complete'||ev.type==='goal_failed'||ev.type==='evidence_packaged') && currentPhase!=='Completion') {
       phaseLabel = 'Completion';
     }
@@ -814,60 +945,109 @@ function groupByPhase(events) {
   return groups;
 }
 
+function filterEventsForMode(events, mode) {
+  if (mode === 'raw' || mode === 'detailed') return events;
+  const overviewTypes = new Set([
+    'preflight_started',
+    'preflight_passed',
+    'preflight_failed',
+    'clarification_needed',
+    'clarification_received',
+    'planning_started',
+    'plan_created',
+    'step_started',
+    'step_completed',
+    'step_retrying',
+    'review_required',
+    'child_spawned',
+    'children_complete',
+    'goal_complete',
+    'goal_failed',
+    'stream_error',
+    'stream_status',
+    'replay_step',
+  ]);
+  return events.filter((ev) => overviewTypes.has(ev.type));
+}
+
+function TimelineModeSwitch({mode, onChange}) {
+  const modes = [
+    ['overview', 'Overview'],
+    ['detailed', 'Detailed'],
+    ['raw', 'Raw'],
+  ];
+  return (
+    <div className="mb-3 flex flex-wrap items-center gap-2">
+      {modes.map(([value, label]) => (
+        <button
+          key={value}
+          onClick={() => onChange(value)}
+          className={clsx(
+            'rounded-full border px-2.5 py-1 text-[11px] transition-colors',
+            mode === value
+              ? 'border-accent bg-accent-soft text-accent'
+              : 'border-border bg-bg-card text-tx-3 hover:border-border-md hover:text-tx-2',
+          )}
+        >
+          {label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function ConnectionBanner({meta}) {
+  if (!meta || ['idle', 'live', 'closed'].includes(meta.state)) return null;
+  const title = meta.state === 'hydrating'
+    ? 'Loading saved run history...'
+    : meta.state === 'reconnecting'
+      ? `Reconnecting live stream... attempt ${meta.retryAttempt || 1}`
+      : meta.state === 'auth_lost'
+        ? 'Session expired'
+        : 'Connecting...';
+  const detail = meta.state === 'auth_lost'
+    ? 'Please sign in again to resume live updates.'
+    : 'The timeline will continue updating automatically.';
+  return (
+    <div className="mb-3 rounded-xl border border-border bg-bg-card px-3.5 py-3">
+      <div className="flex items-center gap-2">
+        <Loader2 size={13} className="text-tx-4 animate-spin shrink-0"/>
+        <div>
+          <p className="text-[12px] font-medium text-tx-2">{title}</p>
+          <p className="text-[11px] text-tx-4 mt-0.5">{detail}</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function RawEventCard({event}) {
+  return (
+    <div className="rounded-lg border border-border/60 bg-bg-card px-3 py-2">
+      <div className="flex items-center justify-between gap-2 mb-2">
+        <span className="font-mono text-[11px] text-accent">{event.type}</span>
+        <span className="font-mono text-[10px] text-tx-4">{event.ts}</span>
+      </div>
+      <DetailBlock value={JSON.stringify(event, null, 2)}/>
+    </div>
+  );
+}
+
 // ═══════════════════════════════════════════════════════════
 // ── EVENT FEED ───────────────────────────────────────────
 // ═══════════════════════════════════════════════════════════
 function EventFeed({agentId, initialStatus, onStatusChange, onTerminal, onNavigateSettings}) {
-  const [events,setEvents]                   = useState([]);
-  const [questions,setQuestions]             = useState([]);
-  const [connectorGroups,setConnectorGroups] = useState([]);
-  const [liveStatus,setLiveStatus]           = useState(initialStatus);
-  const [isThinking,setIsThinking]           = useState(false);
+  const [mode,setMode] = useState('detailed');
   const bottomRef  = useRef(null);
-  const streamRef  = useRef(null);
-  const thinkTimer = useRef(null);
-
-  function bumpThinking() {
-    setIsThinking(true); clearTimeout(thinkTimer.current);
-    thinkTimer.current = setTimeout(()=>setIsThinking(false),4000);
-  }
-
-  useEffect(()=>{
-    if(!agentId) return;
-    setEvents([]); setQuestions([]); setConnectorGroups([]);
-    setIsThinking(false); setLiveStatus(initialStatus);
-    if(TERMINAL.has(initialStatus)) return;
-
-    streamRef.current?.close();
-    streamRef.current = streamAgent(agentId,(ev)=>{
-      setEvents(p=>[...p,{...ev,ts:nowTs()}]);
-      bumpThinking();
-
-      if(ev.type==='clarification_needed'&&ev.questions) setQuestions(ev.questions);
-
-      if(ev.type==='tool_result'&&ev.tool_name==='suggest_connectors') {
-        try{const p=JSON.parse(ev.raw_output||'{}');if(p.groups)setConnectorGroups(p.groups);}catch{}
-      }
-
-      const next={
-        goal_complete:'completed', goal_failed:'failed',
-        step_started:'running', clarification_needed:'clarifying',
-        clarification_received:'running',
-        child_spawned:'delegating', planning_started:'running',
-      }[ev.type];
-      if(next){
-        setLiveStatus(next); onStatusChange?.(next);
-        if(next==='completed'||next==='failed'){
-          setIsThinking(false); clearTimeout(thinkTimer.current); onTerminal?.(ev);
-        }
-      }
-    },(err)=>{
-      setIsThinking(false);
-      setEvents(p=>[...p,{type:'stream_error',ts:nowTs(),summary:err.message}]);
-    });
-
-    return()=>{ streamRef.current?.close(); clearTimeout(thinkTimer.current); };
-  },[agentId]);
+  const {
+    events,
+    questions,
+    connectorGroups,
+    liveStatus,
+    isThinking,
+    setQuestions,
+    connectionMeta,
+  } = useAgentTimeline(agentId, initialStatus, { onStatusChange, onTerminal });
 
   useEffect(()=>{ bottomRef.current?.scrollIntoView({behavior:'smooth'}); },[events,isThinking]);
 
@@ -880,24 +1060,36 @@ function EventFeed({agentId, initialStatus, onStatusChange, onTerminal, onNaviga
     </div>
   );
 
-  const groups = groupByPhase(events);
+  const visibleEvents = filterEventsForMode(events, mode);
+  const groups = groupByPhase(visibleEvents);
 
   return (
     <div className="py-2">
-      {groups.map((group, gi)=>(
-        <div key={gi}>
-          {group.label && <PhaseLabel text={group.label}/>}
-          <div className="divide-y divide-border/30">
-            {group.events.map((ev, ei)=>
-              renderEvent(ev, `${gi}-${ei}`, agentId, onNavigateSettings)
-            ).filter(Boolean)}
-          </div>
+      <RunOverview events={events} liveStatus={liveStatus}/>
+      <ConnectionBanner meta={connectionMeta}/>
+      <TimelineModeSwitch mode={mode} onChange={setMode}/>
+
+      {mode === 'raw' ? (
+        <div className="space-y-2">
+          {visibleEvents.map((event, index) => <RawEventCard key={`${event.type}-${index}`} event={event}/>)}
         </div>
-      ))}
+      ) : (
+        groups.map((group, gi)=>(
+          <div key={gi}>
+            {group.label && <PhaseLabel text={group.label}/>}
+            <div className="divide-y divide-border/30">
+              {group.events.map((ev, ei)=>
+                renderEvent(ev, `${gi}-${ei}`, agentId, onNavigateSettings)
+              ).filter(Boolean)}
+            </div>
+          </div>
+        ))
+      )}
 
       {questions.length>0&&liveStatus==='clarifying'&&(
         <ClarifyCard agentId={agentId} questions={questions}
-          onDone={()=>{setQuestions([]);onStatusChange?.('waiting');}}/>
+          onDone={()=>{setQuestions([]);onStatusChange?.('waiting');}}
+          onNavigateSettings={onNavigateSettings}/>
       )}
 
       {connectorGroups.map((group,i)=>(
@@ -1013,16 +1205,12 @@ function ConversationThread({convId, agentStatuses, terminalEvents, onStatusChan
                 </div>
 
                 {isTerminal ? (
-                  <div className="rounded-2xl rounded-bl-md border border-border bg-bg-card p-4">
-                    {agent.final_answer ? (
-                      <p className="text-[13px] text-tx-1 leading-relaxed whitespace-pre-wrap">{agent.final_answer}</p>
-                    ) : terminalEvent?.summary ? (
-                      <p className="text-[13px] text-tx-1 leading-relaxed whitespace-pre-wrap">{terminalEvent.summary}</p>
-                    ) : status==='failed' ? (
-                      <p className="text-[13px] text-err">{terminalEvent?.reason || 'Agent failed'}</p>
-                    ) : (
-                      <p className="text-[13px] text-tx-3">Completed</p>
-                    )}
+                  <div className="rounded-2xl rounded-bl-md border border-border bg-bg-card overflow-hidden">
+                    <AgentResultView agentId={agent.id} terminalEvent={terminalEvent || {
+                      type: status === 'failed' ? 'goal_failed' : 'goal_complete',
+                      summary: agent.final_answer,
+                      reason: agent.final_answer,
+                    }}/>
                   </div>
                 ) : isLast ? (
                   <div className="rounded-2xl rounded-bl-md border border-border bg-bg-card overflow-hidden">

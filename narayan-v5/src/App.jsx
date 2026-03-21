@@ -18,8 +18,19 @@ export default function App() {
 
   // Listen for 401 events emitted by the API client when JWT expires
   useEffect(() => {
-    function handleUnauth() {
+    function handleUnauth(event) {
+      const currentToken = localStorage.getItem('narayan_token');
+      const sessionStartedAt = Number(localStorage.getItem('narayan_session_started_at') || '0');
+      const detail = event?.detail || {};
+      if (detail.token && currentToken && detail.token !== currentToken) {
+        return;
+      }
+      if (detail.at && sessionStartedAt && detail.at < sessionStartedAt) {
+        return;
+      }
       localStorage.removeItem('narayan_token');
+      localStorage.removeItem('narayan_tenant_id');
+      localStorage.removeItem('narayan_session_started_at');
       setPage('auth');
     }
     window.addEventListener('narayan:unauthenticated', handleUnauth);
@@ -29,6 +40,7 @@ export default function App() {
   function onAuth({ token, tenant_id }) {
     if (token)     localStorage.setItem('narayan_token',     token);
     if (tenant_id) localStorage.setItem('narayan_tenant_id', tenant_id);
+    localStorage.setItem('narayan_session_started_at', String(Date.now()));
     setPage('chat');
   }
 

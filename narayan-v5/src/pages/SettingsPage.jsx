@@ -7,19 +7,29 @@ import {
   ChevronDown, GitBranch, Database, ArrowRight, CreditCard,
   ExternalLink, Copy, CheckCheck, X,
 } from 'lucide-react';
-import { credentials, routing, metrics, skills, reviews, citations, swarm, agents, autoApprovals, connectors, billing } from '../api';
+import { credentials, providers as providersApi, routing, metrics, skills, reviews, citations, swarm, agents, autoApprovals, connectors, billing } from '../api';
 import clsx from 'clsx';
 
-const PROVIDERS = [
+const FALLBACK_PROVIDERS = [
   { id:'anthropic',  label:'Anthropic',  models:['claude-sonnet-4-20250514','claude-opus-4-20250514','claude-haiku-4-5-20251001'] },
   { id:'openai',     label:'OpenAI',     models:['gpt-4o','gpt-4o-mini','o1','o3-mini'] },
-  { id:'groq',       label:'Groq',       models:['llama-3.3-70b-versatile','llama-3.1-8b-instant','mixtral-8x7b-32768'] },
+  { id:'groq',       label:'Groq',       models:['openai/gpt-oss-120b','llama-3.3-70b-versatile','llama-3.1-8b-instant','mixtral-8x7b-32768'] },
   { id:'gemini',     label:'Gemini',     models:['gemini-2.0-flash','gemini-2.0-pro','gemini-1.5-pro'] },
-  { id:'nvidia',     label:'NVIDIA',     models:['meta/llama-3.1-70b-instruct','meta/llama-3.1-8b-instruct','nvidia/llama-3.1-nemotron-70b-instruct'] },
+  { id:'nvidia',     label:'NVIDIA',     models:['openai/gpt-oss-120b','nvidia/nemotron-3-super-120b-a12b','nvidia/nemotron-3-nano-30b-a3b','meta/llama-3.1-70b-instruct','meta/llama-3.1-8b-instruct','nvidia/llama-3.1-nemotron-70b-instruct'] },
   { id:'openrouter', label:'OpenRouter', models:['openai/gpt-4o','anthropic/claude-3-5-sonnet','meta-llama/llama-3.3-70b-instruct'] },
   { id:'ollama',     label:'Ollama',     models:['llama3.3','qwen2.5-coder','deepseek-r1'] },
   { id:'compatible', label:'Compatible', models:['custom-model'] },
 ];
+
+const DEFAULT_PROVIDER_ID = FALLBACK_PROVIDERS[0].id;
+
+function getProvider(list, providerId) {
+  return list.find(provider => provider.id === providerId);
+}
+
+function firstModel(provider) {
+  return provider?.models?.[0] || '';
+}
 
 const COMPLEXITY = {
   simple:  {label:'Simple',  desc:'Evaluator, preflight, clarifier'},
@@ -102,25 +112,46 @@ export default function SettingsPage({onBack}) {
 function CredTab({setError,flash}) {
   const [creds,setCreds]   = useState([]);
   const [loading,setLoading] = useState(true);
-  const [form,setForm]     = useState({provider:'anthropic',api_key:'',model:'',label:''});
+  const [providers,setProviders] = useState(FALLBACK_PROVIDERS);
+  const [form,setForm]     = useState({
+    provider: DEFAULT_PROVIDER_ID,
+    api_key: '',
+    model: firstModel(FALLBACK_PROVIDERS[0]),
+    label: '',
+  });
   const [showKey,setShowKey] = useState(false);
   const [adding,setAdding] = useState(false);
 
   const load = useCallback(async()=>{
     setLoading(true);
-    try{const r=await credentials.list();setCreds(r.credentials||[]);}
+    try{
+      const [credRes, providerRes] = await Promise.all([
+        credentials.list(),
+        providersApi.list().catch(()=>({ providers: FALLBACK_PROVIDERS })),
+      ]);
+      const nextProviders = providerRes.providers?.length ? providerRes.providers : FALLBACK_PROVIDERS;
+      setProviders(nextProviders);
+      setCreds(credRes.credentials||[]);
+      setForm(current=>{
+        const nextProviderId = getProvider(nextProviders, current.provider)?.id || nextProviders[0]?.id || DEFAULT_PROVIDER_ID;
+        const nextProvider = getProvider(nextProviders, nextProviderId);
+        const nextModel = nextProvider?.models?.includes(current.model) ? current.model : firstModel(nextProvider);
+        return {...current, provider: nextProviderId, model: nextModel};
+      });
+    }
     catch(e){setError(e.message);}
     finally{setLoading(false);}
-  },[]);
+  },[setError]);
   useEffect(()=>{load();},[]);
 
   async function add(e) {
     e.preventDefault(); if(!form.api_key.trim()) return;
     setAdding(true); setError('');
     try {
-      const model=form.model||PROVIDERS.find(p=>p.id===form.provider)?.models[0]||'';
+      const model=form.model||firstModel(getProvider(providers, form.provider));
       await credentials.set(form.provider,form.api_key,model,form.label||form.provider);
-      setForm({provider:'anthropic',api_key:'',model:'',label:''});
+      const defaultProvider = getProvider(providers, DEFAULT_PROVIDER_ID) || providers[0];
+      setForm({provider:defaultProvider?.id||DEFAULT_PROVIDER_ID,api_key:'',model:firstModel(defaultProvider),label:''});
       await load(); flash('Credential saved.');
     } catch(e){setError(e.message);}
     finally{setAdding(false);}
@@ -174,16 +205,16 @@ function CredTab({setError,flash}) {
             <div>
               <label className="block text-xs font-medium text-tx-3 mb-1.5">Provider</label>
               <select value={form.provider}
-                onChange={e=>{const p=PROVIDERS.find(p=>p.id===e.target.value);setForm(f=>({...f,provider:e.target.value,model:p?.models[0]||''}));}}
+                onChange={e=>{const provider=getProvider(providers, e.target.value);setForm(f=>({...f,provider:e.target.value,model:firstModel(provider)}));}}
                 className="w-full rounded-lg border border-border bg-bg px-3 py-2.5 text-sm text-tx-1 outline-none focus:border-border-md focus:ring-2 focus:ring-accent/10 transition-all">
-                {PROVIDERS.map(p=><option key={p.id} value={p.id}>{p.label}</option>)}
+                {providers.map(provider=><option key={provider.id} value={provider.id}>{provider.label}</option>)}
               </select>
             </div>
             <div>
               <label className="block text-xs font-medium text-tx-3 mb-1.5">Model</label>
               <select value={form.model} onChange={e=>setForm(f=>({...f,model:e.target.value}))}
                 className="w-full rounded-lg border border-border bg-bg px-3 py-2.5 text-sm text-tx-1 outline-none focus:border-border-md focus:ring-2 focus:ring-accent/10 transition-all">
-                {(PROVIDERS.find(p=>p.id===form.provider)?.models||[]).map(m=><option key={m} value={m}>{m}</option>)}
+                {(getProvider(providers, form.provider)?.models||[]).map(model=><option key={model} value={model}>{model}</option>)}
               </select>
             </div>
           </div>

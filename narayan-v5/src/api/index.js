@@ -5,12 +5,28 @@ function getToken() {
   return localStorage.getItem('narayan_token');
 }
 
+function emitUnauthenticated(expectedToken = null) {
+  const activeToken = getToken();
+  if (expectedToken === null) {
+    if (activeToken) return;
+  } else if (activeToken && activeToken !== expectedToken) {
+    return;
+  }
+  window.dispatchEvent(new CustomEvent('narayan:unauthenticated', {
+    detail: {
+      token: expectedToken,
+      at: Date.now(),
+    },
+  }));
+}
+
 async function req(method, path, body, isPublic = false) {
   const headers = { 'Content-Type': 'application/json' };
+  let token = null;
   if (!isPublic) {
-    const token = getToken();
+    token = getToken();
     if (!token) {
-      window.dispatchEvent(new CustomEvent('narayan:unauthenticated'));
+      emitUnauthenticated(null);
       throw new Error('Not authenticated');
     }
     headers['Authorization'] = `Bearer ${token}`;
@@ -23,7 +39,6 @@ async function req(method, path, body, isPublic = false) {
   });
 
   if (res.status === 401 && !isPublic) {
-    window.dispatchEvent(new CustomEvent('narayan:unauthenticated'));
     throw new Error('Session expired. Please sign in again.');
   }
 
@@ -51,6 +66,10 @@ export const credentials = {
     req('PUT', '/credentials', { provider, api_key, model, label }),
   list:   () => req('GET', '/credentials'),
   delete: (provider) => req('DELETE', `/credentials/${provider}`),
+};
+
+export const providers = {
+  list: () => req('GET', '/providers'),
 };
 
 // ── Routing ────────────────────────────────────────────────────────────────
@@ -191,10 +210,19 @@ export function streamAgent(agentId, onEvent, onError) {
 
   (async () => {
     try {
+      if (!token) {
+        emitUnauthenticated(null);
+        onError?.(new Error('Session expired. Please sign in again.'));
+        return;
+      }
       const res = await fetch(url, {
         headers: { Authorization: `Bearer ${token}` },
         signal:  ctrl.signal,
       });
+      if (res.status === 401) {
+        onError?.(new Error('Session expired. Please sign in again.'));
+        return;
+      }
       if (!res.ok) {
         onError?.(new Error(`Stream failed: HTTP ${res.status}`));
         return;
