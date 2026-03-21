@@ -80,9 +80,7 @@ impl PolicyRuleSet {
                 name: "Block critical-risk tools".into(),
                 tools: vec![],
                 condition: PolicyCondition::RiskLevel { min_level: "critical".into() },
-                action: PolicyAction::Block {
-                    reason: "critical-risk tools require explicit platform approval".into(),
-                },
+                action: PolicyAction::Block { reason: "critical-risk tools require explicit platform approval".into() },
                 enabled: true,
             },
             PolicyRule {
@@ -90,9 +88,7 @@ impl PolicyRuleSet {
                 name: "Free plan cannot use infra tools".into(),
                 tools: vec!["docker".into(), "kubernetes".into()],
                 condition: PolicyCondition::PlanIs { plan: "free".into() },
-                action: PolicyAction::Block {
-                    reason: "infrastructure tools require Pro or Enterprise plan".into(),
-                },
+                action: PolicyAction::Block { reason: "infrastructure tools require Pro or Enterprise plan".into() },
                 enabled: true,
             },
         ]

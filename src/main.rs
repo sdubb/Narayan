@@ -10,20 +10,20 @@ mod audit;
 mod auth;
 mod billing;
 mod browser;
-mod compliance;
-mod connectors;
-mod segments;
 mod cognition;
+mod compliance;
 mod config;
+mod connectors;
 mod debug;
 mod events;
-mod policy;
 mod gateway;
 mod knowledge;
 mod memory;
 mod metrics;
+mod policy;
 mod providers;
 mod scheduler;
+mod segments;
 mod skill_evolution;
 mod skill_marketplace;
 mod skills;
@@ -33,14 +33,14 @@ mod swarm;
 mod tenant;
 mod tools;
 mod util;
-mod worker;
 mod webhooks;
+mod worker;
 mod workspace;
 
 use agent::{AgentLoop, AgentManager, LlmClarifier, LlmEvaluator, LlmExecutor, LlmPlanner, LlmPreflight, LlmReflector};
 use api::{routes::AppState, server::serve};
 use audit::AuditLog;
-use billing::{BillingStore, paypal::PayPalProvider, stripe::StripeProvider};
+use billing::{paypal::PayPalProvider, stripe::StripeProvider, BillingStore};
 use browser::{BrowserPool, BrowserPoolConfig};
 use config::AppConfig;
 use connectors::{ConnectorInstallStore, ConnectorPoller};
@@ -146,13 +146,10 @@ async fn main() -> Result<()> {
     // ── Segment plugin system ───────────────────────────────────────────────
     // Build shared dependencies once — all segment plugins share these instances.
     let shared_deps = segments::SharedDeps {
-        policy_engine:    Arc::new(policy::PolicyEngine::new()),
+        policy_engine: Arc::new(policy::PolicyEngine::new()),
         citation_tracker: citation_tracker.clone(),
-        review_queue:     review_queue.clone(),
-        evidence_packager: Arc::new(compliance::EvidencePackager::new(
-            citation_tracker.clone(),
-            audit_log.clone(),
-        )),
+        review_queue: review_queue.clone(),
+        evidence_packager: Arc::new(compliance::EvidencePackager::new(citation_tracker.clone(), audit_log.clone())),
         pii_redactor: Arc::new(compliance::PiiRedactor::new()),
     };
 
@@ -282,9 +279,7 @@ async fn main() -> Result<()> {
 
     // ── LLM Gateway ────────────────────────────────────────────────────────
     let cache = Arc::new(ResponseCache::new(cfg.gateway.cache_ttl_secs, cfg.gateway.cache_max_entries));
-    let cost_tracker = Arc::new(
-        CostTracker::new(CostTracker::default_pricing())
-    );
+    let cost_tracker = Arc::new(CostTracker::new(CostTracker::default_pricing()));
     // Load per-tenant step counts so plan enforcement survives restarts
     metrics.load_steps_from_db(&store.pool()).await;
     let rate_limits = build_rate_limits(cfg.gateway.requests_per_sec);
@@ -296,7 +291,7 @@ async fn main() -> Result<()> {
         cost_tracker.clone(),
         rate_limiter,
         fallback_providers,
-    ));
+    ).with_event_bus(event_bus.clone()));
     tracing::info!("LLM gateway ready (BYOK)");
 
     // ── Browser Pool ───────────────────────────────────────────────────────
@@ -360,25 +355,23 @@ async fn main() -> Result<()> {
         tracing::info!("browser tools registered (5 tools with Chromium pool)");
     }
     // Wire connector install store into McpSessionTool for auto token injection
-    tool_registry.register(Arc::new(
-        tools::mcp_session::McpSessionTool::new()
-            .with_install_store(connector_installs.clone())
-    ));
+    tool_registry
+        .register(Arc::new(tools::mcp_session::McpSessionTool::new().with_install_store(connector_installs.clone())));
     let tool_registry = Arc::new(tool_registry);
     tracing::info!("{} tools registered", tool_registry.list().len());
 
     // ── Capability systems ─────────────────────────────────────────────────
-    let skill_registry: Arc<RwLock<SkillRegistry>> = Arc::new(RwLock::new(SkillRegistry::new()));
+    let skill_registry: Arc<RwLock<SkillRegistry>> = Arc::new(RwLock::new(SkillRegistry::with_curated_defaults()));
     let marketplace: Arc<Mutex<SkillMarketplace>> = Arc::new(Mutex::new(SkillMarketplace::new()));
     let knowledge_graph: Arc<Mutex<KnowledgeGraph>> = Arc::new(Mutex::new(KnowledgeGraph::new()));
 
     // ── Agent runtime ──────────────────────────────────────────────────────
-    let planner   = Arc::new(LlmPlanner::new(gateway.clone()).with_store(store.clone()));
-    let executor  = Arc::new(
+    let planner = Arc::new(LlmPlanner::new(gateway.clone()).with_store(store.clone()));
+    let executor = Arc::new(
         LlmExecutor::new(gateway.clone(), tool_registry.clone(), agent_services.clone())
             .with_tenant_store(tenant_store.clone())
             .with_event_bus(event_bus.clone())
-            .with_store(store.clone())
+            .with_store(store.clone()),
     );
     let evaluator = Arc::new(LlmEvaluator::new(gateway.clone()));
     let reflector = Arc::new(LlmReflector::new(gateway.clone(), planner.clone()));
@@ -399,7 +392,7 @@ async fn main() -> Result<()> {
             knowledge_graph.clone(),
             vector_store.clone(),
             embedder.clone(),
-            agent_services.clone(),  // ← wired: citations, SLA, reviews
+            agent_services.clone(), // ← wired: citations, SLA, reviews
         )
         .with_limits(50, 300),
     );
@@ -447,10 +440,7 @@ async fn main() -> Result<()> {
     ));
 
     // ── Connector poller ───────────────────────────────────────────────────
-    let connector_poller = Arc::new(ConnectorPoller::new(
-        connector_installs.clone(),
-        manager.clone(),
-    ));
+    let connector_poller = Arc::new(ConnectorPoller::new(connector_installs.clone(), manager.clone()));
 
     // ── API ────────────────────────────────────────────────────────────────
     let app_state = AppState {
@@ -467,15 +457,15 @@ async fn main() -> Result<()> {
         webhook_store: webhook_store.clone(),
         webhook_dispatcher: webhook_dispatcher.clone(),
         review_queue: review_queue.clone(),
-        swarm:              swarm.clone(),
+        swarm: swarm.clone(),
         connector_registry: Arc::new(segment_registry.connector_registry),
-        citation_tracker:   Some(citation_tracker.clone()),
-        auto_approvals:     {
+        citation_tracker: Some(citation_tracker.clone()),
+        auto_approvals: {
             let s = Arc::new(crate::api::routes::AutoApprovalStore::new(store.pool()));
             s.migrate().await.unwrap_or_else(|e| tracing::warn!(error = %e, "auto_approvals migrate failed"));
             s
         },
-        event_bus_handle:   event_bus.clone(),
+        event_bus_handle: event_bus.clone(),
         billing,
         connector_installs,
     };
@@ -499,10 +489,10 @@ async fn main() -> Result<()> {
     }
 
     tracing::info!(
-        workers  = cfg.worker.pool_size,
-        port     = cfg.server.port,
-        memory   = if cfg.redis.enabled { "redis" } else { "in-process" },
-        swarm    = swarm.is_queue_backed(),
+        workers = cfg.worker.pool_size,
+        port = cfg.server.port,
+        memory = if cfg.redis.enabled { "redis" } else { "in-process" },
+        swarm = swarm.is_queue_backed(),
         "all systems go 🚀"
     );
 

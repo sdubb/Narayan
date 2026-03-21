@@ -10,13 +10,135 @@ use crate::{
     state::AgentState,
 };
 
+fn default_required() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ClarificationQuestion {
+    #[serde(default)]
+    pub id: String,
+    pub prompt: String,
+    #[serde(default)]
+    pub placeholder: Option<String>,
+    #[serde(default, alias = "helperText")]
+    pub helper_text: Option<String>,
+    #[serde(default)]
+    pub options: Vec<String>,
+    #[serde(default = "default_required")]
+    pub required: bool,
+    #[serde(default)]
+    pub secret: bool,
+    #[serde(default, alias = "storeAsCredential")]
+    pub store_as_credential: Option<String>,
+    #[serde(default, alias = "connectorType")]
+    pub connector_type: Option<String>,
+    #[serde(default, alias = "actionLabel")]
+    pub action_label: Option<String>,
+}
+
+impl ClarificationQuestion {
+    pub fn new(prompt: impl Into<String>) -> Self {
+        let prompt = prompt.into();
+        Self {
+            id: question_id_from_prompt(&prompt, 0),
+            prompt,
+            placeholder: None,
+            helper_text: None,
+            options: Vec::new(),
+            required: true,
+            secret: false,
+            store_as_credential: None,
+            connector_type: None,
+            action_label: None,
+        }
+    }
+
+    pub fn normalized(mut self, index: usize) -> Self {
+        if self.id.trim().is_empty() {
+            self.id = question_id_from_prompt(&self.prompt, index);
+        }
+        self
+    }
+}
+
+fn question_id_from_prompt(prompt: &str, index: usize) -> String {
+    let slug: String = prompt
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch.to_ascii_lowercase() } else { '_' })
+        .collect::<String>()
+        .split('_')
+        .filter(|part| !part.is_empty())
+        .take(6)
+        .collect::<Vec<_>>()
+        .join("_");
+    if slug.is_empty() {
+        format!("question_{}", index + 1)
+    } else {
+        slug
+    }
+}
+
+pub fn parse_clarification_questions(value: &serde_json::Value) -> Vec<ClarificationQuestion> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .filter_map(|(index, item)| match item {
+            serde_json::Value::String(prompt) => Some(ClarificationQuestion::new(prompt.clone()).normalized(index)),
+            serde_json::Value::Object(map) => serde_json::from_value::<ClarificationQuestion>(item.clone())
+                .ok()
+                .map(|question| question.normalized(index))
+                .or_else(|| {
+                    map.get("question").and_then(|value| value.as_str()).map(|prompt| ClarificationQuestion {
+                        id: map.get("id").and_then(|value| value.as_str()).unwrap_or_default().to_string(),
+                        prompt: prompt.to_string(),
+                        placeholder: map.get("placeholder").and_then(|value| value.as_str()).map(str::to_string),
+                        helper_text: map
+                            .get("helper_text")
+                            .or_else(|| map.get("helperText"))
+                            .and_then(|value| value.as_str())
+                            .map(str::to_string),
+                        options: map
+                            .get("options")
+                            .and_then(|value| value.as_array())
+                            .map(|items| {
+                                items
+                                    .iter()
+                                    .filter_map(|value| value.as_str().map(str::to_string))
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_default(),
+                        required: map.get("required").and_then(|value| value.as_bool()).unwrap_or(true),
+                        secret: map.get("secret").and_then(|value| value.as_bool()).unwrap_or(false),
+                        store_as_credential: map
+                            .get("store_as_credential")
+                            .and_then(|value| value.as_str())
+                            .map(str::to_string),
+                        connector_type: map
+                            .get("connector_type")
+                            .and_then(|value| value.as_str())
+                            .map(str::to_string),
+                        action_label: map
+                            .get("action_label")
+                            .and_then(|value| value.as_str())
+                            .map(str::to_string),
+                    }
+                    .normalized(index))
+                }),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Outcome of the clarification check.
 #[derive(Debug, Clone)]
 pub enum ClarificationResult {
     /// Goal is clear enough — proceed to planning immediately.
     Clear,
     /// Ambiguities found — user must answer before planning.
-    NeedsInput { questions: Vec<String> },
+    NeedsInput { questions: Vec<ClarificationQuestion> },
 }
 
 /// User's answers to clarification questions.
@@ -104,7 +226,8 @@ impl Clarifier for LlmClarifier {
         #[derive(Deserialize)]
         struct ClarifierResponse {
             clear: bool,
-            questions: Vec<String>,
+            #[serde(default)]
+            questions: Vec<serde_json::Value>,
         }
 
         match serde_json::from_str::<ClarifierResponse>(clean) {
@@ -113,12 +236,17 @@ impl Clarifier for LlmClarifier {
                 Ok(ClarificationResult::Clear)
             }
             Ok(r) => {
+                let questions = parse_clarification_questions(&serde_json::Value::Array(r.questions));
                 tracing::info!(
                     agent_id  = %state.id,
-                    questions = ?r.questions,
+                    questions = ?questions,
                     "clarifier: needs input"
                 );
-                Ok(ClarificationResult::NeedsInput { questions: r.questions })
+                if questions.is_empty() {
+                    Ok(ClarificationResult::Clear)
+                } else {
+                    Ok(ClarificationResult::NeedsInput { questions })
+                }
             }
             Err(e) => {
                 tracing::warn!(
@@ -239,7 +367,7 @@ mod tests {
         let result = clarifier.check(&make_state()).await.expect("check should succeed");
         match result {
             ClarificationResult::NeedsInput { questions } => {
-                assert_eq!(questions, vec!["Which repository should be fixed?".to_string()]);
+                assert_eq!(questions, vec![ClarificationQuestion::new("Which repository should be fixed?")]);
             }
             other => panic!("expected clarification questions, got {other:?}"),
         }

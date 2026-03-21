@@ -10,7 +10,10 @@
 //!   3. POST /  → {"jsonrpc":"2.0","method":"tools/list","id":2}
 //!   4. POST /  → {"jsonrpc":"2.0","method":"tools/call","id":3,"params":{...}}
 
-use std::sync::{atomic::{AtomicU64, Ordering}, Arc};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -211,35 +214,53 @@ impl McpClient {
 fn mcp_url_to_connector(server_url: &str) -> Option<&'static str> {
     let url = server_url.to_lowercase();
     // Google — all Google services share one OAuth install under "google"
-    if url.contains("gmail.mcp")        ||
-       url.contains("gcal.mcp")         ||
-       url.contains("gdrive.mcp")       ||
-       url.contains("googleapis.com")   { return Some("google"); }
+    if url.contains("gmail.mcp")
+        || url.contains("gcal.mcp")
+        || url.contains("gdrive.mcp")
+        || url.contains("googleapis.com")
+    {
+        return Some("google");
+    }
     // Slack
-    if url.contains("slack.mcp")        ||
-       url.contains("slack.com/api")    { return Some("slack"); }
+    if url.contains("slack.mcp") || url.contains("slack.com/api") {
+        return Some("slack");
+    }
     // Notion
-    if url.contains("notion.mcp")       ||
-       url.contains("api.notion.com")   { return Some("notion"); }
+    if url.contains("notion.mcp") || url.contains("api.notion.com") {
+        return Some("notion");
+    }
     // Atlassian — Jira and Confluence share one OAuth install under "atlassian"
-    if url.contains("atlassian.com")    { return Some("atlassian"); }
+    if url.contains("atlassian.com") {
+        return Some("atlassian");
+    }
     // Salesforce
-    if url.contains("salesforce.com")   { return Some("salesforce"); }
+    if url.contains("salesforce.com") {
+        return Some("salesforce");
+    }
     // HubSpot
-    if url.contains("hubapi.com")       ||
-       url.contains("hubspot.mcp")      { return Some("hubspot"); }
+    if url.contains("hubapi.com") || url.contains("hubspot.mcp") {
+        return Some("hubspot");
+    }
     // GitHub
-    if url.contains("github")           ||
-       url.contains("githubcopilot.com") { return Some("github"); }
+    if url.contains("github") || url.contains("githubcopilot.com") {
+        return Some("github");
+    }
     // Linear
-    if url.contains("linear.app")       { return Some("linear"); }
+    if url.contains("linear.app") {
+        return Some("linear");
+    }
     // Microsoft — Teams, Outlook, and Graph API share one OAuth install under "microsoft"
-    if url.contains("graph.microsoft")  ||
-       url.contains("microsoftonline")  { return Some("microsoft"); }
+    if url.contains("graph.microsoft") || url.contains("microsoftonline") {
+        return Some("microsoft");
+    }
     // Stripe
-    if url.contains("mcp.stripe.com")   { return Some("stripe"); }
+    if url.contains("mcp.stripe.com") {
+        return Some("stripe");
+    }
     // Shopify
-    if url.contains("mcp.shopify.com")  { return Some("shopify"); }
+    if url.contains("mcp.shopify.com") {
+        return Some("shopify");
+    }
     None
 }
 
@@ -314,7 +335,7 @@ impl Tool for McpSessionTool {
 
         // Auto-inject stored OAuth/API-key token if tenant has connected this MCP server.
         // Falls back to explicit auth_token arg, then unauthenticated.
-        let tenant_id  = args["tenant_id"].as_str().unwrap_or("");
+        let tenant_id = args["tenant_id"].as_str().unwrap_or("");
         let auth_token = if let Some(explicit) = args["auth_token"].as_str() {
             Some(explicit.to_string())
         } else if !tenant_id.is_empty() {

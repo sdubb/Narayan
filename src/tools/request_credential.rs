@@ -8,8 +8,8 @@ impl Tool for RequestCredentialTool {
         "request_credential"
     }
     fn description(&self) -> &str {
-        "Store a credential (API key, password, token) securely in agent memory for use by other tools. \
-         The credential is stored encrypted and referenced by name."
+        "Store a credential (API key, password, token) in agent credential memory for use by other tools. \
+         The value is not echoed back in normal agent prompts or UI cards and is referenced by name."
     }
     fn parameters_schema(&self) -> Vec<ParameterSchema> {
         vec![
@@ -37,8 +37,10 @@ impl Tool for RequestCredentialTool {
         };
         let key = format!("credential:{name}");
         crate::tools::memory_store_internal::insert(key, value.to_string());
-        Ok(ToolResult::ok(
-            serde_json::json!({"stored": true, "name": name, "hint": format!("{}***", &value[..value.len().min(4)])}),
-        ))
+        Ok(ToolResult::ok(serde_json::json!({
+            "stored": true,
+            "name": name,
+            "hint": "[stored securely in credential memory]"
+        })))
     }
 }

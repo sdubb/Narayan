@@ -24,6 +24,14 @@ fn truncate_for_log(value: &str, max_chars: usize) -> String {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StepCondition {
+    pub reference: String,
+    pub operator: String,
+    #[serde(default)]
+    pub value: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlannedStep {
     pub index: usize,
     pub description: String,
@@ -31,6 +39,8 @@ pub struct PlannedStep {
     pub tool_args: Option<serde_json::Value>,
     #[serde(default)]
     pub success_criteria: String,
+    #[serde(default)]
+    pub condition: Option<StepCondition>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -111,6 +121,7 @@ impl Planner for LlmPlanner {
                     tool: None,
                     tool_args: None,
                     success_criteria: "User receives a complete direct answer.".into(),
+                    condition: None,
                 }],
             });
         }
@@ -182,6 +193,7 @@ impl Planner for LlmPlanner {
                         tool: None,
                         tool_args: None,
                         success_criteria: String::new(),
+                        condition: None,
                     }],
                 })
             }
@@ -227,6 +239,13 @@ fn normalize_plan(plan: &mut Plan) {
         let normalized = step.tool.as_deref().map(str::trim).map(str::to_lowercase);
         if matches!(normalized.as_deref(), Some("") | Some("null") | Some("none")) {
             step.tool = None;
+        }
+        if let Some(condition) = step.condition.as_mut() {
+            condition.reference = condition.reference.trim().to_string();
+            condition.operator = condition.operator.trim().to_ascii_lowercase();
+            if condition.reference.is_empty() || condition.operator.is_empty() {
+                step.condition = None;
+            }
         }
     }
 }
@@ -324,6 +343,7 @@ mod tests {
                 tool: Some("file_read".into()),
                 tool_args: None,
                 success_criteria: "workflow reviewed".into(),
+                condition: None,
             }],
             rationale: "inspect first".into(),
         };

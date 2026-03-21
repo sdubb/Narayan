@@ -137,12 +137,10 @@ pub fn decrypt_secret(ciphertext: &str, key: &str) -> Result<String> {
     }
 
     let (nonce_bytes, sealed) = payload.split_at(NONCE_LEN);
-    let nonce = Nonce::try_assume_unique_for_key(nonce_bytes)
-        .map_err(|_| anyhow::anyhow!("invalid nonce"))?;
+    let nonce = Nonce::try_assume_unique_for_key(nonce_bytes).map_err(|_| anyhow::anyhow!("invalid nonce"))?;
 
     let key_bytes = derive_key(key);
-    let unbound = UnboundKey::new(&AES_256_GCM, &key_bytes)
-        .map_err(|_| anyhow::anyhow!("invalid AES key"))?;
+    let unbound = UnboundKey::new(&AES_256_GCM, &key_bytes).map_err(|_| anyhow::anyhow!("invalid AES key"))?;
     let aead_key = LessSafeKey::new(unbound);
 
     let mut in_out = sealed.to_vec();

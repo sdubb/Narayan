@@ -29,10 +29,10 @@ fn err(code: StatusCode, msg: impl Into<String>) -> axum::response::Response {
 
 #[derive(Deserialize)]
 pub struct CheckoutRequest {
-    pub plan:         String,
-    pub provider:     Option<String>,
-    pub success_url:  Option<String>,
-    pub cancel_url:   Option<String>,
+    pub plan: String,
+    pub provider: Option<String>,
+    pub success_url: Option<String>,
+    pub cancel_url: Option<String>,
 }
 
 pub async fn create_checkout(
@@ -41,43 +41,44 @@ pub async fn create_checkout(
     Json(body): Json<CheckoutRequest>,
 ) -> impl IntoResponse {
     let plan: BillingPlan = match body.plan.parse() {
-        Ok(p)  => p,
+        Ok(p) => p,
         Err(e) => return err(StatusCode::BAD_REQUEST, e),
     };
 
     let store = &state.billing;
     let provider = match body.provider.as_deref() {
         Some(name) => store.provider(name),
-        None       => store.default_provider(),
+        None => store.default_provider(),
     };
     let provider = match provider {
         Some(p) => p,
-        None    => return err(StatusCode::SERVICE_UNAVAILABLE, "no billing provider configured"),
+        None => return err(StatusCode::SERVICE_UNAVAILABLE, "no billing provider configured"),
     };
 
     let base = std::env::var("NARAYAN_BASE_URL").unwrap_or_else(|_| "https://app.narayan.ai".into());
     let success_url = body.success_url.unwrap_or_else(|| format!("{}/billing/success", base));
-    let cancel_url  = body.cancel_url.unwrap_or_else(|| format!("{}/billing/cancel", base));
+    let cancel_url = body.cancel_url.unwrap_or_else(|| format!("{}/billing/cancel", base));
 
     match provider.create_checkout_session(&tenant.tenant_id, &plan, &success_url, &cancel_url).await {
-        Ok(session) => (StatusCode::OK, Json(serde_json::json!({
-            "session_id":    session.session_id,
-            "provider":      session.provider,
-            "redirect_url":  session.redirect_url,
-            "plan":          session.plan.as_str(),
-            "amount_usd":    session.amount_usd,
-            "expires_at":    session.expires_at.to_rfc3339(),
-        }))).into_response(),
+        Ok(session) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "session_id":    session.session_id,
+                "provider":      session.provider,
+                "redirect_url":  session.redirect_url,
+                "plan":          session.plan.as_str(),
+                "amount_usd":    session.amount_usd,
+                "expires_at":    session.expires_at.to_rfc3339(),
+            })),
+        )
+            .into_response(),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
 
 // ── GET /billing/subscription ─────────────────────────────────────────────
 
-pub async fn get_subscription(
-    State(state): State<AppState>,
-    tenant: AuthenticatedTenant,
-) -> impl IntoResponse {
+pub async fn get_subscription(State(state): State<AppState>, tenant: AuthenticatedTenant) -> impl IntoResponse {
     match state.billing.get_subscription_by_tenant(&tenant.tenant_id).await {
         Ok(Some(sub)) => Json(serde_json::json!({
             "id":                       sub.id,
@@ -87,27 +88,25 @@ pub async fn get_subscription(
             "status":                   sub.status.to_string(),
             "current_period_start":     sub.current_period_start.to_rfc3339(),
             "current_period_end":       sub.current_period_end.to_rfc3339(),
-        })).into_response(),
+        }))
+        .into_response(),
         Ok(None) => Json(serde_json::json!({ "plan": "free", "status": "active" })).into_response(),
-        Err(e)   => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
 
 // ── POST /billing/subscription/cancel ────────────────────────────────────
 
-pub async fn cancel_subscription(
-    State(state): State<AppState>,
-    tenant: AuthenticatedTenant,
-) -> impl IntoResponse {
+pub async fn cancel_subscription(State(state): State<AppState>, tenant: AuthenticatedTenant) -> impl IntoResponse {
     let sub = match state.billing.get_subscription_by_tenant(&tenant.tenant_id).await {
         Ok(Some(s)) => s,
-        Ok(None)    => return err(StatusCode::NOT_FOUND, "no active subscription"),
-        Err(e)      => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        Ok(None) => return err(StatusCode::NOT_FOUND, "no active subscription"),
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     };
 
     let provider = match state.billing.provider(&sub.provider) {
         Some(p) => p,
-        None    => return err(StatusCode::INTERNAL_SERVER_ERROR, format!("provider {} not available", sub.provider)),
+        None => return err(StatusCode::INTERNAL_SERVER_ERROR, format!("provider {} not available", sub.provider)),
     };
 
     match provider.cancel_subscription(&sub.provider_subscription_id).await {
@@ -121,10 +120,7 @@ pub async fn cancel_subscription(
 
 // ── GET /billing/invoices ─────────────────────────────────────────────────
 
-pub async fn list_invoices(
-    State(state): State<AppState>,
-    tenant: AuthenticatedTenant,
-) -> impl IntoResponse {
+pub async fn list_invoices(State(state): State<AppState>, tenant: AuthenticatedTenant) -> impl IntoResponse {
     match state.billing.list_invoices(&tenant.tenant_id).await {
         Ok(invoices) => {
             let count = invoices.len();
@@ -148,7 +144,8 @@ pub async fn handle_webhook(
     body: Bytes,
 ) -> impl IntoResponse {
     // Extract signature from provider-specific header
-    let signature = headers.get("paypal-transmission-sig")
+    let signature = headers
+        .get("paypal-transmission-sig")
         .or_else(|| headers.get("stripe-signature"))
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
@@ -182,43 +179,45 @@ pub async fn purchase_credits(
 ) -> impl IntoResponse {
     let provider = match state.billing.default_provider() {
         Some(p) => p,
-        None    => return err(StatusCode::SERVICE_UNAVAILABLE, "no billing provider configured"),
+        None => return err(StatusCode::SERVICE_UNAVAILABLE, "no billing provider configured"),
     };
 
-    let base        = std::env::var("NARAYAN_BASE_URL").unwrap_or_else(|_| "https://app.narayan.ai".into());
+    let base = std::env::var("NARAYAN_BASE_URL").unwrap_or_else(|_| "https://app.narayan.ai".into());
     let success_url = format!("{}/billing/credits/success?tenant={}", base, tenant.tenant_id);
-    let cancel_url  = format!("{}/billing/credits/cancel", base);
+    let cancel_url = format!("{}/billing/credits/cancel", base);
 
-    // We reuse BillingPlan::Go as a sentinel for "credit pack" checkout — 
+    // We reuse BillingPlan::Go as a sentinel for "credit pack" checkout —
     // the provider creates a $8 one-time order. On PaymentSucceeded webhook
     // the CreditsPurchased event adds 5,000 steps.
     use crate::billing::provider::BillingPlan;
     let pseudo_plan = BillingPlan::Go; // provider reads amount from plan.credit_pack_price_usd()
 
     match provider.create_checkout_session(&tenant.tenant_id, &pseudo_plan, &success_url, &cancel_url).await {
-        Ok(session) => (StatusCode::OK, Json(serde_json::json!({
-            "session_id":   session.session_id,
-            "redirect_url": session.redirect_url,
-            "steps":        BillingPlan::credit_pack_steps(),
-            "amount_usd":   BillingPlan::credit_pack_price_usd(),
-        }))).into_response(),
+        Ok(session) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "session_id":   session.session_id,
+                "redirect_url": session.redirect_url,
+                "steps":        BillingPlan::credit_pack_steps(),
+                "amount_usd":   BillingPlan::credit_pack_price_usd(),
+            })),
+        )
+            .into_response(),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
 
 // ── GET /billing/credits ──────────────────────────────────────────────────
 
-pub async fn get_credits(
-    State(state): State<AppState>,
-    tenant: AuthenticatedTenant,
-) -> impl IntoResponse {
+pub async fn get_credits(State(state): State<AppState>, tenant: AuthenticatedTenant) -> impl IntoResponse {
     match state.billing.get_extra_steps(&tenant.tenant_id).await {
         Ok(steps) => Json(serde_json::json!({
             "tenant_id":   tenant.tenant_id,
             "extra_steps": steps,
             "pack_price_usd": crate::billing::BillingPlan::credit_pack_price_usd(),
             "pack_steps":     crate::billing::BillingPlan::credit_pack_steps(),
-        })).into_response(),
+        }))
+        .into_response(),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }

@@ -9,15 +9,15 @@ use std::{
 use dashmap::DashMap;
 
 pub struct Metrics {
-    pub steps_total:         AtomicU64,
-    pub steps_last_window:   AtomicU64,
-    pub agents_running:      AtomicU64,
-    pub goals_total:         AtomicU64,
-    pub llm_calls_total:     AtomicU64,
-    pub llm_cache_hits:      AtomicU64,
-    pub input_tokens_total:  AtomicU64,
+    pub steps_total: AtomicU64,
+    pub steps_last_window: AtomicU64,
+    pub agents_running: AtomicU64,
+    pub goals_total: AtomicU64,
+    pub llm_calls_total: AtomicU64,
+    pub llm_cache_hits: AtomicU64,
+    pub input_tokens_total: AtomicU64,
     pub output_tokens_total: AtomicU64,
-    pub started_at:          Instant,
+    pub started_at: Instant,
     /// Per-tenant step counters — used for plan enforcement.
     /// Reset at the start of each billing month.
     tenant_steps: DashMap<String, AtomicU64>,
@@ -26,16 +26,16 @@ pub struct Metrics {
 impl Metrics {
     pub fn new() -> Self {
         Self {
-            steps_total:         AtomicU64::new(0),
-            steps_last_window:   AtomicU64::new(0),
-            agents_running:      AtomicU64::new(0),
-            goals_total:         AtomicU64::new(0),
-            llm_calls_total:     AtomicU64::new(0),
-            llm_cache_hits:      AtomicU64::new(0),
+            steps_total: AtomicU64::new(0),
+            steps_last_window: AtomicU64::new(0),
+            agents_running: AtomicU64::new(0),
+            goals_total: AtomicU64::new(0),
+            llm_calls_total: AtomicU64::new(0),
+            llm_cache_hits: AtomicU64::new(0),
             input_tokens_total: AtomicU64::new(0),
             output_tokens_total: AtomicU64::new(0),
-            started_at:          Instant::now(),
-            tenant_steps:        DashMap::new(),
+            started_at: Instant::now(),
+            tenant_steps: DashMap::new(),
         }
     }
 
@@ -54,10 +54,7 @@ impl Metrics {
     }
 
     pub fn steps_this_month(&self, tenant_id: &str) -> u64 {
-        self.tenant_steps
-            .get(tenant_id)
-            .map(|c| c.load(Ordering::Relaxed))
-            .unwrap_or(0)
+        self.tenant_steps.get(tenant_id).map(|c| c.load(Ordering::Relaxed)).unwrap_or(0)
     }
 
     pub fn reset_monthly_steps(&self) {
@@ -72,7 +69,7 @@ impl Metrics {
             r#"SELECT tenant_id, COUNT(*) AS steps
                  FROM costs
                 WHERE period_start >= date_trunc('month', NOW())
-                GROUP BY tenant_id"#
+                GROUP BY tenant_id"#,
         )
         .fetch_all(pool)
         .await;

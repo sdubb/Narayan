@@ -4,25 +4,19 @@ use anyhow::Result;
 use tokio::task::JoinSet;
 
 use crate::{
-    agent::AgentLoop,
-    events::EventBus,
-    metrics::Metrics,
-    scheduler::queue::Queue,
-    segments::AgentServices,
-    storage::PostgresStore,
-    worker::worker::Worker,
-    workspace::manager::WorkspaceManager,
+    agent::AgentLoop, events::EventBus, metrics::Metrics, scheduler::queue::Queue, segments::AgentServices,
+    storage::PostgresStore, worker::worker::Worker, workspace::manager::WorkspaceManager,
 };
 
 pub struct WorkerPool {
-    pool_size:         usize,
-    store:             Arc<PostgresStore>,
-    queue:             Arc<dyn Queue>,
-    agent_loop:        Arc<AgentLoop>,
-    metrics:           Arc<Metrics>,
+    pool_size: usize,
+    store: Arc<PostgresStore>,
+    queue: Arc<dyn Queue>,
+    agent_loop: Arc<AgentLoop>,
+    metrics: Arc<Metrics>,
     workspace_manager: Arc<WorkspaceManager>,
-    services:          Arc<AgentServices>,
-    event_bus:         Arc<EventBus>,
+    services: Arc<AgentServices>,
+    event_bus: Arc<EventBus>,
 }
 
 fn idle_sleep_duration() -> tokio::time::Duration {
@@ -35,14 +29,14 @@ fn error_sleep_duration() -> tokio::time::Duration {
 
 impl WorkerPool {
     pub fn new(
-        pool_size:         usize,
-        store:             Arc<PostgresStore>,
-        queue:             Arc<dyn Queue>,
-        agent_loop:        Arc<AgentLoop>,
-        metrics:           Arc<Metrics>,
+        pool_size: usize,
+        store: Arc<PostgresStore>,
+        queue: Arc<dyn Queue>,
+        agent_loop: Arc<AgentLoop>,
+        metrics: Arc<Metrics>,
         workspace_manager: Arc<WorkspaceManager>,
-        services:          Arc<AgentServices>,
-        event_bus:         Arc<EventBus>,
+        services: Arc<AgentServices>,
+        event_bus: Arc<EventBus>,
     ) -> Self {
         Self { pool_size, store, queue, agent_loop, metrics, workspace_manager, services, event_bus }
     }
@@ -77,9 +71,9 @@ impl WorkerPool {
 async fn worker_loop(worker: Worker) {
     loop {
         match worker.process_next().await {
-            Ok(true)  => {}
+            Ok(true) => {}
             Ok(false) => tokio::time::sleep(idle_sleep_duration()).await,
-            Err(e)    => {
+            Err(e) => {
                 tracing::error!(error = %e, "worker error");
                 tokio::time::sleep(error_sleep_duration()).await;
             }

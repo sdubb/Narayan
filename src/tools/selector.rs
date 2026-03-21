@@ -351,6 +351,7 @@ mod tests {
             tool: None,
             tool_args: None,
             success_criteria: String::new(),
+            condition: None,
         };
         let job_type = JobType::detect("build a web app");
         let specs = select_tools_for_step(&registry, &step, &job_type, &[]);
@@ -368,6 +369,7 @@ mod tests {
             tool: Some("crypto_tool".into()),
             tool_args: None,
             success_criteria: String::new(),
+            condition: None,
         };
         let job_type = JobType::detect("encrypt some data");
         let specs = select_tools_for_step(&registry, &step, &job_type, &[]);
@@ -386,6 +388,7 @@ mod tests {
             tool: None,
             tool_args: None,
             success_criteria: String::new(),
+            condition: None,
         };
         let job_type = JobType::detect("build a web app");
         let specs = select_tools_for_step(&registry, &step, &job_type, &[]);

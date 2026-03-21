@@ -14,9 +14,7 @@ pub struct ZendeskConnector {
 
 impl ZendeskConnector {
     pub fn new() -> Self {
-        Self {
-            http: reqwest::Client::new(),
-        }
+        Self { http: reqwest::Client::new() }
     }
 
     fn subdomain(config: &ConnectorConfig) -> &str {

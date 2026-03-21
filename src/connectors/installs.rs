@@ -18,53 +18,53 @@ use crate::tenant::encrypt_secret;
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct ConnectorInstall {
-    pub id:              String,
-    pub tenant_id:       String,
-    pub connector_type:  String,  // "github", "slack", "gmail", ...
-    pub auth_type:       String,  // "oauth" | "api_key" | "webhook_only"
+    pub id: String,
+    pub tenant_id: String,
+    pub connector_type: String, // "github", "slack", "gmail", ...
+    pub auth_type: String,      // "oauth" | "api_key" | "webhook_only"
     /// Encrypted access token (OAuth) or API key.
-    pub token_enc:       Option<String>,
+    pub token_enc: Option<String>,
     /// Encrypted refresh token (OAuth only).
-    pub refresh_enc:     Option<String>,
+    pub refresh_enc: Option<String>,
     pub token_expires_at: Option<DateTime<Utc>>,
     /// JSON: connector-specific settings (e.g. GitHub org, Zendesk subdomain).
-    pub settings:        serde_json::Value,
+    pub settings: serde_json::Value,
     /// Webhook secret for inbound connectors (encrypted).
     pub webhook_secret_enc: Option<String>,
-    pub enabled:         bool,
-    pub last_polled_at:  Option<DateTime<Utc>>,
-    pub created_at:      DateTime<Utc>,
-    pub updated_at:      DateTime<Utc>,
+    pub enabled: bool,
+    pub last_polled_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 /// What we return to the frontend — no encrypted values.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectorInstallView {
-    pub id:              String,
-    pub connector_type:  String,
-    pub auth_type:       String,
-    pub connected:       bool,
-    pub settings:        serde_json::Value,
-    pub last_polled_at:  Option<DateTime<Utc>>,
-    pub created_at:      DateTime<Utc>,
+    pub id: String,
+    pub connector_type: String,
+    pub auth_type: String,
+    pub connected: bool,
+    pub settings: serde_json::Value,
+    pub last_polled_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
 }
 
 impl From<&ConnectorInstall> for ConnectorInstallView {
     fn from(c: &ConnectorInstall) -> Self {
         Self {
-            id:             c.id.clone(),
+            id: c.id.clone(),
             connector_type: c.connector_type.clone(),
-            auth_type:      c.auth_type.clone(),
-            connected:      c.token_enc.is_some() || c.webhook_secret_enc.is_some(),
-            settings:       c.settings.clone(),
+            auth_type: c.auth_type.clone(),
+            connected: c.token_enc.is_some() || c.webhook_secret_enc.is_some(),
+            settings: c.settings.clone(),
             last_polled_at: c.last_polled_at,
-            created_at:     c.created_at,
+            created_at: c.created_at,
         }
     }
 }
 
 pub struct ConnectorInstallStore {
-    pool:        PgPool,
+    pool: PgPool,
     encrypt_key: String,
 }
 
@@ -74,7 +74,9 @@ impl ConnectorInstallStore {
     }
 
     /// Expose the raw pool for the poller (read-only queries).
-    pub fn pool(&self) -> &PgPool { &self.pool }
+    pub fn pool(&self) -> &PgPool {
+        &self.pool
+    }
 
     pub async fn migrate(&self) -> Result<()> {
         sqlx::query(
@@ -98,7 +100,8 @@ impl ConnectorInstallStore {
         .execute(&self.pool)
         .await?;
         sqlx::query("CREATE INDEX IF NOT EXISTS connector_installs_tenant ON connector_installs (tenant_id)")
-            .execute(&self.pool).await?;
+            .execute(&self.pool)
+            .await?;
         sqlx::query("CREATE INDEX IF NOT EXISTS connector_installs_poll ON connector_installs (last_polled_at) WHERE enabled = true")
             .execute(&self.pool).await?;
 
@@ -119,12 +122,12 @@ impl ConnectorInstallStore {
 
     pub async fn upsert_api_key(
         &self,
-        tenant_id:      &str,
+        tenant_id: &str,
         connector_type: &str,
-        api_key:        &str,
-        settings:       serde_json::Value,
+        api_key: &str,
+        settings: serde_json::Value,
     ) -> Result<String> {
-        let id        = crate::util::new_id();
+        let id = crate::util::new_id();
         let token_enc = encrypt_secret(api_key, &self.encrypt_key);
         sqlx::query(
             r#"INSERT INTO connector_installs
@@ -134,23 +137,29 @@ impl ConnectorInstallStore {
                    token_enc  = EXCLUDED.token_enc,
                    settings   = EXCLUDED.settings,
                    enabled    = true,
-                   updated_at = NOW()"#
-        ).bind(&id).bind(tenant_id).bind(connector_type).bind(&token_enc).bind(&settings)
-        .execute(&self.pool).await?;
+                   updated_at = NOW()"#,
+        )
+        .bind(&id)
+        .bind(tenant_id)
+        .bind(connector_type)
+        .bind(&token_enc)
+        .bind(&settings)
+        .execute(&self.pool)
+        .await?;
         Ok(id)
     }
 
     pub async fn upsert_oauth_token(
         &self,
-        tenant_id:       &str,
-        connector_type:  &str,
-        access_token:    &str,
-        refresh_token:   Option<&str>,
-        expires_at:      Option<DateTime<Utc>>,
-        settings:        serde_json::Value,
+        tenant_id: &str,
+        connector_type: &str,
+        access_token: &str,
+        refresh_token: Option<&str>,
+        expires_at: Option<DateTime<Utc>>,
+        settings: serde_json::Value,
     ) -> Result<String> {
-        let id          = crate::util::new_id();
-        let token_enc   = encrypt_secret(access_token, &self.encrypt_key);
+        let id = crate::util::new_id();
+        let token_enc = encrypt_secret(access_token, &self.encrypt_key);
         let refresh_enc = refresh_token.map(|t| encrypt_secret(t, &self.encrypt_key));
         sqlx::query(
             r#"INSERT INTO connector_installs
@@ -162,21 +171,29 @@ impl ConnectorInstallStore {
                    token_expires_at = EXCLUDED.token_expires_at,
                    settings         = EXCLUDED.settings,
                    enabled          = true,
-                   updated_at       = NOW()"#
-        ).bind(&id).bind(tenant_id).bind(connector_type).bind(&token_enc).bind(&refresh_enc).bind(expires_at).bind(&settings)
-        .execute(&self.pool).await?;
+                   updated_at       = NOW()"#,
+        )
+        .bind(&id)
+        .bind(tenant_id)
+        .bind(connector_type)
+        .bind(&token_enc)
+        .bind(&refresh_enc)
+        .bind(expires_at)
+        .bind(&settings)
+        .execute(&self.pool)
+        .await?;
         Ok(id)
     }
 
     pub async fn upsert_webhook_only(
         &self,
-        tenant_id:       &str,
-        connector_type:  &str,
-        webhook_secret:  &str,
-        settings:        serde_json::Value,
+        tenant_id: &str,
+        connector_type: &str,
+        webhook_secret: &str,
+        settings: serde_json::Value,
     ) -> Result<(String, String)> {
-        let id              = crate::util::new_id();
-        let webhook_enc     = encrypt_secret(webhook_secret, &self.encrypt_key);
+        let id = crate::util::new_id();
+        let webhook_enc = encrypt_secret(webhook_secret, &self.encrypt_key);
         sqlx::query(
             r#"INSERT INTO connector_installs
                    (id, tenant_id, connector_type, auth_type, webhook_secret_enc, settings)
@@ -185,9 +202,15 @@ impl ConnectorInstallStore {
                    webhook_secret_enc = EXCLUDED.webhook_secret_enc,
                    settings           = EXCLUDED.settings,
                    enabled            = true,
-                   updated_at         = NOW()"#
-        ).bind(&id).bind(tenant_id).bind(connector_type).bind(&webhook_enc).bind(&settings)
-        .execute(&self.pool).await?;
+                   updated_at         = NOW()"#,
+        )
+        .bind(&id)
+        .bind(tenant_id)
+        .bind(connector_type)
+        .bind(&webhook_enc)
+        .bind(&settings)
+        .execute(&self.pool)
+        .await?;
         Ok((id, webhook_secret.to_string()))
     }
 
@@ -199,9 +222,12 @@ impl ConnectorInstallStore {
                     token_expires_at, settings, webhook_secret_enc, enabled, last_polled_at,
                     created_at, updated_at
                FROM connector_installs
-              WHERE tenant_id=$1 AND connector_type=$2 AND enabled=true"
-        ).bind(tenant_id).bind(connector_type)
-        .fetch_optional(&self.pool).await?;
+              WHERE tenant_id=$1 AND connector_type=$2 AND enabled=true",
+        )
+        .bind(tenant_id)
+        .bind(connector_type)
+        .fetch_optional(&self.pool)
+        .await?;
         Ok(row)
     }
 
@@ -210,9 +236,11 @@ impl ConnectorInstallStore {
             "SELECT id, tenant_id, connector_type, auth_type, token_enc, refresh_enc,
                     token_expires_at, settings, webhook_secret_enc, enabled, last_polled_at,
                     created_at, updated_at
-               FROM connector_installs WHERE tenant_id=$1 ORDER BY connector_type"
-        ).bind(tenant_id)
-        .fetch_all(&self.pool).await?;
+               FROM connector_installs WHERE tenant_id=$1 ORDER BY connector_type",
+        )
+        .bind(tenant_id)
+        .fetch_all(&self.pool)
+        .await?;
         Ok(rows.iter().map(ConnectorInstallView::from).collect())
     }
 
@@ -230,18 +258,24 @@ impl ConnectorInstallStore {
     pub async fn delete(&self, tenant_id: &str, connector_type: &str) -> Result<bool> {
         let r = sqlx::query(
             "UPDATE connector_installs SET enabled=false, updated_at=NOW()
-              WHERE tenant_id=$1 AND connector_type=$2"
-        ).bind(tenant_id).bind(connector_type)
-        .execute(&self.pool).await?;
+              WHERE tenant_id=$1 AND connector_type=$2",
+        )
+        .bind(tenant_id)
+        .bind(connector_type)
+        .execute(&self.pool)
+        .await?;
         Ok(r.rows_affected() > 0)
     }
 
     pub async fn update_last_polled(&self, tenant_id: &str, connector_type: &str) -> Result<()> {
         sqlx::query(
             "UPDATE connector_installs SET last_polled_at=NOW()
-              WHERE tenant_id=$1 AND connector_type=$2"
-        ).bind(tenant_id).bind(connector_type)
-        .execute(&self.pool).await?;
+              WHERE tenant_id=$1 AND connector_type=$2",
+        )
+        .bind(tenant_id)
+        .bind(connector_type)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -250,22 +284,28 @@ impl ConnectorInstallStore {
     pub async fn save_oauth_state(&self, state: &str, tenant_id: &str, provider: &str) -> Result<()> {
         sqlx::query(
             "INSERT INTO oauth_states (state, tenant_id, provider) VALUES ($1,$2,$3)
-             ON CONFLICT (state) DO NOTHING"
-        ).bind(state).bind(tenant_id).bind(provider)
-        .execute(&self.pool).await?;
+             ON CONFLICT (state) DO NOTHING",
+        )
+        .bind(state)
+        .bind(tenant_id)
+        .bind(provider)
+        .execute(&self.pool)
+        .await?;
         // Expire old states (>10 min)
-        let _ = sqlx::query(
-            "DELETE FROM oauth_states WHERE created_at < NOW() - INTERVAL '10 minutes'"
-        ).execute(&self.pool).await;
+        let _ = sqlx::query("DELETE FROM oauth_states WHERE created_at < NOW() - INTERVAL '10 minutes'")
+            .execute(&self.pool)
+            .await;
         Ok(())
     }
 
     pub async fn consume_oauth_state(&self, state: &str) -> Result<Option<(String, String)>> {
         let row = sqlx::query(
             "DELETE FROM oauth_states WHERE state=$1 AND created_at > NOW() - INTERVAL '10 minutes'
-             RETURNING tenant_id, provider"
-        ).bind(state)
-        .fetch_optional(&self.pool).await?;
+             RETURNING tenant_id, provider",
+        )
+        .bind(state)
+        .fetch_optional(&self.pool)
+        .await?;
         Ok(row.map(|r| (r.get::<String, _>("tenant_id"), r.get::<String, _>("provider"))))
     }
 }

@@ -39,7 +39,7 @@ impl Connector for DocuSignConnector {
         match event.event_type.as_str() {
             "envelope_sent" => {
                 let envelope_id = event.payload["envelopeId"].as_str().unwrap_or("unknown");
-                let subject     = event.payload["emailSubject"].as_str().unwrap_or("contract");
+                let subject = event.payload["emailSubject"].as_str().unwrap_or("contract");
                 Ok(Some(format!(
                     "Pre-signature review for DocuSign envelope {envelope_id}: '{subject}'. \
                      Download the document, read in full. \
@@ -51,7 +51,7 @@ impl Connector for DocuSignConnector {
             }
             "envelope_completed" => {
                 let envelope_id = event.payload["envelopeId"].as_str().unwrap_or("unknown");
-                let subject     = event.payload["emailSubject"].as_str().unwrap_or("contract");
+                let subject = event.payload["emailSubject"].as_str().unwrap_or("contract");
                 Ok(Some(format!(
                     "Extract obligations from completed contract envelope {envelope_id}: '{subject}'. \
                      Identify: payment milestones, deliverable deadlines, renewal dates, \
@@ -62,7 +62,7 @@ impl Connector for DocuSignConnector {
             }
             "envelope_declined" => {
                 let envelope_id = event.payload["envelopeId"].as_str().unwrap_or("unknown");
-                let reason      = event.payload["declineReason"].as_str().unwrap_or("not provided");
+                let reason = event.payload["declineReason"].as_str().unwrap_or("not provided");
                 Ok(Some(format!(
                     "Analyse declined envelope {envelope_id}. Stated reason: '{reason}'. \
                      Compare the declined version against standard templates. \
@@ -82,16 +82,14 @@ impl Connector for DocuSignConnector {
         output: &str,
         metadata: &serde_json::Value,
     ) -> Result<()> {
-        let base  = Self::base_url(config);
+        let base = Self::base_url(config);
         let token = Self::bearer(config).ok_or_else(|| anyhow::anyhow!("missing DocuSign access_token"))?;
 
         let delivery = metadata.get("delivery_type").and_then(|v| v.as_str()).unwrap_or("note");
         match delivery {
             "envelope_note" => {
                 let url = format!("{base}/envelopes/{external_id}/notes");
-                self.http.post(&url).bearer_auth(&token)
-                    .json(&serde_json::json!({ "note": output }))
-                    .send().await?;
+                self.http.post(&url).bearer_auth(&token).json(&serde_json::json!({ "note": output })).send().await?;
             }
             _ => {
                 tracing::info!(envelope_id = external_id, delivery, "DocuSign output logged");
@@ -101,10 +99,10 @@ impl Connector for DocuSignConnector {
     }
 
     async fn validate_config(&self, config: &ConnectorConfig) -> Result<()> {
-        let base  = Self::base_url(config);
+        let base = Self::base_url(config);
         let token = Self::bearer(config).ok_or_else(|| anyhow::anyhow!("missing access_token"))?;
-        let url   = format!("{base}/users");
-        let resp  = self.http.get(&url).bearer_auth(&token).send().await?;
+        let url = format!("{base}/users");
+        let resp = self.http.get(&url).bearer_auth(&token).send().await?;
         if !resp.status().is_success() {
             anyhow::bail!("DocuSign auth failed: {}", resp.status());
         }
@@ -113,5 +111,7 @@ impl Connector for DocuSignConnector {
 }
 
 impl Default for DocuSignConnector {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }

@@ -161,7 +161,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_in_memory_queue_ack_is_noop() {
-        let q    = InMemoryQueue::new();
+        let q = InMemoryQueue::new();
         let task = Task::new("a1".into());
         q.enqueue(task.clone()).await.unwrap();
         let dequeued = q.dequeue().await.unwrap().unwrap();

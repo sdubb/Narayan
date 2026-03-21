@@ -39,10 +39,10 @@ impl Connector for SalesforceConnector {
     async fn handle_inbound(&self, event: &ConnectorEvent, _config: &ConnectorConfig) -> Result<Option<String>> {
         match event.event_type.as_str() {
             "lead_created" => {
-                let name    = event.payload["Name"].as_str().unwrap_or("unknown");
+                let name = event.payload["Name"].as_str().unwrap_or("unknown");
                 let company = event.payload["Company"].as_str().unwrap_or("unknown company");
-                let email   = event.payload["Email"].as_str().unwrap_or("");
-                let id      = event.payload["Id"].as_str().unwrap_or("");
+                let email = event.payload["Email"].as_str().unwrap_or("");
+                let id = event.payload["Id"].as_str().unwrap_or("");
                 Ok(Some(format!(
                     "Research and enrich Salesforce lead {id}: {name} at {company} ({email}). \
                      Use web_search and data_extractor to find company size, funding, tech stack, \
@@ -51,7 +51,7 @@ impl Connector for SalesforceConnector {
                 )))
             }
             "opportunity_stage_changed" => {
-                let name  = event.payload["Name"].as_str().unwrap_or("opportunity");
+                let name = event.payload["Name"].as_str().unwrap_or("opportunity");
                 let stage = event.payload["StageName"].as_str().unwrap_or("unknown");
                 let amount = event.payload["Amount"].as_str().unwrap_or("unknown");
                 Ok(Some(format!(
@@ -63,7 +63,7 @@ impl Connector for SalesforceConnector {
             }
             "renewal_alert" => {
                 let account = event.payload["AccountName"].as_str().unwrap_or("account");
-                let days    = event.payload["DaysUntilRenewal"].as_str().unwrap_or("unknown");
+                let days = event.payload["DaysUntilRenewal"].as_str().unwrap_or("unknown");
                 Ok(Some(format!(
                     "Account '{account}' has renewal in {days} days. \
                      Analyse their usage data and support history. \
@@ -83,10 +83,10 @@ impl Connector for SalesforceConnector {
         metadata: &serde_json::Value,
     ) -> Result<()> {
         let instance = Self::instance_url(config);
-        let token    = Self::bearer(config).ok_or_else(|| anyhow::anyhow!("missing Salesforce access_token"))?;
+        let token = Self::bearer(config).ok_or_else(|| anyhow::anyhow!("missing Salesforce access_token"))?;
 
         let object_type = metadata.get("object_type").and_then(|v| v.as_str()).unwrap_or("Lead");
-        let delivery    = metadata.get("delivery_type").and_then(|v| v.as_str()).unwrap_or("note");
+        let delivery = metadata.get("delivery_type").and_then(|v| v.as_str()).unwrap_or("note");
 
         match delivery {
             "note" => {
@@ -107,12 +107,7 @@ impl Connector for SalesforceConnector {
                 // Update a field on the record (e.g. enriched description)
                 let field = metadata.get("field").and_then(|v| v.as_str()).unwrap_or("Description");
                 let url = format!("{instance}/services/data/v58.0/sobjects/{object_type}/{external_id}");
-                self.http
-                    .patch(&url)
-                    .bearer_auth(&token)
-                    .json(&serde_json::json!({ field: output }))
-                    .send()
-                    .await?;
+                self.http.patch(&url).bearer_auth(&token).json(&serde_json::json!({ field: output })).send().await?;
             }
             "task" => {
                 // Create a follow-up task
@@ -137,7 +132,7 @@ impl Connector for SalesforceConnector {
 
     async fn validate_config(&self, config: &ConnectorConfig) -> Result<()> {
         let instance = Self::instance_url(config);
-        let token    = Self::bearer(config).ok_or_else(|| anyhow::anyhow!("missing access_token"))?;
+        let token = Self::bearer(config).ok_or_else(|| anyhow::anyhow!("missing access_token"))?;
         let url = format!("{instance}/services/data/v58.0/limits");
         let resp = self.http.get(&url).bearer_auth(&token).send().await?;
         if !resp.status().is_success() {
@@ -148,5 +143,7 @@ impl Connector for SalesforceConnector {
 }
 
 impl Default for SalesforceConnector {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }

@@ -46,11 +46,10 @@ pub async fn system_info() -> impl IntoResponse {
 pub async fn readiness(State(state): State<AdminState>) -> impl IntoResponse {
     match state.store.health_check().await {
         Ok(_) => (StatusCode::OK, Json(serde_json::json!({ "ready": true }))).into_response(),
-        Err(e) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({ "ready": false, "error": e.to_string() })),
-        )
-            .into_response(),
+        Err(e) => {
+            (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({ "ready": false, "error": e.to_string() })))
+                .into_response()
+        }
     }
 }
 
@@ -77,16 +76,19 @@ pub async fn admin_metrics(State(state): State<AdminState>) -> impl IntoResponse
 pub async fn list_tenants(State(state): State<AdminState>) -> impl IntoResponse {
     match state.tenant_store.list_all().await {
         Ok(tenants) => {
-            let body: Vec<serde_json::Value> = tenants.iter().map(|t| {
-                serde_json::json!({
-                    "id": t.id,
-                    "name": t.name,
-                    "email": t.email,
-                    "status": format!("{:?}", t.status).to_lowercase(),
-                    "plan": format!("{:?}", t.plan).to_lowercase(),
-                    "created_at": t.created_at.to_rfc3339(),
+            let body: Vec<serde_json::Value> = tenants
+                .iter()
+                .map(|t| {
+                    serde_json::json!({
+                        "id": t.id,
+                        "name": t.name,
+                        "email": t.email,
+                        "status": format!("{:?}", t.status).to_lowercase(),
+                        "plan": format!("{:?}", t.plan).to_lowercase(),
+                        "created_at": t.created_at.to_rfc3339(),
+                    })
                 })
-            }).collect();
+                .collect();
             Json(serde_json::json!({ "tenants": body, "count": body.len() })).into_response()
         }
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
@@ -94,18 +96,19 @@ pub async fn list_tenants(State(state): State<AdminState>) -> impl IntoResponse 
 }
 
 /// POST /admin/tenants/:id/suspend — suspend a tenant.
-pub async fn suspend_tenant(
-    State(state): State<AdminState>,
-    Path(tenant_id): Path<String>,
-) -> impl IntoResponse {
+pub async fn suspend_tenant(State(state): State<AdminState>, Path(tenant_id): Path<String>) -> impl IntoResponse {
     match state.tenant_store.suspend(&tenant_id).await {
         Ok(_) => {
-            let _ = state.audit_log.append(
-                &tenant_id, None,
-                AuditAction::TenantSuspended,
-                serde_json::json!({ "suspended_by": "admin" }),
-                None,
-            ).await;
+            let _ = state
+                .audit_log
+                .append(
+                    &tenant_id,
+                    None,
+                    AuditAction::TenantSuspended,
+                    serde_json::json!({ "suspended_by": "admin" }),
+                    None,
+                )
+                .await;
             Json(serde_json::json!({ "suspended": true })).into_response()
         }
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
@@ -113,10 +116,7 @@ pub async fn suspend_tenant(
 }
 
 /// POST /admin/tenants/:id/activate — reactivate a suspended tenant.
-pub async fn activate_tenant(
-    State(state): State<AdminState>,
-    Path(tenant_id): Path<String>,
-) -> impl IntoResponse {
+pub async fn activate_tenant(State(state): State<AdminState>, Path(tenant_id): Path<String>) -> impl IntoResponse {
     match state.tenant_store.activate(&tenant_id).await {
         Ok(_) => Json(serde_json::json!({ "activated": true })).into_response(),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
@@ -141,12 +141,16 @@ pub async fn change_plan(
 
     match state.tenant_store.update_plan(&tenant_id, &body.plan).await {
         Ok(_) => {
-            let _ = state.audit_log.append(
-                &tenant_id, None,
-                AuditAction::TenantPlanChanged,
-                serde_json::json!({ "new_plan": body.plan }),
-                None,
-            ).await;
+            let _ = state
+                .audit_log
+                .append(
+                    &tenant_id,
+                    None,
+                    AuditAction::TenantPlanChanged,
+                    serde_json::json!({ "new_plan": body.plan }),
+                    None,
+                )
+                .await;
             Json(serde_json::json!({ "updated": true, "plan": body.plan })).into_response()
         }
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
@@ -169,10 +173,7 @@ pub async fn spend_report(State(state): State<AdminState>) -> impl IntoResponse 
 // ── Audit (cross-tenant) ─────────────────────────────────────────────────
 
 /// GET /admin/audit — query audit log across all tenants.
-pub async fn admin_audit(
-    State(state): State<AdminState>,
-    Query(params): Query<AuditQuery>,
-) -> impl IntoResponse {
+pub async fn admin_audit(State(state): State<AdminState>, Query(params): Query<AuditQuery>) -> impl IntoResponse {
     match state.audit_log.query(&params).await {
         Ok(entries) => {
             let count = entries.len();

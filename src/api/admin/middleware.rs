@@ -14,22 +14,11 @@ pub struct AdminAuthState {
     pub admin_token: String,
 }
 
-pub async fn admin_auth_middleware(
-    State(state): State<AdminAuthState>,
-    req: Request<Body>,
-    next: Next,
-) -> Response {
-    let token = req
-        .headers()
-        .get("X-Admin-Token")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or_default();
+pub async fn admin_auth_middleware(State(state): State<AdminAuthState>, req: Request<Body>, next: Next) -> Response {
+    let token = req.headers().get("X-Admin-Token").and_then(|v| v.to_str().ok()).unwrap_or_default();
 
     if token.is_empty() || token != state.admin_token {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({ "error": "invalid or missing admin token" })),
-        )
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "invalid or missing admin token" })))
             .into_response();
     }
 

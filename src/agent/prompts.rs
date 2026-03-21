@@ -56,9 +56,17 @@ pub fn is_direct_response_goal(goal: &str) -> bool {
     // whether tools/connectors are needed.
 
     let greetings = [
-        "hi", "hello", "hey", "yo",
-        "good morning", "good afternoon", "good evening",
-        "thanks", "thank you", "bye", "goodbye",
+        "hi",
+        "hello",
+        "hey",
+        "yo",
+        "good morning",
+        "good afternoon",
+        "good evening",
+        "thanks",
+        "thank you",
+        "bye",
+        "goodbye",
     ];
     if greetings.iter().any(|g| lower == *g) {
         return true;
@@ -261,18 +269,18 @@ impl JobType {
 
     pub fn label(&self) -> &'static str {
         match self {
-            Self::SoftwareEngineer  => "software_engineer",
-            Self::ResearchAnalyst   => "research_analyst",
-            Self::CustomerSupport   => "customer_support",
-            Self::DevOps            => "devops",
-            Self::Marketing         => "marketing",
-            Self::DataExtraction    => "data_extraction",
-            Self::SalesRevOps       => "sales_revops",
+            Self::SoftwareEngineer => "software_engineer",
+            Self::ResearchAnalyst => "research_analyst",
+            Self::CustomerSupport => "customer_support",
+            Self::DevOps => "devops",
+            Self::Marketing => "marketing",
+            Self::DataExtraction => "data_extraction",
+            Self::SalesRevOps => "sales_revops",
             Self::FinanceAccounting => "finance_accounting",
-            Self::HRPeopleOps       => "hr_people_ops",
-            Self::LegalContract     => "legal_contract",
-            Self::ITOpsITSM         => "it_ops_itsm",
-            Self::General           => "general",
+            Self::HRPeopleOps => "hr_people_ops",
+            Self::LegalContract => "legal_contract",
+            Self::ITOpsITSM => "it_ops_itsm",
+            Self::General => "general",
         }
     }
 
@@ -433,14 +441,8 @@ impl JobType {
 /// Takes the list of agents ordered by created_at ASC.
 /// Only includes agents that came *before* the current agent (by created_at).
 /// Limits to the most recent 10 prior messages to avoid context overflow.
-pub fn build_conversation_history(
-    prior_agents: &[AgentState],
-    current_agent_id: &str,
-) -> String {
-    let priors: Vec<&AgentState> = prior_agents
-        .iter()
-        .filter(|a| a.id != current_agent_id)
-        .collect();
+pub fn build_conversation_history(prior_agents: &[AgentState], current_agent_id: &str) -> String {
+    let priors: Vec<&AgentState> = prior_agents.iter().filter(|a| a.id != current_agent_id).collect();
 
     if priors.is_empty() {
         return String::new();
@@ -452,20 +454,40 @@ pub fn build_conversation_history(
 
     let mut history = String::from("CONVERSATION HISTORY (prior messages in this thread):\n");
     for (i, agent) in recent.iter().enumerate() {
-        let answer = agent
-            .final_answer()
-            .unwrap_or("(still in progress)")
-            .chars()
-            .take(500)
-            .collect::<String>();
-        history.push_str(&format!(
-            "[Message {}] User: {}\nNarayan: {}\n\n",
-            i + 1,
-            agent.goal,
-            answer,
-        ));
+        let answer = agent.final_answer().unwrap_or("(still in progress)").chars().take(500).collect::<String>();
+        history.push_str(&format!("[Message {}] User: {}\nNarayan: {}\n\n", i + 1, agent.goal, answer,));
     }
     history
+}
+
+fn clarification_context(state: &AgentState) -> Option<String> {
+    let last_input = state
+        .metadata
+        .get("last_user_input_context")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+
+    last_input.or_else(|| {
+        state
+            .metadata
+            .get("clarification_answers")
+            .and_then(|value| serde_json::from_value::<crate::agent::clarifier::ClarificationAnswers>(value.clone()).ok())
+            .and_then(|answers| {
+                if let Some(freeform) = answers.freeform.filter(|value| !value.trim().is_empty()) {
+                    Some(freeform)
+                } else {
+                    let joined = answers
+                        .answers
+                        .into_iter()
+                        .filter(|answer| !answer.trim().is_empty())
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    if joined.is_empty() { None } else { Some(joined) }
+                }
+            })
+    })
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -627,7 +649,12 @@ OUTPUT FORMAT — return ONLY valid JSON, no markdown fences, no other text:
       "index": 0,
       "description": "specific, concrete description of what this step does",
       "tool": "exact_tool_name_or_null",
-      "tool_args": {{}}
+      "tool_args": {{}},
+      "condition": {{
+        "reference": "result_of_step_0.output.count",
+        "operator": "gt",
+        "value": 0
+      }}
     }}
   ],
   "rationale": "one sentence: why this sequence achieves the goal"
@@ -638,6 +665,11 @@ CONSTRAINTS:
 - Each step must be independently executable and its completion verifiable
 - tool must be null only if the step is pure LLM reasoning with no external calls
 - tool_args must include every required parameter for the named tool
+- condition is optional; when present it must use one of: exists, not_exists, truthy, falsy, equals, not_equals, contains, nonempty, empty, gt, gte, lt, lte
+- condition.reference must point to a concrete prior-step field such as result_of_step_0.output.count or result_of_step_0.tool_results[0].output.files[0].path
+- Use condition for branching and skipping steps; do not describe IF/ELSE behavior only in prose
+- If a later step depends on a prior step's structured output, reference it with an explicit template like {{result_of_step_0.tool_results[0].output.files[0].path}} or {{result_of_step_0.output}}
+- Never use vague placeholders like {{result_of_step_0[0]}} — reference the real field path you need
 - tool names must be exact — use the tool manifest provided
 - If any step uses tools to gather, create, or transform information for the user, add a final step with tool=null that answers the user directly from the verified results
 - The final step should be a user-facing answer step unless the goal is explicitly only background automation with no human reply needed
@@ -652,22 +684,18 @@ CONSTRAINTS:
 
     /// User message for initial plan creation.
     /// Uses tool_manifest (grouped categories) instead of a flat list.
-    pub fn user_create(
-        state: &AgentState,
-        context: &str,
-        tool_manifest: &str,
-        conversation_history: &str,
-    ) -> String {
-        let conv_ctx = if conversation_history.is_empty() {
-            String::new()
-        } else {
-            format!("\n{conversation_history}\n")
-        };
+    pub fn user_create(state: &AgentState, context: &str, tool_manifest: &str, conversation_history: &str) -> String {
+        let conv_ctx =
+            if conversation_history.is_empty() { String::new() } else { format!("\n{conversation_history}\n") };
+        let clarification_ctx = clarification_context(state)
+            .map(|value| format!("\nLATEST USER INPUT:\n{value}\n"))
+            .unwrap_or_default();
         format!(
-            "{conv_ctx}GOAL: {goal}\n\nWORKSPACE: {ws}\n\nADDITIONAL CONTEXT:\n{ctx}\n\n{manifest}\n\nCreate the plan now.",
+            "{conv_ctx}GOAL: {goal}\n\nWORKSPACE: {ws}{clarification_ctx}\nADDITIONAL CONTEXT:\n{ctx}\n\n{manifest}\n\nCreate the plan now.",
             conv_ctx = conv_ctx,
             goal = state.goal,
             ws = state.workspace_path,
+            clarification_ctx = clarification_ctx,
             ctx = if context.is_empty() { "none" } else { context },
             manifest = tool_manifest,
         )
@@ -701,11 +729,7 @@ Reply directly to the user's message.
 - If the user greeting is simple, answer simply and warmly."#
     }
 
-    pub fn direct_response_user(
-        state: &AgentState,
-        history_summary: &str,
-        conversation_history: &str,
-    ) -> String {
+    pub fn direct_response_user(state: &AgentState, history_summary: &str, conversation_history: &str) -> String {
         let mut parts = Vec::new();
         if !conversation_history.is_empty() {
             parts.push(conversation_history.to_string());
@@ -830,30 +854,14 @@ EXECUTION STYLE:
             }
         };
 
-        let plan_summary: String = plan
-            .steps
-            .iter()
-            .map(|s| {
-                format!(
-                    "  [{idx}] {icon} {desc}{tool}",
-                    idx = s.index,
-                    icon = if s.tool.is_some() { "🔧" } else { "🧠" },
-                    desc = s.description,
-                    tool = s.tool.as_ref().map(|t| format!(" ({})", t)).unwrap_or_default(),
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-
         format!(
             r#"You are an autonomous AI agent executing a real-world task.
 
 GOAL: {goal}
 JOB TYPE: {jt}
 WORKSPACE: {ws}
-
-FULL PLAN ({n} steps):
-{plan}
+PLAN LENGTH: {n} steps
+You are executing one step from the plan. The current step, retry context, and any user clarifications are provided in the user message.
 
 {style}
 
@@ -869,7 +877,6 @@ EXECUTION RULES:
             jt = job_type.label(),
             ws = state.workspace_path,
             n = plan.steps.len(),
-            plan = plan_summary,
             style = execution_style,
         )
     }
@@ -881,11 +888,8 @@ EXECUTION RULES:
         previous_tool_results: &[&str],
         conversation_history: &str,
     ) -> String {
-        let conv_ctx = if conversation_history.is_empty() {
-            String::new()
-        } else {
-            format!("{conversation_history}\n")
-        };
+        let conv_ctx =
+            if conversation_history.is_empty() { String::new() } else { format!("{conversation_history}\n") };
 
         let history_ctx = if history_summary.is_empty() {
             String::new()
@@ -936,11 +940,15 @@ EXECUTION RULES:
             ),
             _ => String::new(),
         };
+        let clarification_ctx = clarification_context(state)
+            .map(|value| format!("\nLATEST USER INPUT:\n{}\n", truncate(&value, 1200)))
+            .unwrap_or_default();
 
         format!(
-            "{conv_ctx}USER GOAL:\n{goal}\n\nCURRENT STEP [{idx}]: {desc}{planned_tool}{planned_tool_args}{retry_ctx}{history}{tools}\n\nExecute this step now.",
+            "{conv_ctx}USER GOAL:\n{goal}{clarification_ctx}\nCURRENT STEP [{idx}]: {desc}{planned_tool}{planned_tool_args}{retry_ctx}{history}{tools}\n\nExecute this step now.",
             conv_ctx = conv_ctx,
             goal = state.goal,
+            clarification_ctx = clarification_ctx,
             idx = step.index,
             desc = step.description,
             planned_tool = planned_tool,

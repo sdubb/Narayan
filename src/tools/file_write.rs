@@ -9,10 +9,7 @@ fn normalize_text_content(content: &str) -> String {
         return content.to_string();
     }
 
-    content
-        .replace("\\r\\n", "\r\n")
-        .replace("\\n", "\n")
-        .replace("\\t", "\t")
+    content.replace("\\r\\n", "\r\n").replace("\\n", "\n").replace("\\t", "\t")
 }
 
 #[async_trait]

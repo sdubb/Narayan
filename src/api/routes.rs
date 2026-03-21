@@ -273,11 +273,26 @@ fn installed_skills_json(registry: &SkillRegistry) -> serde_json::Value {
                 "name": s.name,
                 "description": s.description,
                 "step_count": s.steps.len(),
+                "aliases": s.aliases,
                 "version": s.version,
             })
         })
         .collect();
     serde_json::json!({ "skills": skills, "count": skills.len() })
+}
+
+fn provider_catalog_json() -> serde_json::Value {
+    let providers: Vec<serde_json::Value> = crate::providers::provider_catalog()
+        .into_iter()
+        .map(|provider| {
+            serde_json::json!({
+                "id": provider.id,
+                "label": provider.label,
+                "models": provider.models,
+            })
+        })
+        .collect();
+    serde_json::json!({ "providers": providers, "count": providers.len() })
 }
 
 // ── Health ─────────────────────────────────────────────────────────────────
@@ -390,6 +405,11 @@ pub async fn issue_session_token(State(state): State<AppState>, Json(body): Json
 
 // ── Provider credentials ───────────────────────────────────────────────────
 
+/// GET /providers — list supported providers plus suggested model IDs for the UI.
+pub async fn list_providers(_tenant: AuthenticatedTenant) -> impl IntoResponse {
+    Json(provider_catalog_json()).into_response()
+}
+
 #[derive(Deserialize)]
 pub struct SetCredentialRequest {
     pub provider: String,
@@ -406,6 +426,9 @@ pub async fn set_credential(
     Json(body): Json<SetCredentialRequest>,
 ) -> impl IntoResponse {
     let provider_name = body.provider.clone();
+    if !crate::providers::supports_provider(&provider_name) {
+        return err(StatusCode::BAD_REQUEST, format!("unsupported provider '{}'", provider_name));
+    }
     let secret_enc = encrypt_secret(&body.api_key, &state.encrypt_key);
 
     let cred =
@@ -658,21 +681,13 @@ pub async fn create_goal(
         // Auto-create a new conversation
         let cid = crate::util::new_id();
         let title: String = body.description.chars().take(80).collect();
-        if let Err(e) = state
-            .store
-            .create_conversation(&cid, &tenant.tenant_id, Some(&title))
-            .await
-        {
+        if let Err(e) = state.store.create_conversation(&cid, &tenant.tenant_id, Some(&title)).await {
             return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
         }
         cid
     };
 
-    match state
-        .manager
-        .create_goal(tenant.tenant_id.clone(), body.description.clone(), Some(conv_id.clone()))
-        .await
-    {
+    match state.manager.create_goal(tenant.tenant_id.clone(), body.description.clone(), Some(conv_id.clone())).await {
         Ok((goal, agent)) => {
             state.metrics.goal_created();
             let _ = state
@@ -691,11 +706,7 @@ pub async fn create_goal(
                 .await;
             (
                 StatusCode::CREATED,
-                Json(CreateGoalResponse {
-                    goal_id: goal.id,
-                    agent_id: agent.id,
-                    conversation_id: conv_id,
-                }),
+                Json(CreateGoalResponse { goal_id: goal.id, agent_id: agent.id, conversation_id: conv_id }),
             )
                 .into_response()
         }
@@ -706,10 +717,7 @@ pub async fn create_goal(
 // ── Conversations ─────────────────────────────────────────────────────────
 
 /// GET /conversations — list conversations for this tenant.
-pub async fn list_conversations(
-    State(state): State<AppState>,
-    tenant: AuthenticatedTenant,
-) -> impl IntoResponse {
+pub async fn list_conversations(State(state): State<AppState>, tenant: AuthenticatedTenant) -> impl IntoResponse {
     match state.store.list_conversations(&tenant.tenant_id).await {
         Ok(conversations) => {
             // For each conversation, count agents
@@ -747,10 +755,7 @@ pub async fn get_conversation(
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     };
 
-    let agents_result = state
-        .store
-        .list_agents_in_conversation(&tenant.tenant_id, &conv_id)
-        .await;
+    let agents_result = state.store.list_agents_in_conversation(&tenant.tenant_id, &conv_id).await;
     let agents_list = match agents_result {
         Ok(a) => a,
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
@@ -808,7 +813,7 @@ pub async fn list_agents(State(state): State<AppState>, tenant: AuthenticatedTen
     }
 }
 
-/// GET /agents/:id — tenant-scoped fetch.
+/// GET /agents/:id — tenant-scoped fetch (enhanced with plan, children, job_type).
 pub async fn get_agent(
     State(state): State<AppState>,
     tenant: AuthenticatedTenant,
@@ -818,16 +823,33 @@ pub async fn get_agent(
         Ok(Some(a)) => {
             let final_answer = a.final_answer().map(str::to_string);
             let key_findings = a.metadata.get("key_findings").cloned().unwrap_or_else(|| serde_json::json!([]));
+            let plan_json = a.plan.as_ref().map(|p| serde_json::to_value(p).unwrap_or_default());
+            let step_count = a.plan.as_ref().map(|p| p.steps.len()).unwrap_or(0);
+            let job_type = a.plan.as_ref().and_then(|p| p.job_type.clone());
+            let cost = state.cost_tracker.get_usage(&a.id).await;
             Json(serde_json::json!({
-                "id":             a.id,
-                "goal":           a.goal,
-                "status":         format!("{:?}", a.status).to_lowercase(),
-                "current_step":   a.current_step,
-                "workspace_path": a.workspace_path,
-                "next_run":       a.next_run.to_rfc3339(),
-                "created_at":     a.created_at.to_rfc3339(),
-                "updated_at":     a.updated_at.to_rfc3339(),
-                "final_answer":   final_answer.clone(),
+                "id":               a.id,
+                "goal":             a.goal,
+                "status":           format!("{:?}", a.status).to_lowercase(),
+                "current_step":     a.current_step,
+                "step_count":       step_count,
+                "workspace_path":   a.workspace_path,
+                "next_run":         a.next_run.to_rfc3339(),
+                "created_at":       a.created_at.to_rfc3339(),
+                "updated_at":       a.updated_at.to_rfc3339(),
+                "started_at":       a.started_at.map(|t| t.to_rfc3339()),
+                "final_answer":     final_answer.clone(),
+                "plan":             plan_json,
+                "job_type":         job_type,
+                "parent_agent_id":  a.parent_agent_id,
+                "pending_children": a.pending_children,
+                "conversation_id":  a.conversation_id,
+                "cost": cost.as_ref().map(|c| serde_json::json!({
+                    "total_cost_usd": c.total_cost_usd,
+                    "total_input_tokens": c.total_input_tokens,
+                    "total_output_tokens": c.total_output_tokens,
+                    "total_requests": c.total_requests,
+                })),
                 "metadata": {
                     "final_answer": final_answer,
                     "last_reflection": a.metadata.get("last_reflection"),
@@ -856,6 +878,256 @@ pub async fn get_agent_logs(
         Ok(None) => err(StatusCode::NOT_FOUND, "agent not found"),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
+}
+
+/// GET /agents/:id/workspace/files — list files in agent workspace.
+pub async fn list_workspace_files(
+    State(state): State<AppState>,
+    tenant: AuthenticatedTenant,
+    Path(agent_id): Path<String>,
+) -> impl IntoResponse {
+    let agent = match state.store.get_agent(&tenant.tenant_id, &agent_id).await {
+        Ok(Some(a)) => a,
+        Ok(None) => return err(StatusCode::NOT_FOUND, "agent not found"),
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    };
+
+    let base = std::path::PathBuf::from(&agent.workspace_path).join("files");
+    let mut files = Vec::new();
+    if base.exists() {
+        collect_workspace_files(&base, &base, &mut files);
+    }
+
+    Json(serde_json::json!({
+        "agent_id": agent_id,
+        "files": files,
+        "count": files.len()
+    })).into_response()
+}
+
+fn collect_workspace_files(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<serde_json::Value>) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let rel = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().to_string();
+            if path.is_dir() {
+                let mut children = Vec::new();
+                collect_workspace_files(root, &path, &mut children);
+                out.push(serde_json::json!({
+                    "name": entry.file_name().to_string_lossy(),
+                    "path": rel,
+                    "is_dir": true,
+                    "children": children
+                }));
+            } else {
+                let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                let modified = entry.metadata().ok()
+                    .and_then(|m| m.modified().ok())
+                    .map(|t| {
+                        let dt: chrono::DateTime<chrono::Utc> = t.into();
+                        dt.to_rfc3339()
+                    });
+                out.push(serde_json::json!({
+                    "name": entry.file_name().to_string_lossy(),
+                    "path": rel,
+                    "is_dir": false,
+                    "size": size,
+                    "modified": modified
+                }));
+            }
+        }
+    }
+}
+
+/// GET /agents/:id/workspace/files/*path — read a specific workspace file.
+pub async fn read_workspace_file(
+    State(state): State<AppState>,
+    tenant: AuthenticatedTenant,
+    Path((agent_id, file_path)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let agent = match state.store.get_agent(&tenant.tenant_id, &agent_id).await {
+        Ok(Some(a)) => a,
+        Ok(None) => return err(StatusCode::NOT_FOUND, "agent not found"),
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    };
+
+    // Prevent directory traversal
+    if file_path.contains("..") {
+        return err(StatusCode::BAD_REQUEST, "invalid path");
+    }
+
+    let base = std::path::PathBuf::from(&agent.workspace_path).join("files");
+    let full_path = base.join(&file_path);
+
+    if !full_path.starts_with(&base) {
+        return err(StatusCode::BAD_REQUEST, "invalid path");
+    }
+
+    match tokio::fs::read(&full_path).await {
+        Ok(content) => {
+            if content.len() > 1_048_576 {
+                return err(StatusCode::BAD_REQUEST, "file too large (>1MB)");
+            }
+            // Guess content type from extension
+            let ct = match full_path.extension().and_then(|e| e.to_str()) {
+                Some("md" | "txt" | "log") => "text/plain; charset=utf-8",
+                Some("json") => "application/json",
+                Some("csv") => "text/csv",
+                Some("html") => "text/html",
+                Some("png") => "image/png",
+                Some("jpg" | "jpeg") => "image/jpeg",
+                Some("pdf") => "application/pdf",
+                _ => "application/octet-stream",
+            };
+            ([(axum::http::header::CONTENT_TYPE, ct)], content).into_response()
+        }
+        Err(_) => err(StatusCode::NOT_FOUND, "file not found"),
+    }
+}
+
+/// GET /agents/:id/children — list child agents for delegation view.
+pub async fn list_agent_children(
+    State(state): State<AppState>,
+    tenant: AuthenticatedTenant,
+    Path(agent_id): Path<String>,
+) -> impl IntoResponse {
+    // Verify parent exists
+    match state.store.get_agent(&tenant.tenant_id, &agent_id).await {
+        Ok(None) => return err(StatusCode::NOT_FOUND, "agent not found"),
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        _ => {}
+    }
+
+    match state.store.get_agent_children(&tenant.tenant_id, &agent_id).await {
+        Ok(children) => {
+            let body: Vec<serde_json::Value> = children.iter().map(|c| {
+                let step_count = c.plan.as_ref().map(|p| p.steps.len()).unwrap_or(0);
+                serde_json::json!({
+                    "id": c.id,
+                    "goal": c.goal,
+                    "status": format!("{:?}", c.status).to_lowercase(),
+                    "current_step": c.current_step,
+                    "step_count": step_count,
+                    "created_at": c.created_at.to_rfc3339(),
+                    "updated_at": c.updated_at.to_rfc3339(),
+                })
+            }).collect();
+            Json(serde_json::json!({
+                "parent_id": agent_id,
+                "children": body,
+                "count": body.len()
+            })).into_response()
+        }
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+/// POST /agents/:id/plan/approve — approve the agent's plan.
+pub async fn approve_plan(
+    State(state): State<AppState>,
+    tenant: AuthenticatedTenant,
+    Path(agent_id): Path<String>,
+) -> impl IntoResponse {
+    let agent = match state.store.get_agent(&tenant.tenant_id, &agent_id).await {
+        Ok(Some(a)) => a,
+        Ok(None) => return err(StatusCode::NOT_FOUND, "agent not found"),
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    };
+
+    if agent.plan.is_none() {
+        return err(StatusCode::BAD_REQUEST, "no plan to approve");
+    }
+
+    if let Err(e) = state.store.update_agent_status(&tenant.tenant_id, &agent_id, "running").await {
+        return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+    }
+
+    state.event_bus_handle.publish(crate::events::AgentEvent::PlanApproved {
+        agent_id: agent_id.clone(),
+    });
+
+    let _ = state.audit_log.append(
+        &tenant.tenant_id,
+        &agent_id,
+        "plan_approved",
+        serde_json::json!({}),
+    ).await;
+
+    Json(serde_json::json!({"status": "approved", "agent_id": agent_id})).into_response()
+}
+
+/// POST /agents/:id/plan/reject — reject with feedback, triggers replan.
+pub async fn reject_plan(
+    State(state): State<AppState>,
+    tenant: AuthenticatedTenant,
+    Path(agent_id): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let agent = match state.store.get_agent(&tenant.tenant_id, &agent_id).await {
+        Ok(Some(a)) => a,
+        Ok(None) => return err(StatusCode::NOT_FOUND, "agent not found"),
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    };
+
+    let feedback = body.get("feedback").and_then(|v| v.as_str()).unwrap_or("");
+
+    let mut meta = agent.metadata.clone();
+    meta["plan_feedback"] = serde_json::json!(feedback);
+    let _ = state.store.update_agent_metadata(&tenant.tenant_id, &agent_id, &meta).await;
+    let _ = state.store.update_agent_status(&tenant.tenant_id, &agent_id, "preflight").await;
+
+    state.event_bus_handle.publish(crate::events::AgentEvent::PlanRejected {
+        agent_id: agent_id.clone(),
+        feedback: feedback.to_string(),
+    });
+
+    let _ = state.audit_log.append(
+        &tenant.tenant_id,
+        &agent_id,
+        "plan_rejected",
+        serde_json::json!({"feedback": feedback}),
+    ).await;
+
+    Json(serde_json::json!({"status": "rejected", "agent_id": agent_id})).into_response()
+}
+
+/// POST /agents/:id/plan/edit — edit plan steps then approve.
+pub async fn edit_plan(
+    State(state): State<AppState>,
+    tenant: AuthenticatedTenant,
+    Path(agent_id): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let agent = match state.store.get_agent(&tenant.tenant_id, &agent_id).await {
+        Ok(Some(a)) => a,
+        Ok(None) => return err(StatusCode::NOT_FOUND, "agent not found"),
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    };
+
+    let edited_steps = body.get("steps").cloned().unwrap_or(serde_json::json!([]));
+    let step_count = edited_steps.as_array().map(|a| a.len()).unwrap_or(0);
+
+    if let Some(plan) = agent.plan.as_ref() {
+        let mut plan_json = serde_json::to_value(plan).unwrap_or_default();
+        plan_json["steps"] = edited_steps.clone();
+        let _ = state.store.update_agent_plan(&tenant.tenant_id, &agent_id, &plan_json).await;
+    }
+
+    let _ = state.store.update_agent_status(&tenant.tenant_id, &agent_id, "running").await;
+
+    state.event_bus_handle.publish(crate::events::AgentEvent::PlanEdited {
+        agent_id: agent_id.clone(),
+        step_count,
+    });
+
+    let _ = state.audit_log.append(
+        &tenant.tenant_id,
+        &agent_id,
+        "plan_edited",
+        serde_json::json!({"step_count": step_count}),
+    ).await;
+
+    Json(serde_json::json!({"status": "edited", "agent_id": agent_id, "step_count": step_count})).into_response()
 }
 
 /// POST /agents/:id/pause
@@ -914,8 +1186,69 @@ pub async fn submit_clarification(
                 return err(StatusCode::BAD_REQUEST, "agent is not in clarifying state");
             }
 
-            // Persist answers into metadata so the loop can use them
-            agent.metadata["clarification_answers"] = serde_json::to_value(&body).unwrap_or_default();
+            let questions = agent
+                .metadata
+                .get("clarification_questions")
+                .map(crate::agent::clarifier::parse_clarification_questions)
+                .unwrap_or_default();
+
+            for (index, question) in questions.iter().enumerate() {
+                if question.required
+                    && body.answers.get(index).map(|answer| answer.trim().is_empty()).unwrap_or(true)
+                {
+                    return err(
+                        StatusCode::BAD_REQUEST,
+                        format!("answer required for '{}'", question.prompt),
+                    );
+                }
+            }
+
+            let mut safe_answers = Vec::with_capacity(body.answers.len());
+            for (index, answer) in body.answers.iter().enumerate() {
+                let trimmed = answer.trim();
+                let safe_answer = match questions.get(index) {
+                    Some(question)
+                        if (question.secret || question.store_as_credential.is_some()) && !trimmed.is_empty() =>
+                    {
+                        let credential_key = question
+                            .store_as_credential
+                            .clone()
+                            .filter(|value| !value.trim().is_empty())
+                            .unwrap_or_else(|| question.id.clone());
+                        crate::tools::memory_store_internal::insert(
+                            format!("credential:{credential_key}"),
+                            trimmed.to_string(),
+                        );
+                        format!(
+                            "User provided '{}' securely and it was stored as credential '{}'.",
+                            question.prompt, credential_key
+                        )
+                    }
+                    Some(question) if question.connector_type.is_some() && trimmed.is_empty() => format!(
+                        "Connector setup requested for '{}'.",
+                        question.connector_type.clone().unwrap_or_else(|| question.prompt.clone())
+                    ),
+                    _ => trimmed.to_string(),
+                };
+                safe_answers.push(safe_answer);
+            }
+
+            let sanitized_answers = crate::agent::ClarificationAnswers {
+                answers: safe_answers.clone(),
+                freeform: if questions.iter().any(|question| question.secret || question.store_as_credential.is_some()) {
+                    None
+                } else {
+                    body.freeform.clone()
+                },
+            };
+
+            // Persist answers into metadata so the loop can use them without leaking secrets.
+            agent.metadata["clarification_answers"] = serde_json::to_value(&sanitized_answers).unwrap_or_default();
+            agent.metadata["last_user_input_context"] =
+                serde_json::json!(safe_answers.iter().filter(|answer| !answer.is_empty()).cloned().collect::<Vec<_>>().join("\n"));
+            if let Some(metadata) = agent.metadata.as_object_mut() {
+                metadata.remove("clarification_questions");
+            }
 
             // Move agent back to waiting so it gets scheduled for planning
             agent.status = crate::state::AgentStatus::Waiting;
@@ -923,7 +1256,12 @@ pub async fn submit_clarification(
             agent.updated_at = chrono::Utc::now();
 
             match state.store.upsert_agent(&agent).await {
-                Ok(_) => Json(serde_json::json!({ "acknowledged": true })).into_response(),
+                Ok(_) => {
+                    state.event_bus_handle.publish(crate::events::AgentEvent::ClarificationReceived {
+                        agent_id: agent.id.clone(),
+                    });
+                    Json(serde_json::json!({ "acknowledged": true })).into_response()
+                }
                 Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
             }
         }
@@ -1527,7 +1865,13 @@ mod tests {
 
         let installed = registry.get("triage").expect("skill should be present");
         assert_eq!(installed.description, "Sort incoming incidents");
-        assert_eq!(installed.steps, vec!["collect context", "prioritize"]);
+        assert_eq!(
+            installed.steps,
+            vec![
+                crate::skills::registry::SkillStep::from("collect context"),
+                crate::skills::registry::SkillStep::from("prioritize"),
+            ]
+        );
     }
 
     #[test]
@@ -1566,5 +1910,30 @@ mod tests {
         assert_eq!(registry_payload["count"], 1);
         assert_eq!(registry_payload["skills"][0]["name"], "triage");
         assert_eq!(registry_payload["skills"][0]["version"], 1);
+    }
+
+    #[test]
+    fn test_provider_catalog_json_includes_latest_groq_and_nvidia_models() {
+        let payload = provider_catalog_json();
+
+        let providers = payload["providers"].as_array().expect("providers should be an array");
+        let groq = providers.iter().find(|provider| provider["id"] == "groq").expect("groq should exist");
+        let nvidia = providers.iter().find(|provider| provider["id"] == "nvidia").expect("nvidia should exist");
+
+        assert!(groq["models"]
+            .as_array()
+            .expect("groq models should be an array")
+            .iter()
+            .any(|model| model == "openai/gpt-oss-120b"));
+        assert!(nvidia["models"]
+            .as_array()
+            .expect("nvidia models should be an array")
+            .iter()
+            .any(|model| model == "nvidia/nemotron-3-super-120b-a12b"));
+        assert!(nvidia["models"]
+            .as_array()
+            .expect("nvidia models should be an array")
+            .iter()
+            .any(|model| model == "nvidia/nemotron-3-nano-30b-a3b"));
     }
 }

@@ -106,9 +106,7 @@ impl SlaTracker {
 
         // Check first response SLA
         if status.first_response_at.is_none() && now > status.first_response_deadline {
-            actions.push(EscalationAction::EscalateToHuman {
-                reason: "first response SLA breached".into(),
-            });
+            actions.push(EscalationAction::EscalateToHuman { reason: "first response SLA breached".into() });
         }
 
         // Check resolution SLA
@@ -156,10 +154,7 @@ mod tests {
             resolution_mins: 240,
             priority: SlaPriority::Normal,
             escalation_rules: vec![
-                EscalationRule {
-                    trigger_pct: 80.0,
-                    action: EscalationAction::Notify { message: "SLA at 80%".into() },
-                },
+                EscalationRule { trigger_pct: 80.0, action: EscalationAction::Notify { message: "SLA at 80%".into() } },
                 EscalationRule {
                     trigger_pct: 100.0,
                     action: EscalationAction::EscalateToHuman { reason: "SLA breached".into() },

@@ -131,9 +131,7 @@ impl AgentState {
     }
 
     pub fn final_answer(&self) -> Option<&str> {
-        self.final_answer
-            .as_deref()
-            .or_else(|| self.metadata.get("final_answer").and_then(|value| value.as_str()))
+        self.final_answer.as_deref().or_else(|| self.metadata.get("final_answer").and_then(|value| value.as_str()))
     }
 
     pub fn set_final_answer(&mut self, answer: impl Into<String>) {

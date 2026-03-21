@@ -30,10 +30,7 @@ pub struct EvidencePackager {
 }
 
 impl EvidencePackager {
-    pub fn new(
-        citation_tracker: std::sync::Arc<CitationTracker>,
-        audit_log: std::sync::Arc<AuditLog>,
-    ) -> Self {
+    pub fn new(citation_tracker: std::sync::Arc<CitationTracker>, audit_log: std::sync::Arc<AuditLog>) -> Self {
         Self { citation_tracker, audit_log }
     }
 

@@ -13,9 +13,7 @@ pub struct ServiceNowConnector {
 
 impl ServiceNowConnector {
     pub fn new() -> Self {
-        Self {
-            http: reqwest::Client::new(),
-        }
+        Self { http: reqwest::Client::new() }
     }
 
     fn instance_url(config: &ConnectorConfig) -> &str {

@@ -40,7 +40,9 @@ impl WebhookDispatcher {
             let event_type = event_type.clone();
 
             tokio::spawn(async move {
-                if let Err(e) = deliver_with_retries(&http, &store, &hook.id, &hook.url, &hook.secret, &event_type, &payload).await {
+                if let Err(e) =
+                    deliver_with_retries(&http, &store, &hook.id, &hook.url, &hook.secret, &event_type, &payload).await
+                {
                     tracing::error!(
                         webhook_id = %hook.id,
                         url = %hook.url,
@@ -54,12 +56,7 @@ impl WebhookDispatcher {
     }
 
     /// Spawn a background task that forwards all events for an agent to webhooks.
-    pub fn bridge_agent(
-        self: &Arc<Self>,
-        event_bus: Arc<EventBus>,
-        agent_id: String,
-        tenant_id: String,
-    ) {
+    pub fn bridge_agent(self: &Arc<Self>, event_bus: Arc<EventBus>, agent_id: String, tenant_id: String) {
         let dispatcher = self.clone();
         tokio::spawn(async move {
             let mut rx = event_bus.subscribe(&agent_id);
@@ -117,10 +114,7 @@ async fn deliver_with_retries(
                     return Ok(());
                 }
 
-                tracing::warn!(
-                    webhook_id, url, status, attempt,
-                    "webhook delivery got non-2xx response"
-                );
+                tracing::warn!(webhook_id, url, status, attempt, "webhook delivery got non-2xx response");
             }
             Err(e) => {
                 store

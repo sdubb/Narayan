@@ -72,6 +72,13 @@ pub struct ChatResponse {
     pub output_tokens: u32,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ProviderCatalogEntry {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub models: &'static [&'static str],
+}
+
 // ── Core provider trait ────────────────────────────────────────────────────
 
 #[async_trait]
@@ -317,16 +324,64 @@ pub use novita_impl::NovitaProviderAdapter;
 pub use openrouter_impl::OpenRouterProviderAdapter;
 pub use sglang_impl::SglangProviderAdapter;
 
+pub fn provider_catalog() -> Vec<ProviderCatalogEntry> {
+    vec![
+        ProviderCatalogEntry {
+            id: "anthropic",
+            label: "Anthropic",
+            models: &["claude-sonnet-4-20250514", "claude-opus-4-20250514", "claude-haiku-4-5-20251001"],
+        },
+        ProviderCatalogEntry { id: "openai", label: "OpenAI", models: &["gpt-4o", "gpt-4o-mini", "o1", "o3-mini"] },
+        ProviderCatalogEntry {
+            id: "groq",
+            label: "Groq",
+            models: &["openai/gpt-oss-120b", "llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"],
+        },
+        ProviderCatalogEntry {
+            id: "gemini",
+            label: "Gemini",
+            models: &["gemini-2.0-flash", "gemini-2.0-pro", "gemini-1.5-pro"],
+        },
+        ProviderCatalogEntry {
+            id: "nvidia",
+            label: "NVIDIA",
+            models: &[
+                "openai/gpt-oss-120b",
+                "nvidia/nemotron-3-super-120b-a12b",
+                "nvidia/nemotron-3-nano-30b-a3b",
+                "meta/llama-3.1-70b-instruct",
+                "meta/llama-3.1-8b-instruct",
+                "nvidia/llama-3.1-nemotron-70b-instruct",
+            ],
+        },
+        ProviderCatalogEntry {
+            id: "openrouter",
+            label: "OpenRouter",
+            models: &["openai/gpt-4o", "anthropic/claude-3-5-sonnet", "meta-llama/llama-3.3-70b-instruct"],
+        },
+        ProviderCatalogEntry { id: "ollama", label: "Ollama", models: &["llama3.3", "qwen2.5-coder", "deepseek-r1"] },
+        ProviderCatalogEntry { id: "compatible", label: "Compatible", models: &["custom-model"] },
+    ]
+}
+
+pub fn supports_provider(name: &str) -> bool {
+    provider_catalog().iter().any(|provider| provider.id == name)
+}
+
 /// Build a provider instance from a name, api_key, and model string.
 /// Used by the BYOK gateway to construct providers from tenant credentials.
 pub fn build_provider(name: &str, api_key: String, model: String) -> Option<Arc<dyn Provider>> {
     match name {
         "anthropic" => Some(Arc::new(AnthropicProvider::new(api_key, model))),
         "openai" => Some(Arc::new(OpenAiProvider::new(api_key, model))),
-        "groq" => Some(Arc::new(OpenAiProvider::new(api_key, model).with_base_url("https://api.groq.com/openai".into()))),
+        "groq" => {
+            Some(Arc::new(OpenAiProvider::new(api_key, model).with_base_url("https://api.groq.com/openai".into())))
+        }
         "ollama" => Some(Arc::new(OllamaProvider::new(api_key, model))),
         "gemini" => Some(Arc::new(GeminiProviderAdapter::new(api_key, model))),
-        "nvidia" => Some(Arc::new(OpenAiProvider::new(api_key, model).with_base_url("https://integrate.api.nvidia.com".into()))),
+        "nvidia" => {
+            Some(Arc::new(OpenAiProvider::new(api_key, model).with_base_url("https://integrate.api.nvidia.com".into())))
+        }
         "openrouter" => Some(Arc::new(OpenRouterProviderAdapter::new(api_key, model))),
         "copilot" => Some(Arc::new(CopilotProviderAdapter::new(api_key, model))),
         "glm" => Some(Arc::new(GlmProviderAdapter::new(api_key, model))),
@@ -334,5 +389,30 @@ pub fn build_provider(name: &str, api_key: String, model: String) -> Option<Arc<
         "sglang" => Some(Arc::new(SglangProviderAdapter::new(api_key, model))),
         "compatible" => Some(Arc::new(CompatibleProviderAdapter::new(api_key, model))),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{provider_catalog, supports_provider};
+
+    #[test]
+    fn test_provider_catalog_includes_latest_groq_and_nvidia_models() {
+        let catalog = provider_catalog();
+
+        let groq = catalog.iter().find(|provider| provider.id == "groq").expect("groq provider should exist");
+        assert!(groq.models.contains(&"openai/gpt-oss-120b"));
+
+        let nvidia = catalog.iter().find(|provider| provider.id == "nvidia").expect("nvidia provider should exist");
+        assert!(nvidia.models.contains(&"openai/gpt-oss-120b"));
+        assert!(nvidia.models.contains(&"nvidia/nemotron-3-super-120b-a12b"));
+        assert!(nvidia.models.contains(&"nvidia/nemotron-3-nano-30b-a3b"));
+    }
+
+    #[test]
+    fn test_supports_provider_matches_catalog_entries() {
+        assert!(supports_provider("groq"));
+        assert!(supports_provider("nvidia"));
+        assert!(!supports_provider("totally-unknown-provider"));
     }
 }

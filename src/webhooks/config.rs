@@ -59,7 +59,8 @@ impl WebhookStore {
         .execute(&self.pool)
         .await?;
         sqlx::query("CREATE INDEX IF NOT EXISTS webhooks_tenant_id ON webhooks (tenant_id)")
-            .execute(&self.pool).await?;
+            .execute(&self.pool)
+            .await?;
 
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS webhook_deliveries (
@@ -77,17 +78,12 @@ impl WebhookStore {
         .execute(&self.pool)
         .await?;
         sqlx::query("CREATE INDEX IF NOT EXISTS webhook_deliveries_webhook_id ON webhook_deliveries (webhook_id)")
-            .execute(&self.pool).await?;
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
-    pub async fn create(
-        &self,
-        tenant_id: &str,
-        url: &str,
-        secret: &str,
-        events: &[String],
-    ) -> Result<WebhookConfig> {
+    pub async fn create(&self, tenant_id: &str, url: &str, secret: &str, events: &[String]) -> Result<WebhookConfig> {
         let id = crate::util::new_id();
         let now = Utc::now();
         let events_json = serde_json::to_value(events)?;
@@ -138,9 +134,7 @@ impl WebhookStore {
         let all = self.list_for_tenant(tenant_id).await?;
         Ok(all
             .into_iter()
-            .filter(|w| {
-                w.enabled && (w.events.is_empty() || w.events.iter().any(|e| e == event_type))
-            })
+            .filter(|w| w.enabled && (w.events.is_empty() || w.events.iter().any(|e| e == event_type)))
             .collect())
     }
 
@@ -156,19 +150,17 @@ impl WebhookStore {
     pub async fn increment_failure(&self, webhook_id: &str) -> Result<()> {
         sqlx::query(
             "UPDATE webhooks SET failure_count = failure_count + 1, updated_at = NOW()
-             WHERE id = $1"
+             WHERE id = $1",
         )
         .bind(webhook_id)
         .execute(&self.pool)
         .await?;
 
         // Auto-disable if over max failures
-        sqlx::query(
-            "UPDATE webhooks SET enabled = false WHERE id = $1 AND failure_count >= max_failures"
-        )
-        .bind(webhook_id)
-        .execute(&self.pool)
-        .await?;
+        sqlx::query("UPDATE webhooks SET enabled = false WHERE id = $1 AND failure_count >= max_failures")
+            .bind(webhook_id)
+            .execute(&self.pool)
+            .await?;
 
         Ok(())
     }

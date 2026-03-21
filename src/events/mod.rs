@@ -1,3 +1,3 @@
 pub mod bus;
 
-pub use bus::{AgentEvent, EventBus};
+pub use bus::{AgentEvent, EventBus, PlanStepEvent};

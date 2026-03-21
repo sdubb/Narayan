@@ -171,11 +171,8 @@ impl Evaluator for LlmEvaluator {
         // the LLM is unlikely to fix it on its own (e.g., missing OAuth token,
         // wrong tool schema). Abort after 2nd identical failure.
         if retry_count >= 1 && !result.success {
-            let current_errors: Vec<String> = result.tool_results
-                .iter()
-                .filter(|r| !r.success)
-                .filter_map(|r| r.error.clone())
-                .collect();
+            let current_errors: Vec<String> =
+                result.tool_results.iter().filter(|r| !r.success).filter_map(|r| r.error.clone()).collect();
             let current_error_str = current_errors.join(" | ");
 
             if let Some(prev_error) = state.metadata.get("last_step_error").and_then(|v| v.as_str()) {
@@ -248,9 +245,9 @@ impl Evaluator for LlmEvaluator {
 
         let verdict = match parsed.verdict.trim().to_uppercase().as_str() {
             "CONTINUE" => EvalVerdict::Continue,
-            "ABORT"    => EvalVerdict::Abort,
+            "ABORT" => EvalVerdict::Abort,
             "COMPLETE" => EvalVerdict::GoalComplete,
-            _          => EvalVerdict::Retry,
+            _ => EvalVerdict::Retry,
         };
 
         tracing::debug!(
@@ -324,6 +321,7 @@ mod tests {
                     tool: Some("shell".into()),
                     tool_args: None,
                     success_criteria: "done".into(),
+                    condition: None,
                 })
                 .collect(),
             rationale: "test".into(),

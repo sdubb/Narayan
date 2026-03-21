@@ -3,14 +3,18 @@
 //! Triggers: job run failed, job run completed, data freshness alert.
 //! Delivers: run annotations, Slack/webhook notifications via dbt Cloud API.
 
+use crate::connectors::framework::{Connector, ConnectorConfig, ConnectorEvent};
 use anyhow::Result;
 use async_trait::async_trait;
-use crate::connectors::framework::{Connector, ConnectorConfig, ConnectorEvent};
 
-pub struct DbtCloudConnector { http: reqwest::Client }
+pub struct DbtCloudConnector {
+    http: reqwest::Client,
+}
 
 impl DbtCloudConnector {
-    pub fn new() -> Self { Self { http: reqwest::Client::new() } }
+    pub fn new() -> Self {
+        Self { http: reqwest::Client::new() }
+    }
 
     fn token(config: &ConnectorConfig) -> Option<String> {
         config.credentials.get("api_token").and_then(|v| v.as_str()).map(String::from)
@@ -23,14 +27,16 @@ impl DbtCloudConnector {
 
 #[async_trait]
 impl Connector for DbtCloudConnector {
-    fn connector_type(&self) -> &str { "dbt_cloud" }
+    fn connector_type(&self) -> &str {
+        "dbt_cloud"
+    }
 
     async fn handle_inbound(&self, event: &ConnectorEvent, _config: &ConnectorConfig) -> Result<Option<String>> {
         match event.event_type.as_str() {
             "job.run.errored" => {
                 let job_name = event.payload["job_name"].as_str().unwrap_or("job");
-                let run_id   = event.payload["run_id"].as_str().unwrap_or("unknown");
-                let error    = event.payload["status_message"].as_str().unwrap_or("unknown error");
+                let run_id = event.payload["run_id"].as_str().unwrap_or("unknown");
+                let error = event.payload["status_message"].as_str().unwrap_or("unknown error");
                 Ok(Some(format!(
                     "dbt Cloud job '{job_name}' (run {run_id}) failed: {error}. \
                      Fetch the full run logs and error output. \
@@ -43,7 +49,7 @@ impl Connector for DbtCloudConnector {
             }
             "job.run.completed" => {
                 let job_name = event.payload["job_name"].as_str().unwrap_or("job");
-                let models   = event.payload["models_run"].as_u64().unwrap_or(0);
+                let models = event.payload["models_run"].as_u64().unwrap_or(0);
                 let duration = event.payload["duration_seconds"].as_u64().unwrap_or(0);
                 Ok(Some(format!(
                     "dbt Cloud job '{job_name}' completed: {models} models in {duration}s. \
@@ -55,8 +61,8 @@ impl Connector for DbtCloudConnector {
             }
             "source.freshness.error" => {
                 let source = event.payload["source_name"].as_str().unwrap_or("source");
-                let table  = event.payload["identifier"].as_str().unwrap_or("table");
-                let age    = event.payload["age_hours"].as_str().unwrap_or("unknown");
+                let table = event.payload["identifier"].as_str().unwrap_or("table");
+                let age = event.payload["age_hours"].as_str().unwrap_or("unknown");
                 Ok(Some(format!(
                     "dbt source freshness alert: {source}.{table} is {age} hours old (threshold exceeded). \
                      Check the upstream pipeline for this source. \
@@ -69,26 +75,36 @@ impl Connector for DbtCloudConnector {
         }
     }
 
-    async fn deliver_output(&self, config: &ConnectorConfig, external_id: &str, output: &str, _metadata: &serde_json::Value) -> Result<()> {
-        let token   = Self::token(config).ok_or_else(|| anyhow::anyhow!("missing dbt Cloud api_token"))?;
+    async fn deliver_output(
+        &self,
+        config: &ConnectorConfig,
+        external_id: &str,
+        output: &str,
+        _metadata: &serde_json::Value,
+    ) -> Result<()> {
+        let token = Self::token(config).ok_or_else(|| anyhow::anyhow!("missing dbt Cloud api_token"))?;
         let account = Self::account_id(config);
         // Post as a run note annotation
         let url = format!("https://cloud.getdbt.com/api/v2/accounts/{account}/runs/{external_id}/");
-        self.http.get(&url)
-            .header("Authorization", format!("Token {token}"))
-            .send().await?;
+        self.http.get(&url).header("Authorization", format!("Token {token}")).send().await?;
         tracing::info!(run_id = external_id, output_len = output.len(), "dbt Cloud output logged");
         Ok(())
     }
 
     async fn validate_config(&self, config: &ConnectorConfig) -> Result<()> {
-        let token   = Self::token(config).ok_or_else(|| anyhow::anyhow!("missing api_token"))?;
+        let token = Self::token(config).ok_or_else(|| anyhow::anyhow!("missing api_token"))?;
         let account = Self::account_id(config);
-        let url     = format!("https://cloud.getdbt.com/api/v2/accounts/{account}/");
-        let resp    = self.http.get(&url).header("Authorization", format!("Token {token}")).send().await?;
-        if !resp.status().is_success() { anyhow::bail!("dbt Cloud auth failed: {}", resp.status()); }
+        let url = format!("https://cloud.getdbt.com/api/v2/accounts/{account}/");
+        let resp = self.http.get(&url).header("Authorization", format!("Token {token}")).send().await?;
+        if !resp.status().is_success() {
+            anyhow::bail!("dbt Cloud auth failed: {}", resp.status());
+        }
         Ok(())
     }
 }
 
-impl Default for DbtCloudConnector { fn default() -> Self { Self::new() } }
+impl Default for DbtCloudConnector {
+    fn default() -> Self {
+        Self::new()
+    }
+}

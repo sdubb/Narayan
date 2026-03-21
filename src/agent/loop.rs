@@ -89,60 +89,213 @@ fn step_history_summary(result: &crate::agent::executor::StepResult, fallback: &
     fallback.to_string()
 }
 
+fn persist_step_output(
+    state: &mut AgentState,
+    step: &crate::agent::planner::PlannedStep,
+    result: &crate::agent::executor::StepResult,
+) {
+    let record = serde_json::json!({
+        "step_index": step.index,
+        "description": step.description,
+        "success": result.success,
+        "output": result.output,
+        "final_answer_candidate": result.final_answer_candidate,
+        "tools_called": result.tools_called,
+        "tool_results": result.tool_results,
+    });
+
+    if let Some(outputs) = state.metadata.get_mut("step_outputs").and_then(|value| value.as_array_mut()) {
+        if outputs.len() <= step.index {
+            outputs.resize(step.index + 1, serde_json::Value::Null);
+        }
+        outputs[step.index] = record;
+    } else {
+        let mut outputs = Vec::new();
+        outputs.resize(step.index + 1, serde_json::Value::Null);
+        outputs[step.index] = record;
+        state.metadata["step_outputs"] = serde_json::Value::Array(outputs);
+    }
+}
+
+fn persist_skipped_step_output(
+    state: &mut AgentState,
+    step: &crate::agent::planner::PlannedStep,
+    summary: &str,
+) {
+    let record = serde_json::json!({
+        "step_index": step.index,
+        "description": step.description,
+        "success": true,
+        "skipped": true,
+        "output": summary,
+        "final_answer_candidate": serde_json::Value::Null,
+        "tools_called": [],
+        "tool_results": [],
+    });
+
+    if let Some(outputs) = state.metadata.get_mut("step_outputs").and_then(|value| value.as_array_mut()) {
+        if outputs.len() <= step.index {
+            outputs.resize(step.index + 1, serde_json::Value::Null);
+        }
+        outputs[step.index] = record;
+    } else {
+        let mut outputs = Vec::new();
+        outputs.resize(step.index + 1, serde_json::Value::Null);
+        outputs[step.index] = record;
+        state.metadata["step_outputs"] = serde_json::Value::Array(outputs);
+    }
+}
+
+fn condition_truthy(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Null => false,
+        serde_json::Value::Bool(boolean) => *boolean,
+        serde_json::Value::Number(number) => number.as_f64().map(|number| number != 0.0).unwrap_or(false),
+        serde_json::Value::String(text) => !text.trim().is_empty(),
+        serde_json::Value::Array(items) => !items.is_empty(),
+        serde_json::Value::Object(map) => !map.is_empty(),
+    }
+}
+
+fn condition_contains(actual: &serde_json::Value, expected: &serde_json::Value) -> bool {
+    match (actual, expected) {
+        (serde_json::Value::String(actual), serde_json::Value::String(expected)) => {
+            actual.to_ascii_lowercase().contains(&expected.to_ascii_lowercase())
+        }
+        (serde_json::Value::Array(items), expected) => items.iter().any(|item| item == expected),
+        (serde_json::Value::Object(map), serde_json::Value::String(expected)) => map.contains_key(expected),
+        _ => false,
+    }
+}
+
+fn condition_compare_numbers(
+    actual: &serde_json::Value,
+    expected: &serde_json::Value,
+    cmp: impl Fn(f64, f64) -> bool,
+) -> Result<bool> {
+    let actual = actual
+        .as_f64()
+        .ok_or_else(|| anyhow::anyhow!("condition comparison requires numeric actual value"))?;
+    let expected = expected
+        .as_f64()
+        .ok_or_else(|| anyhow::anyhow!("condition comparison requires numeric expected value"))?;
+    Ok(cmp(actual, expected))
+}
+
+fn format_step_condition(step: &crate::agent::planner::PlannedStep) -> Option<String> {
+    step.condition.as_ref().map(|condition| {
+        let value = condition
+            .value
+            .as_ref()
+            .map(|value| match value {
+                serde_json::Value::String(text) => format!(" \"{text}\""),
+                other => format!(" {}", other),
+            })
+            .unwrap_or_default();
+        format!("{} {}{}", condition.reference, condition.operator, value)
+    })
+}
+
+fn plan_step_event(step: &crate::agent::planner::PlannedStep) -> crate::events::PlanStepEvent {
+    crate::events::PlanStepEvent {
+        step_index: step.index,
+        description: step.description.clone(),
+        tool: step.tool.clone(),
+        success_criteria: step.success_criteria.clone(),
+        condition: format_step_condition(step),
+    }
+}
+
 // ── Outcome ────────────────────────────────────────────────────────────────
 
 #[derive(Debug)]
 pub enum StepOutcome {
     Continue { delay_secs: i64 },
-    NeedsClarification { questions: Vec<String> },
+    NeedsClarification { questions: Vec<crate::agent::clarifier::ClarificationQuestion> },
     Infeasible { reason: String },
     Complete,
     Failed(String),
     Delegating { child_ids: Vec<String> },
 }
 
+fn is_missing_provider_credentials_error(error: &anyhow::Error) -> bool {
+    let message = error.to_string().to_ascii_lowercase();
+    message.contains("has no provider credentials configured")
+        || message.contains("no platform fallback is available")
+        || message.contains("call put /credentials")
+}
+
+fn provider_credentials_questions() -> Vec<crate::agent::clarifier::ClarificationQuestion> {
+    vec![crate::agent::clarifier::ClarificationQuestion {
+        id: "llm_provider_credentials".into(),
+        prompt: "Add an LLM provider API key to continue.".into(),
+        placeholder: Some("After adding credentials in Settings, click Submit to retry.".into()),
+        helper_text: Some(
+            "This workspace does not have any tenant provider credentials configured, and no platform fallback key is available."
+                .into(),
+        ),
+        options: Vec::new(),
+        required: false,
+        secret: false,
+        store_as_credential: None,
+        connector_type: Some("provider_credentials".into()),
+        action_label: Some("Open Settings -> Credentials".into()),
+    }]
+}
+
 // ── AgentLoop ──────────────────────────────────────────────────────────────
 
 pub struct AgentLoop {
-    planner:        Arc<dyn Planner>,
-    executor:       Arc<dyn Executor>,
-    evaluator:      Arc<dyn Evaluator>,
-    reflector:      Arc<dyn Reflector>,
-    preflight:      Arc<dyn Preflight>,
-    clarifier:      Arc<dyn Clarifier>,
-    tools:          Arc<ToolRegistry>,
-    event_bus:      Arc<EventBus>,
+    planner: Arc<dyn Planner>,
+    executor: Arc<dyn Executor>,
+    evaluator: Arc<dyn Evaluator>,
+    reflector: Arc<dyn Reflector>,
+    preflight: Arc<dyn Preflight>,
+    clarifier: Arc<dyn Clarifier>,
+    tools: Arc<ToolRegistry>,
+    event_bus: Arc<EventBus>,
     skill_registry: Arc<RwLock<SkillRegistry>>,
     knowledge_graph: Arc<Mutex<KnowledgeGraph>>,
-    vector_store:   Arc<crate::memory::PgVectorStore>,
-    embedder:       Arc<dyn crate::memory::EmbeddingModel>,
-    services:       Arc<AgentServices>,
-    max_steps:      usize,
-    timeout_secs:   u64,
+    vector_store: Arc<crate::memory::PgVectorStore>,
+    embedder: Arc<dyn crate::memory::EmbeddingModel>,
+    services: Arc<AgentServices>,
+    max_steps: usize,
+    timeout_secs: u64,
 }
 
 impl AgentLoop {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        planner:        Arc<dyn Planner>,
-        executor:       Arc<dyn Executor>,
-        evaluator:      Arc<dyn Evaluator>,
-        reflector:      Arc<dyn Reflector>,
-        preflight:      Arc<dyn Preflight>,
-        clarifier:      Arc<dyn Clarifier>,
-        tools:          Arc<ToolRegistry>,
-        event_bus:      Arc<EventBus>,
+        planner: Arc<dyn Planner>,
+        executor: Arc<dyn Executor>,
+        evaluator: Arc<dyn Evaluator>,
+        reflector: Arc<dyn Reflector>,
+        preflight: Arc<dyn Preflight>,
+        clarifier: Arc<dyn Clarifier>,
+        tools: Arc<ToolRegistry>,
+        event_bus: Arc<EventBus>,
         skill_registry: Arc<RwLock<SkillRegistry>>,
         knowledge_graph: Arc<Mutex<KnowledgeGraph>>,
-        vector_store:   Arc<crate::memory::PgVectorStore>,
-        embedder:       Arc<dyn crate::memory::EmbeddingModel>,
-        services:       Arc<AgentServices>,
+        vector_store: Arc<crate::memory::PgVectorStore>,
+        embedder: Arc<dyn crate::memory::EmbeddingModel>,
+        services: Arc<AgentServices>,
     ) -> Self {
         Self {
-            planner, executor, evaluator, reflector, preflight, clarifier,
-            tools, event_bus, skill_registry, knowledge_graph,
-            vector_store, embedder, services,
-            max_steps: 50, timeout_secs: 300,
+            planner,
+            executor,
+            evaluator,
+            reflector,
+            preflight,
+            clarifier,
+            tools,
+            event_bus,
+            skill_registry,
+            knowledge_graph,
+            vector_store,
+            embedder,
+            services,
+            max_steps: 50,
+            timeout_secs: 300,
         }
     }
 
@@ -194,7 +347,7 @@ impl AgentLoop {
                 questions: state
                     .metadata
                     .get("clarification_questions")
-                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                    .map(crate::agent::clarifier::parse_clarification_questions)
                     .unwrap_or_default(),
             });
         }
@@ -202,6 +355,22 @@ impl AgentLoop {
         // ── 4. Planning ─────────────────────────────────────────────────────
         if plan.is_none() {
             self.event_bus.publish(AgentEvent::PlanningStarted { agent_id: state.id.clone() });
+
+            if state.metadata.get("refined_goal").is_none() {
+                if let Some(answer_value) = state.metadata.get("clarification_answers").cloned() {
+                    if let Ok(answers) = serde_json::from_value::<crate::agent::clarifier::ClarificationAnswers>(answer_value)
+                    {
+                        match self.clarifier.incorporate(state, &answers).await {
+                            Ok(refined_goal) => state.metadata["refined_goal"] = serde_json::json!(refined_goal),
+                            Err(error) => tracing::warn!(
+                                agent_id = %state.id,
+                                error = %error,
+                                "failed to incorporate clarification answers"
+                            ),
+                        }
+                    }
+                }
+            }
 
             let tool_names: Vec<&str> = self.tools.list();
             let ctx = state.metadata.get("last_reflection").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -231,6 +400,7 @@ impl AgentLoop {
                         tool: None,
                         tool_args: None,
                         success_criteria: "User receives a direct answer.".into(),
+                        condition: None,
                     }],
                 }
             } else if let Some(skill) = maybe_skill {
@@ -252,7 +422,17 @@ impl AgentLoop {
                 if refined != orig {
                     state.goal = refined;
                 }
-                let p = self.planner.create_plan(state, &ctx, &tool_names).await?;
+                let p = match self.planner.create_plan(state, &ctx, &tool_names).await {
+                    Ok(plan) => plan,
+                    Err(error) if is_missing_provider_credentials_error(&error) => {
+                        state.goal = orig;
+                        return self.prompt_for_provider_credentials(state);
+                    }
+                    Err(error) => {
+                        state.goal = orig;
+                        return Err(error);
+                    }
+                };
                 state.goal = orig;
                 p
             };
@@ -261,6 +441,8 @@ impl AgentLoop {
                 agent_id: state.id.clone(),
                 step_count: new_plan.steps.len(),
                 rationale: new_plan.rationale.clone(),
+                job_type: new_plan.job_type.clone(),
+                steps: new_plan.steps.iter().map(plan_step_event).collect(),
             });
             *plan = Some(new_plan);
         }
@@ -283,10 +465,32 @@ impl AgentLoop {
 
         let step = current_plan.next_step(state.current_step as usize).unwrap().clone();
 
+        if let Some(summary) = self.evaluate_step_condition(state, &step)? {
+            persist_skipped_step_output(state, &step, &summary);
+            state.metadata["last_reflection"] = serde_json::Value::String(summary.clone());
+            state.metadata["key_findings"] = serde_json::json!([]);
+            state.metadata["retry_count"] = serde_json::json!(0);
+            state.metadata.as_object_mut().map(|object| object.remove("last_step_error"));
+            history.push(step.index, step.description.clone(), true, &summary);
+            state.advance_step();
+            state.mark_waiting(next_run_after(0));
+            self.event_bus.publish(AgentEvent::StepCompleted {
+                agent_id: state.id.clone(),
+                step_index: step.index,
+                success: true,
+                summary,
+                description: Some(step.description.clone()),
+            });
+            return Ok(StepOutcome::Continue { delay_secs: 0 });
+        }
+
         self.event_bus.publish(AgentEvent::StepStarted {
             agent_id: state.id.clone(),
             step_index: step.index,
             description: step.description.clone(),
+            tool: step.tool.clone(),
+            success_criteria: (!step.success_criteria.trim().is_empty()).then(|| step.success_criteria.clone()),
+            condition: format_step_condition(&step),
         });
         tracing::info!(
             agent_id = %state.id,
@@ -317,7 +521,13 @@ impl AgentLoop {
 
         // ── 6. Execute step ────────────────────────────────────────────────
         // plane_guard validated inside executor before each tool call
-        let result = self.executor.execute_step(state, &step_exec, current_plan, history).await?;
+        let result = match self.executor.execute_step(state, &step_exec, current_plan, history).await {
+            Ok(result) => result,
+            Err(error) if is_missing_provider_credentials_error(&error) => {
+                return self.prompt_for_provider_credentials(state);
+            }
+            Err(error) => return Err(error),
+        };
         tracing::info!(
             agent_id = %state.id,
             step_index = step.index,
@@ -345,6 +555,7 @@ impl AgentLoop {
         if let Some(candidate) = result.final_answer_candidate.clone() {
             state.set_final_answer(candidate);
         }
+        persist_step_output(state, &step, &result);
 
         // ── 8. Delegation check ─────────────────────────────────────────────
         for tool_result in &result.tool_results {
@@ -374,10 +585,30 @@ impl AgentLoop {
                 success: tool_result.success,
                 output_preview: crate::util::truncate(
                     &serde_json::to_string(&tool_result.output).unwrap_or_default(),
-                    100,
+                    600,
                 )
                 .to_string(),
+                error: tool_result.error.clone(),
             });
+        }
+
+        if let Some(question_output) = result
+            .tool_results
+            .iter()
+            .find(|tool_result| tool_result.output.get("status").and_then(|v| v.as_str()) == Some("awaiting_user_input"))
+        {
+            let questions = crate::agent::clarifier::parse_clarification_questions(
+                question_output.output.get("questions").unwrap_or(&serde_json::Value::Null),
+            );
+            if !questions.is_empty() {
+                state.metadata["clarification_questions"] = serde_json::to_value(&questions)?;
+                state.mark_clarifying();
+                self.event_bus.publish(AgentEvent::ClarificationNeeded {
+                    agent_id: state.id.clone(),
+                    questions: questions.clone(),
+                });
+                return Ok(StepOutcome::NeedsClarification { questions });
+            }
         }
 
         if is_direct_response_goal(&state.goal)
@@ -386,10 +617,7 @@ impl AgentLoop {
             && result.success
             && result.tool_results.is_empty()
         {
-            let answer = state
-                .final_answer()
-                .map(str::to_string)
-                .unwrap_or_else(|| result.output.clone());
+            let answer = state.final_answer().map(str::to_string).unwrap_or_else(|| result.output.clone());
             state.set_final_answer(answer.clone());
             state.metadata["last_reflection"] = serde_json::Value::String(answer.clone());
             state.metadata["key_findings"] = serde_json::json!([]);
@@ -400,6 +628,7 @@ impl AgentLoop {
                 step_index: step.index,
                 success: true,
                 summary: "Direct response delivered".into(),
+                description: Some(step.description.clone()),
             });
             self.event_bus.publish(AgentEvent::GoalComplete { agent_id: state.id.clone(), summary: answer });
             self.event_bus.close(&state.id);
@@ -512,22 +741,24 @@ impl AgentLoop {
             if let Some(ref ct) = self.services.citations {
                 for tool_name in &result.tools_called {
                     let confidence = if result.success { 1.0_f64 } else { 0.5_f64 };
-                    let _ = ct.record(
-                        &state.id,
-                        &state.tenant_id,
-                        step.index,
-                        &eval.summary,
-                        "tool_output",
-                        tool_name,
-                        &crate::util::truncate(&result.output, 200),
-                        confidence,
-                    ).await;
+                    let _ = ct
+                        .record(
+                            &state.id,
+                            &state.tenant_id,
+                            step.index,
+                            &eval.summary,
+                            "tool_output",
+                            tool_name,
+                            &crate::util::truncate(&result.output, 200),
+                            confidence,
+                        )
+                        .await;
                     // Emit SSE so the frontend can render citations live
                     self.event_bus.publish(AgentEvent::CitationRecorded {
-                        agent_id:    state.id.clone(),
-                        step_index:  step.index,
-                        claim:       crate::util::truncate(&eval.summary, 120).to_string(),
-                        source_ref:  tool_name.clone(),
+                        agent_id: state.id.clone(),
+                        step_index: step.index,
+                        claim: crate::util::truncate(&eval.summary, 120).to_string(),
+                        source_ref: tool_name.clone(),
                         source_type: "tool_output".into(),
                         confidence,
                     });
@@ -561,27 +792,24 @@ impl AgentLoop {
                                     "SLA breach — escalating to human review"
                                 );
                                 self.event_bus.publish(AgentEvent::SlaCheck {
-                                    agent_id:    state.id.clone(),
+                                    agent_id: state.id.clone(),
                                     pct_elapsed,
-                                    message:     reason.clone(),
-                                    action:      Some("escalate".into()),
-                                    deadline:    Some(deadline_str.clone()),
+                                    message: reason.clone(),
+                                    action: Some("escalate".into()),
+                                    deadline: Some(deadline_str.clone()),
                                 });
                                 if let Some(ref rq) = self.services.reviews {
-                                    match rq.submit(
-                                        &state.tenant_id,
-                                        &state.id,
-                                        step.index,
-                                        reason,
-                                        "sla_escalation",
-                                    ).await {
+                                    match rq
+                                        .submit(&state.tenant_id, &state.id, step.index, reason, "sla_escalation")
+                                        .await
+                                    {
                                         Ok(review_id) => {
                                             self.event_bus.publish(AgentEvent::ReviewRequired {
-                                                agent_id:  state.id.clone(),
+                                                agent_id: state.id.clone(),
                                                 review_id,
-                                                summary:   reason.clone(),
-                                                reason:    "SLA breach escalation".into(),
-                                                rule_id:   Some("sla_escalation".into()),
+                                                summary: reason.clone(),
+                                                reason: "SLA breach escalation".into(),
+                                                rule_id: Some("sla_escalation".into()),
                                             });
                                         }
                                         Err(e) => {
@@ -593,11 +821,11 @@ impl AgentLoop {
                             EscalationAction::Notify { message } => {
                                 tracing::warn!(agent_id = %state.id, message = %message, "SLA notification");
                                 self.event_bus.publish(AgentEvent::SlaCheck {
-                                    agent_id:    state.id.clone(),
+                                    agent_id: state.id.clone(),
                                     pct_elapsed,
-                                    message:     message.clone(),
-                                    action:      Some("notify".into()),
-                                    deadline:    Some(deadline_str.clone()),
+                                    message: message.clone(),
+                                    action: Some("notify".into()),
+                                    deadline: Some(deadline_str.clone()),
                                 });
                             }
                             _ => {}
@@ -620,6 +848,7 @@ impl AgentLoop {
                     step_index: step.index,
                     success: true,
                     summary: eval.summary,
+                    description: Some(step.description.clone()),
                 });
                 Ok(StepOutcome::Continue { delay_secs: 0 })
             }
@@ -629,10 +858,7 @@ impl AgentLoop {
                 }
                 let summary = completion_summary(state);
                 state.mark_completed();
-                self.event_bus.publish(AgentEvent::GoalComplete {
-                    agent_id: state.id.clone(),
-                    summary,
-                });
+                self.event_bus.publish(AgentEvent::GoalComplete { agent_id: state.id.clone(), summary });
                 self.event_bus.close(&state.id);
                 Ok(StepOutcome::Complete)
             }
@@ -646,13 +872,22 @@ impl AgentLoop {
                 state.mark_waiting(next_run_after(delay));
 
                 // Store last failure details so the executor can include them on retry
-                state.metadata["last_step_error"] = serde_json::Value::String(eval.summary.clone());
+                let last_error = result
+                    .tool_results
+                    .iter()
+                    .filter(|tool_result| !tool_result.success)
+                    .filter_map(|tool_result| tool_result.error.clone())
+                    .collect::<Vec<_>>()
+                    .join(" | ");
+                state.metadata["last_step_error"] =
+                    serde_json::Value::String(if last_error.is_empty() { eval.summary.clone() } else { last_error });
 
                 self.event_bus.publish(AgentEvent::StepRetrying {
                     agent_id: state.id.clone(),
                     step_index: step.index,
                     delay_secs: delay,
                     reason: eval.summary.clone(),
+                    retry_count: new_retry,
                 });
                 tracing::warn!(
                     agent_id = %state.id,
@@ -681,10 +916,26 @@ impl AgentLoop {
         self.event_bus.publish(AgentEvent::PreflightStarted { agent_id: state.id.clone() });
 
         let tool_names: Vec<&str> = self.tools.list();
-        match self.preflight.check(state, &tool_names).await? {
+        let preflight_result = match self.preflight.check(state, &tool_names).await {
+            Ok(result) => result,
+            Err(error) if is_missing_provider_credentials_error(&error) => {
+                return self.prompt_for_provider_credentials(state);
+            }
+            Err(error) => return Err(error),
+        };
+
+        match preflight_result {
             PreflightResult::Feasible => {
                 self.event_bus.publish(AgentEvent::PreflightPassed { agent_id: state.id.clone() });
-                match self.clarifier.check(state).await? {
+                let clarification = match self.clarifier.check(state).await {
+                    Ok(result) => result,
+                    Err(error) if is_missing_provider_credentials_error(&error) => {
+                        return self.prompt_for_provider_credentials(state);
+                    }
+                    Err(error) => return Err(error),
+                };
+
+                match clarification {
                     ClarificationResult::Clear => {
                         state.mark_waiting(next_run_after(0));
                         Ok(StepOutcome::Continue { delay_secs: 0 })
@@ -714,6 +965,17 @@ impl AgentLoop {
         }
     }
 
+    fn prompt_for_provider_credentials(&self, state: &mut AgentState) -> Result<StepOutcome> {
+        let questions = provider_credentials_questions();
+        state.metadata["clarification_questions"] = serde_json::to_value(&questions)?;
+        state.mark_clarifying();
+        self.event_bus.publish(AgentEvent::ClarificationNeeded {
+            agent_id: state.id.clone(),
+            questions: questions.clone(),
+        });
+        Ok(StepOutcome::NeedsClarification { questions })
+    }
+
     fn inject_delegation_ctx(
         &self,
         step: &crate::agent::planner::PlannedStep,
@@ -722,14 +984,18 @@ impl AgentLoop {
         // Tools that need tenant_id / agent_id injected automatically
         let needs_ctx = matches!(
             step.tool.as_deref(),
-            Some("delegate") | Some("vector_store") | Some("vector_search") | Some("vector_delete")
-            | Some("mcp_session") | Some("search_mcp_registry")
+            Some("delegate")
+                | Some("vector_store")
+                | Some("vector_search")
+                | Some("vector_delete")
+                | Some("mcp_session")
+                | Some("search_mcp_registry")
         );
         if needs_ctx {
             let mut s = step.clone();
             let mut args = step.tool_args.clone().unwrap_or_default();
             args["tenant_id"] = serde_json::json!(state.tenant_id);
-            args["agent_id"]  = serde_json::json!(state.id);
+            args["agent_id"] = serde_json::json!(state.id);
             if step.tool.as_deref() == Some("delegate") {
                 args["parent_agent_id"] = serde_json::json!(state.id);
             }
@@ -737,6 +1003,87 @@ impl AgentLoop {
             s
         } else {
             step.clone()
+        }
+    }
+
+    fn evaluate_step_condition(
+        &self,
+        state: &AgentState,
+        step: &crate::agent::planner::PlannedStep,
+    ) -> Result<Option<String>> {
+        let Some(condition) = step.condition.as_ref() else {
+            return Ok(None);
+        };
+
+        let resolved =
+            crate::agent::executor::resolve_reference_from_state(&condition.reference, state).map_err(anyhow::Error::msg);
+        let operator = condition.operator.as_str();
+
+        let should_run = match operator {
+            "exists" => resolved.is_ok(),
+            "not_exists" => resolved.is_err(),
+            "truthy" => resolved.map(|value| condition_truthy(&value)).unwrap_or(false),
+            "falsy" => resolved.map(|value| !condition_truthy(&value)).unwrap_or(true),
+            "nonempty" => resolved.map(|value| condition_truthy(&value)).unwrap_or(false),
+            "empty" => resolved.map(|value| !condition_truthy(&value)).unwrap_or(true),
+            "equals" => {
+                let actual = resolved?;
+                let expected = condition
+                    .value
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("condition.operator 'equals' requires condition.value"))?;
+                actual == *expected
+            }
+            "not_equals" => {
+                let actual = resolved?;
+                let expected = condition
+                    .value
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("condition.operator 'not_equals' requires condition.value"))?;
+                actual != *expected
+            }
+            "contains" => {
+                let actual = resolved?;
+                let expected = condition
+                    .value
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("condition.operator 'contains' requires condition.value"))?;
+                condition_contains(&actual, expected)
+            }
+            "gt" => {
+                let actual = resolved?;
+                let expected =
+                    condition.value.as_ref().ok_or_else(|| anyhow::anyhow!("condition.operator 'gt' requires condition.value"))?;
+                condition_compare_numbers(&actual, expected, |left, right| left > right)?
+            }
+            "gte" => {
+                let actual = resolved?;
+                let expected =
+                    condition.value.as_ref().ok_or_else(|| anyhow::anyhow!("condition.operator 'gte' requires condition.value"))?;
+                condition_compare_numbers(&actual, expected, |left, right| left >= right)?
+            }
+            "lt" => {
+                let actual = resolved?;
+                let expected =
+                    condition.value.as_ref().ok_or_else(|| anyhow::anyhow!("condition.operator 'lt' requires condition.value"))?;
+                condition_compare_numbers(&actual, expected, |left, right| left < right)?
+            }
+            "lte" => {
+                let actual = resolved?;
+                let expected =
+                    condition.value.as_ref().ok_or_else(|| anyhow::anyhow!("condition.operator 'lte' requires condition.value"))?;
+                condition_compare_numbers(&actual, expected, |left, right| left <= right)?
+            }
+            other => return Err(anyhow::anyhow!("unsupported step condition operator '{other}'")),
+        };
+
+        if should_run {
+            Ok(None)
+        } else {
+            Ok(Some(format!(
+                "Skipped step {} because condition {} {} was not satisfied.",
+                step.index, condition.reference, condition.operator
+            )))
         }
     }
 }
@@ -795,6 +1142,7 @@ mod tests {
                 tool: Some("file_read".into()),
                 tool_args: Some(serde_json::json!({"path": ".github/workflows/ci.yml"})),
                 success_criteria: "workflow reviewed".into(),
+                condition: None,
             }],
             rationale: "inspect before changing".into(),
         }
@@ -899,7 +1247,9 @@ mod tests {
         let debug_str = format!("{:?}", outcome);
         assert!(debug_str.contains("5"), "Debug should contain the delay value");
 
-        let outcome = StepOutcome::NeedsClarification { questions: vec!["What scope?".to_string()] };
+        let outcome = StepOutcome::NeedsClarification {
+            questions: vec![crate::agent::clarifier::ClarificationQuestion::new("What scope?")],
+        };
         let debug_str = format!("{:?}", outcome);
         assert!(debug_str.contains("What scope?"), "Debug should contain the question");
 
@@ -941,7 +1291,9 @@ mod tests {
             Arc::new(MockReflector::new()),
             Arc::new(MockPreflight::from_responses(vec![PreflightResult::Feasible])),
             Arc::new(MockClarifier::from_check_responses(vec![ClarificationResult::NeedsInput {
-                questions: vec!["Which repository should be fixed?".into()],
+                questions: vec![crate::agent::clarifier::ClarificationQuestion::new(
+                    "Which repository should be fixed?"
+                )],
             }])),
         );
         let mut state = make_state();
@@ -955,13 +1307,18 @@ mod tests {
 
         match outcome {
             StepOutcome::NeedsClarification { questions } => {
-                assert_eq!(questions, vec!["Which repository should be fixed?".to_string()])
+                assert_eq!(
+                    questions,
+                    vec![crate::agent::clarifier::ClarificationQuestion::new(
+                        "Which repository should be fixed?"
+                    )]
+                )
             }
             other => panic!("expected clarification outcome, got {other:?}"),
         }
         assert_eq!(state.status, AgentStatus::Clarifying);
         assert_eq!(
-            state.metadata["clarification_questions"][0],
+            state.metadata["clarification_questions"][0]["prompt"],
             serde_json::json!("Which repository should be fixed?")
         );
     }
@@ -1059,6 +1416,7 @@ mod tests {
             tool: Some("delegate".into()),
             tool_args: Some(serde_json::json!({"goal": "check logs"})),
             success_criteria: "child created".into(),
+            condition: None,
         };
 
         let injected = loop_runtime.inject_delegation_ctx(&step, &state);
@@ -1148,7 +1506,9 @@ mod tests {
             loop_runtime.run_step(&mut state, &mut plan, &mut history).await.expect("clarifying state should succeed");
 
         match outcome {
-            StepOutcome::NeedsClarification { questions } => assert_eq!(questions, vec!["Which repo?".to_string()]),
+            StepOutcome::NeedsClarification { questions } => {
+                assert_eq!(questions, vec![crate::agent::clarifier::ClarificationQuestion::new("Which repo?")])
+            }
             other => panic!("expected clarification outcome, got {other:?}"),
         }
         assert_eq!(state.status, AgentStatus::Clarifying);

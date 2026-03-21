@@ -15,10 +15,10 @@ mod tests {
         compliance::{CitationTracker, EvidencePackager, PiiRedactor, ReviewQueue, SlaTracker},
         policy::PolicyEngine,
         segments::{
-            compliance_ops, customer_support, data_analytics, engineering,
-            finance_accounting, hr_people_ops, it_ops_itsm, legal_contract,
-            marketing_growth, research_intelligence, sales_revops,
+            compliance_ops, customer_support, data_analytics, engineering, finance_accounting, hr_people_ops,
+            it_ops_itsm, legal_contract, marketing_growth,
             registry::{SegmentPlugin, SegmentRegistry, SharedDeps},
+            research_intelligence, sales_revops,
         },
     };
 
@@ -26,13 +26,12 @@ mod tests {
 
     fn fake_deps() -> SharedDeps {
         use sqlx::postgres::PgPoolOptions;
-        let pool = PgPoolOptions::new()
-            .connect_lazy("postgres://narayan:narayan@localhost/narayan")
-            .expect("lazy pool");
+        let pool =
+            PgPoolOptions::new().connect_lazy("postgres://narayan:narayan@localhost/narayan").expect("lazy pool");
         SharedDeps {
-            policy_engine:     Arc::new(PolicyEngine::new()),
-            citation_tracker:  Arc::new(CitationTracker::new(pool.clone())),
-            review_queue:      Arc::new(ReviewQueue::new(pool.clone())),
+            policy_engine: Arc::new(PolicyEngine::new()),
+            citation_tracker: Arc::new(CitationTracker::new(pool.clone())),
+            review_queue: Arc::new(ReviewQueue::new(pool.clone())),
             evidence_packager: Arc::new(EvidencePackager::new(
                 Arc::new(CitationTracker::new(pool.clone())),
                 Arc::new(crate::audit::AuditLog::new(pool)),
@@ -94,17 +93,22 @@ mod tests {
                 assert!(
                     sla.first_response_mins < sla.resolution_mins,
                     "plugin '{}' SLA '{}': first_response ({}) must be < resolution ({})",
-                    plugin.id, sla.name, sla.first_response_mins, sla.resolution_mins
+                    plugin.id,
+                    sla.name,
+                    sla.first_response_mins,
+                    sla.resolution_mins
                 );
                 assert!(
                     sla.first_response_mins > 0,
                     "plugin '{}' SLA '{}': first_response must be > 0",
-                    plugin.id, sla.name
+                    plugin.id,
+                    sla.name
                 );
                 assert!(
                     !sla.escalation_rules.is_empty(),
                     "plugin '{}' SLA '{}': must have at least one escalation rule",
-                    plugin.id, sla.name
+                    plugin.id,
+                    sla.name
                 );
             }
         }
@@ -119,7 +123,9 @@ mod tests {
                     assert!(
                         rule.trigger_pct > 0.0 && rule.trigger_pct <= 100.0,
                         "plugin '{}' SLA '{}': trigger_pct {} is not in (0, 100]",
-                        plugin.id, sla.name, rule.trigger_pct
+                        plugin.id,
+                        sla.name,
+                        rule.trigger_pct
                     );
                 }
             }
@@ -148,59 +154,52 @@ mod tests {
         let deps = fake_deps();
         for plugin in all_plugins(&deps) {
             for rule in &plugin.policy_rules.rules {
-                assert!(
-                    !rule.id.is_empty(),
-                    "plugin '{}': policy rule has empty id",
-                    plugin.id
-                );
-                assert!(
-                    !rule.name.is_empty(),
-                    "plugin '{}': rule '{}' has empty name",
-                    plugin.id, rule.id
-                );
+                assert!(!rule.id.is_empty(), "plugin '{}': policy rule has empty id", plugin.id);
+                assert!(!rule.name.is_empty(), "plugin '{}': rule '{}' has empty name", plugin.id, rule.id);
             }
         }
     }
 
     #[tokio::test]
     async fn test_compliance_segment_requires_review_for_all_outputs() {
-        let deps    = fake_deps();
-        let plugin  = compliance_ops::plugin(&deps, "t1");
-        let has_universal_review = plugin.policy_rules.rules.iter().any(|r| {
-            matches!(&r.action, crate::policy::rules::PolicyAction::RequireApproval { .. })
-        });
+        let deps = fake_deps();
+        let plugin = compliance_ops::plugin(&deps, "t1");
+        let has_universal_review = plugin
+            .policy_rules
+            .rules
+            .iter()
+            .any(|r| matches!(&r.action, crate::policy::rules::PolicyAction::RequireApproval { .. }));
         assert!(has_universal_review, "compliance segment must require approval on outputs");
     }
 
     #[tokio::test]
     async fn test_legal_segment_blocks_signing() {
-        let deps   = fake_deps();
+        let deps = fake_deps();
         let plugin = legal_contract::plugin(&deps, "t1");
-        let blocks_signing = plugin.policy_rules.rules.iter().any(|r| {
-            matches!(&r.action, crate::policy::rules::PolicyAction::Block { .. })
-                && r.id.contains("signing")
-        });
+        let blocks_signing =
+            plugin.policy_rules.rules.iter().any(|r| {
+                matches!(&r.action, crate::policy::rules::PolicyAction::Block { .. }) && r.id.contains("signing")
+            });
         assert!(blocks_signing, "legal segment must block agent contract signing");
     }
 
     #[tokio::test]
     async fn test_finance_segment_blocks_truncate() {
-        let deps   = fake_deps();
+        let deps = fake_deps();
         let plugin = finance_accounting::plugin(&deps, "t1");
-        let blocks_truncate = plugin.policy_rules.rules.iter().any(|r| {
-            matches!(&r.action, crate::policy::rules::PolicyAction::Block { .. })
-                && r.id.contains("delete")
-        });
+        let blocks_truncate =
+            plugin.policy_rules.rules.iter().any(|r| {
+                matches!(&r.action, crate::policy::rules::PolicyAction::Block { .. }) && r.id.contains("delete")
+            });
         assert!(blocks_truncate, "finance segment must block destructive SQL");
     }
 
     #[tokio::test]
     async fn test_hr_segment_requires_review_for_hiring_actions() {
-        let deps   = fake_deps();
+        let deps = fake_deps();
         let plugin = hr_people_ops::plugin(&deps, "t1");
         let has_hire_review = plugin.policy_rules.rules.iter().any(|r| {
-            matches!(&r.action, crate::policy::rules::PolicyAction::RequireApproval { .. })
-                && r.id.contains("hiring")
+            matches!(&r.action, crate::policy::rules::PolicyAction::RequireApproval { .. }) && r.id.contains("hiring")
         });
         assert!(has_hire_review, "HR segment must require approval for hiring actions");
     }
@@ -211,11 +210,7 @@ mod tests {
     async fn test_policy_engine_active_in_all_segments() {
         let deps = fake_deps();
         for plugin in all_plugins(&deps) {
-            assert!(
-                plugin.services.policy.is_some(),
-                "segment '{}': policy must always be active",
-                plugin.id
-            );
+            assert!(plugin.services.policy.is_some(), "segment '{}': policy must always be active", plugin.id);
         }
     }
 
@@ -223,17 +218,17 @@ mod tests {
     async fn test_pii_redactor_active_in_customer_facing_segments() {
         let deps = fake_deps();
         let must_have_pii = [
-            "customer_support", "compliance_ops", "sales_revops",
-            "finance_accounting", "hr_people_ops", "legal_contract",
+            "customer_support",
+            "compliance_ops",
+            "sales_revops",
+            "finance_accounting",
+            "hr_people_ops",
+            "legal_contract",
             "marketing_growth",
         ];
         for plugin in all_plugins(&deps) {
             if must_have_pii.contains(&plugin.id) {
-                assert!(
-                    plugin.services.pii.is_some(),
-                    "segment '{}' must have PII redaction active",
-                    plugin.id
-                );
+                assert!(plugin.services.pii.is_some(), "segment '{}' must have PII redaction active", plugin.id);
             }
         }
     }
@@ -241,9 +236,7 @@ mod tests {
     #[tokio::test]
     async fn test_evidence_packager_active_in_audit_grade_segments() {
         let deps = fake_deps();
-        let must_have_evidence = [
-            "compliance_ops", "finance_accounting", "legal_contract", "it_ops_itsm",
-        ];
+        let must_have_evidence = ["compliance_ops", "finance_accounting", "legal_contract", "it_ops_itsm"];
         for plugin in all_plugins(&deps) {
             if must_have_evidence.contains(&plugin.id) {
                 assert!(
@@ -257,7 +250,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_engineering_segment_does_not_activate_evidence_packager() {
-        let deps   = fake_deps();
+        let deps = fake_deps();
         let plugin = engineering::plugin(&deps, "t1");
         assert!(
             plugin.services.evidence.is_none(),
@@ -269,11 +262,7 @@ mod tests {
     async fn test_review_queue_active_in_all_segments() {
         let deps = fake_deps();
         for plugin in all_plugins(&deps) {
-            assert!(
-                plugin.services.reviews.is_some(),
-                "segment '{}': review queue must always be active",
-                plugin.id
-            );
+            assert!(plugin.services.reviews.is_some(), "segment '{}': review queue must always be active", plugin.id);
         }
     }
 
@@ -303,11 +292,11 @@ mod tests {
         // engineering → github, customer_support → zendesk,
         // sales_revops → salesforce, it_ops_itsm → servicenow + pagerduty
         let connectors = registry.connector_registry.list();
-        assert!(connectors.contains(&"github"),      "github connector must be registered");
-        assert!(connectors.contains(&"zendesk"),     "zendesk connector must be registered");
-        assert!(connectors.contains(&"salesforce"),  "salesforce connector must be registered");
-        assert!(connectors.contains(&"servicenow"),  "servicenow connector must be registered");
-        assert!(connectors.contains(&"pagerduty"),   "pagerduty connector must be registered");
+        assert!(connectors.contains(&"github"), "github connector must be registered");
+        assert!(connectors.contains(&"zendesk"), "zendesk connector must be registered");
+        assert!(connectors.contains(&"salesforce"), "salesforce connector must be registered");
+        assert!(connectors.contains(&"servicenow"), "servicenow connector must be registered");
+        assert!(connectors.contains(&"pagerduty"), "pagerduty connector must be registered");
     }
 
     #[tokio::test]
@@ -334,10 +323,7 @@ mod tests {
             .add(marketing_growth::plugin(&deps, "t1"))
             .build();
 
-        assert!(
-            registry.sla_tracker.is_none(),
-            "registry with no SLA-bearing segments must not build an SlaTracker"
-        );
+        assert!(registry.sla_tracker.is_none(), "registry with no SLA-bearing segments must not build an SlaTracker");
     }
 
     #[tokio::test]
@@ -364,21 +350,21 @@ mod tests {
         let svc = registry.agent_services();
         // Union: evidence is on because compliance_ops has it, even though engineering doesn't
         assert!(svc.evidence.is_some(), "union of services must include evidence from compliance_ops");
-        assert!(svc.policy.is_some(),   "policy must be on (both segments activate it)");
+        assert!(svc.policy.is_some(), "policy must be on (both segments activate it)");
     }
 
     // ── Connector inbound goal generation ────────────────────────────────
 
     #[tokio::test]
     async fn test_github_pr_opened_generates_goal() {
-        use crate::connectors::{ConnectorConfig, ConnectorEvent, framework::Connector};
         use crate::connectors::github::GitHubConnector;
+        use crate::connectors::{framework::Connector, ConnectorConfig, ConnectorEvent};
 
-        let conn  = GitHubConnector::new();
+        let conn = GitHubConnector::new();
         let event = ConnectorEvent {
             connector_type: "github".into(),
-            event_type:     "pull_request".into(),
-            payload:        serde_json::json!({
+            event_type: "pull_request".into(),
+            payload: serde_json::json!({
                 "action": "opened",
                 "pull_request": {
                     "title": "Add login flow",
@@ -386,15 +372,16 @@ mod tests {
                     "body": "Implements JWT login",
                 }
             }),
-            tenant_id:   "t1".into(),
+            tenant_id: "t1".into(),
             external_id: Some("42".into()),
         };
         let config = ConnectorConfig {
-            id: "c1".into(), tenant_id: "t1".into(),
+            id: "c1".into(),
+            tenant_id: "t1".into(),
             connector_type: "github".into(),
             credentials: serde_json::json!({}),
-            settings:    serde_json::json!({}),
-            enabled:     true,
+            settings: serde_json::json!({}),
+            enabled: true,
         };
 
         let goal = conn.handle_inbound(&event, &config).await.unwrap();
@@ -406,155 +393,160 @@ mod tests {
 
     #[tokio::test]
     async fn test_zendesk_ticket_created_generates_goal() {
-        use crate::connectors::{ConnectorConfig, ConnectorEvent, framework::Connector};
         use crate::connectors::zendesk::ZendeskConnector;
+        use crate::connectors::{framework::Connector, ConnectorConfig, ConnectorEvent};
 
-        let conn  = ZendeskConnector::new();
+        let conn = ZendeskConnector::new();
         let event = ConnectorEvent {
             connector_type: "zendesk".into(),
-            event_type:     "ticket_created".into(),
-            payload:        serde_json::json!({
+            event_type: "ticket_created".into(),
+            payload: serde_json::json!({
                 "id": "12345",
                 "subject": "Login page is broken",
                 "description": "Users cannot log in since yesterday",
                 "priority": "urgent",
             }),
-            tenant_id:   "t1".into(),
+            tenant_id: "t1".into(),
             external_id: Some("12345".into()),
         };
         let config = ConnectorConfig {
-            id: "c1".into(), tenant_id: "t1".into(),
+            id: "c1".into(),
+            tenant_id: "t1".into(),
             connector_type: "zendesk".into(),
             credentials: serde_json::json!({}),
-            settings:    serde_json::json!({}),
-            enabled:     true,
+            settings: serde_json::json!({}),
+            enabled: true,
         };
 
         let goal = conn.handle_inbound(&event, &config).await.unwrap();
         assert!(goal.is_some());
         let g = goal.unwrap();
-        assert!(g.contains("12345"),        "goal must reference ticket id");
-        assert!(g.contains("urgent"),       "goal must include priority");
-        assert!(g.contains("Login page"),   "goal must include subject");
+        assert!(g.contains("12345"), "goal must reference ticket id");
+        assert!(g.contains("urgent"), "goal must include priority");
+        assert!(g.contains("Login page"), "goal must include subject");
     }
 
     #[tokio::test]
     async fn test_pagerduty_incident_triggered_generates_goal() {
-        use crate::connectors::{ConnectorConfig, ConnectorEvent, framework::Connector};
         use crate::connectors::pagerduty::PagerDutyConnector;
+        use crate::connectors::{framework::Connector, ConnectorConfig, ConnectorEvent};
 
-        let conn  = PagerDutyConnector::new();
+        let conn = PagerDutyConnector::new();
         let event = ConnectorEvent {
             connector_type: "pagerduty".into(),
-            event_type:     "incident.triggered".into(),
-            payload:        serde_json::json!({
+            event_type: "incident.triggered".into(),
+            payload: serde_json::json!({
                 "id": "P123",
                 "title": "Database CPU at 100%",
                 "urgency": "high",
                 "service": { "summary": "production-db" },
             }),
-            tenant_id:   "t1".into(),
+            tenant_id: "t1".into(),
             external_id: Some("P123".into()),
         };
         let config = ConnectorConfig {
-            id: "c1".into(), tenant_id: "t1".into(),
+            id: "c1".into(),
+            tenant_id: "t1".into(),
             connector_type: "pagerduty".into(),
             credentials: serde_json::json!({}),
-            settings:    serde_json::json!({}),
-            enabled:     true,
+            settings: serde_json::json!({}),
+            enabled: true,
         };
 
         let goal = conn.handle_inbound(&event, &config).await.unwrap();
         assert!(goal.is_some());
         let g = goal.unwrap();
-        assert!(g.contains("P123"),              "goal must reference incident id");
-        assert!(g.contains("production-db"),     "goal must reference service");
-        assert!(g.contains("Database CPU"),      "goal must include incident title");
+        assert!(g.contains("P123"), "goal must reference incident id");
+        assert!(g.contains("production-db"), "goal must reference service");
+        assert!(g.contains("Database CPU"), "goal must include incident title");
     }
 
     #[tokio::test]
     async fn test_docusign_envelope_completed_generates_obligation_goal() {
-        use crate::connectors::{ConnectorConfig, ConnectorEvent, framework::Connector};
         use crate::connectors::docusign::DocuSignConnector;
+        use crate::connectors::{framework::Connector, ConnectorConfig, ConnectorEvent};
 
-        let conn  = DocuSignConnector::new();
+        let conn = DocuSignConnector::new();
         let event = ConnectorEvent {
             connector_type: "docusign".into(),
-            event_type:     "envelope_completed".into(),
-            payload:        serde_json::json!({
+            event_type: "envelope_completed".into(),
+            payload: serde_json::json!({
                 "envelopeId": "ENV-001",
                 "emailSubject": "Master Services Agreement - Acme Corp",
             }),
-            tenant_id:   "t1".into(),
+            tenant_id: "t1".into(),
             external_id: Some("ENV-001".into()),
         };
         let config = ConnectorConfig {
-            id: "c1".into(), tenant_id: "t1".into(),
+            id: "c1".into(),
+            tenant_id: "t1".into(),
             connector_type: "docusign".into(),
             credentials: serde_json::json!({}),
-            settings:    serde_json::json!({}),
-            enabled:     true,
+            settings: serde_json::json!({}),
+            enabled: true,
         };
 
         let goal = conn.handle_inbound(&event, &config).await.unwrap();
         assert!(goal.is_some());
         let g = goal.unwrap();
-        assert!(g.contains("ENV-001"),           "goal must reference envelope id");
-        assert!(g.contains("obligations"),       "completed envelope must trigger obligation extraction");
+        assert!(g.contains("ENV-001"), "goal must reference envelope id");
+        assert!(g.contains("obligations"), "completed envelope must trigger obligation extraction");
     }
 
     #[tokio::test]
     async fn test_dbt_cloud_job_errored_generates_triage_goal() {
-        use crate::connectors::{ConnectorConfig, ConnectorEvent, framework::Connector};
         use crate::connectors::dbt_cloud::DbtCloudConnector;
+        use crate::connectors::{framework::Connector, ConnectorConfig, ConnectorEvent};
 
-        let conn  = DbtCloudConnector::new();
+        let conn = DbtCloudConnector::new();
         let event = ConnectorEvent {
             connector_type: "dbt_cloud".into(),
-            event_type:     "job.run.errored".into(),
-            payload:        serde_json::json!({
+            event_type: "job.run.errored".into(),
+            payload: serde_json::json!({
                 "job_name": "daily_refresh",
                 "run_id":   "9001",
                 "status_message": "Database error: relation does not exist",
             }),
-            tenant_id:   "t1".into(),
+            tenant_id: "t1".into(),
             external_id: Some("9001".into()),
         };
         let config = ConnectorConfig {
-            id: "c1".into(), tenant_id: "t1".into(),
+            id: "c1".into(),
+            tenant_id: "t1".into(),
             connector_type: "dbt_cloud".into(),
             credentials: serde_json::json!({}),
-            settings:    serde_json::json!({}),
-            enabled:     true,
+            settings: serde_json::json!({}),
+            enabled: true,
         };
 
         let goal = conn.handle_inbound(&event, &config).await.unwrap();
         assert!(goal.is_some());
         let g = goal.unwrap();
         assert!(g.contains("daily_refresh"), "goal must reference job name");
-        assert!(g.contains("9001"),          "goal must reference run id");
+        assert!(g.contains("9001"), "goal must reference run id");
         assert!(g.contains("triage") || g.contains("findings"), "goal must be a triage task");
     }
 
     #[tokio::test]
     async fn test_unknown_event_type_returns_none() {
-        use crate::connectors::{ConnectorConfig, ConnectorEvent, framework::Connector};
         use crate::connectors::github::GitHubConnector;
+        use crate::connectors::{framework::Connector, ConnectorConfig, ConnectorEvent};
 
-        let conn  = GitHubConnector::new();
+        let conn = GitHubConnector::new();
         let event = ConnectorEvent {
             connector_type: "github".into(),
-            event_type:     "repository.renamed".into(),
-            payload:        serde_json::json!({}),
-            tenant_id:      "t1".into(),
-            external_id:    None,
+            event_type: "repository.renamed".into(),
+            payload: serde_json::json!({}),
+            tenant_id: "t1".into(),
+            external_id: None,
         };
         let config = ConnectorConfig {
-            id: "c1".into(), tenant_id: "t1".into(),
+            id: "c1".into(),
+            tenant_id: "t1".into(),
             connector_type: "github".into(),
             credentials: serde_json::json!({}),
-            settings:    serde_json::json!({}),
-            enabled:     true,
+            settings: serde_json::json!({}),
+            enabled: true,
         };
         let goal = conn.handle_inbound(&event, &config).await.unwrap();
         assert!(goal.is_none(), "unrecognised event types must return None (no goal created)");

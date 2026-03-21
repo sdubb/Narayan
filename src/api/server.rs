@@ -60,6 +60,8 @@ pub fn build_router(
         // Metrics & costs
         .route("/metrics", get(get_metrics))
         .route("/costs", get(get_costs))
+        // Provider catalog
+        .route("/providers", get(list_providers))
         // Credentials & routing
         .route("/credentials", put(set_credential))
         .route("/credentials", get(list_credentials))
@@ -73,6 +75,13 @@ pub fn build_router(
         .route("/agents", get(list_agents))
         .route("/agents/:id", get(get_agent))
         .route("/agents/:id/logs", get(get_agent_logs))
+        .route("/agents/:id/workspace/files", get(list_workspace_files))
+        .route("/agents/:id/workspace/tree", get(list_workspace_files))
+        .route("/agents/:id/workspace/files/*path", get(read_workspace_file))
+        .route("/agents/:id/children", get(list_agent_children))
+        .route("/agents/:id/plan/approve", post(approve_plan))
+        .route("/agents/:id/plan/reject", post(reject_plan))
+        .route("/agents/:id/plan/edit", post(edit_plan))
         .route("/agents/:id/pause", post(pause_agent))
         .route("/agents/:id/resume", post(resume_agent))
         .route("/agents/:id/clarify", post(submit_clarification))
@@ -116,10 +125,13 @@ pub fn build_router(
         .route("/billing/invoices", get(billing_routes::list_invoices))
         .route("/billing/credits", get(billing_routes::get_credits))
         .route("/billing/credits/purchase", post(billing_routes::purchase_credits))
-        .route_layer(middleware::from_fn_with_state(auth_state, auth_middleware));
+        .route_layer(middleware::from_fn_with_state(auth_state.clone(), auth_middleware));
 
     // SSE stream — auth extracted inside handler
-    let stream_routes = Router::new().route("/agents/:id/stream", get(agent_stream)).with_state(stream_state);
+    let stream_routes = Router::new()
+        .route("/agents/:id/stream", get(agent_stream))
+        .route_layer(middleware::from_fn_with_state(auth_state.clone(), auth_middleware))
+        .with_state(stream_state);
 
     // Admin routes — separate token
     let admin_state = AdminState { store: store.clone(), tenant_store, cost_tracker, audit_log, metrics };

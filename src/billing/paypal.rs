@@ -23,17 +23,17 @@ use tokio::sync::RwLock;
 use crate::billing::{BillingEvent, BillingPlan, BillingProvider, CheckoutSession, ProviderSubscription};
 
 const SANDBOX_BASE: &str = "https://api-m.sandbox.paypal.com";
-const LIVE_BASE:    &str = "https://api-m.paypal.com";
+const LIVE_BASE: &str = "https://api-m.paypal.com";
 
 pub struct PayPalProvider {
-    client_id:     String,
+    client_id: String,
     client_secret: String,
-    webhook_id:    String,
-    base_url:      &'static str,
-    plan_id_go:    Option<String>,
-    plan_id_pro:   Option<String>,
-    http:          Client,
-    token_cache:   RwLock<Option<(String, u64)>>,
+    webhook_id: String,
+    base_url: &'static str,
+    plan_id_go: Option<String>,
+    plan_id_pro: Option<String>,
+    http: Client,
+    token_cache: RwLock<Option<(String, u64)>>,
 }
 
 impl PayPalProvider {
@@ -42,9 +42,9 @@ impl PayPalProvider {
             client_id,
             client_secret,
             webhook_id,
-            base_url:     if sandbox { SANDBOX_BASE } else { LIVE_BASE },
-            plan_id_go:   std::env::var("PAYPAL_PLAN_ID_GO").ok(),
-            plan_id_pro:  std::env::var("PAYPAL_PLAN_ID_PRO").ok(),
+            base_url: if sandbox { SANDBOX_BASE } else { LIVE_BASE },
+            plan_id_go: std::env::var("PAYPAL_PLAN_ID_GO").ok(),
+            plan_id_pro: std::env::var("PAYPAL_PLAN_ID_PRO").ok(),
             http: Client::builder().timeout(std::time::Duration::from_secs(30)).build().expect("reqwest"),
             token_cache: RwLock::new(None),
         }
@@ -64,16 +64,23 @@ impl PayPalProvider {
             let cache = self.token_cache.read().await;
             if let Some((token, exp)) = cache.as_ref() {
                 let now = unix_now();
-                if *exp > now + 60 { return Ok(token.clone()); }
+                if *exp > now + 60 {
+                    return Ok(token.clone());
+                }
             }
         }
-        let res = self.http
+        let res = self
+            .http
             .post(format!("{}/v1/oauth2/token", self.base_url))
             .basic_auth(&self.client_id, Some(&self.client_secret))
             .form(&[("grant_type", "client_credentials")])
-            .send().await?.error_for_status()?.json::<Value>().await?;
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?;
 
-        let token      = res["access_token"].as_str().ok_or_else(|| anyhow!("no access_token"))?.to_string();
+        let token = res["access_token"].as_str().ok_or_else(|| anyhow!("no access_token"))?.to_string();
         let expires_in = res["expires_in"].as_u64().unwrap_or(3600);
         *self.token_cache.write().await = Some((token.clone(), unix_now() + expires_in));
         Ok(token)
@@ -81,39 +88,54 @@ impl PayPalProvider {
 
     async fn post(&self, path: &str, body: Value) -> Result<Value> {
         let token = self.access_token().await?;
-        Ok(self.http.post(format!("{}{}", self.base_url, path))
-            .bearer_auth(token).json(&body)
-            .send().await?.error_for_status()?.json::<Value>().await?)
+        Ok(self
+            .http
+            .post(format!("{}{}", self.base_url, path))
+            .bearer_auth(token)
+            .json(&body)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?)
     }
 
     async fn get(&self, path: &str) -> Result<Value> {
         let token = self.access_token().await?;
-        Ok(self.http.get(format!("{}{}", self.base_url, path))
+        Ok(self
+            .http
+            .get(format!("{}{}", self.base_url, path))
             .bearer_auth(token)
-            .send().await?.error_for_status()?.json::<Value>().await?)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?)
     }
 }
 
 #[async_trait]
 impl BillingProvider for PayPalProvider {
-    fn name(&self) -> &'static str { "paypal" }
+    fn name(&self) -> &'static str {
+        "paypal"
+    }
 
     async fn create_checkout_session(
         &self,
-        tenant_id:   &str,
-        plan:        &BillingPlan,
+        tenant_id: &str,
+        plan: &BillingPlan,
         success_url: &str,
-        cancel_url:  &str,
+        cancel_url: &str,
     ) -> Result<CheckoutSession> {
         // Free plan — no payment
         if plan == &BillingPlan::Free {
             return Ok(CheckoutSession {
-                session_id:   format!("free-{}", tenant_id),
-                provider:     "paypal".into(),
+                session_id: format!("free-{}", tenant_id),
+                provider: "paypal".into(),
                 redirect_url: success_url.to_string(),
-                plan:         plan.clone(),
-                amount_usd:   0.0,
-                expires_at:   chrono::Utc::now() + chrono::Duration::hours(1),
+                plan: plan.clone(),
+                amount_usd: 0.0,
+                expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
             });
         }
 
@@ -124,12 +146,12 @@ impl BillingProvider for PayPalProvider {
 
         // Subscription plans — requires pre-created PayPal Billing Plan ID
         let paypal_plan_id = match plan {
-            BillingPlan::Go  => self.plan_id_go.as_deref().ok_or_else(|| anyhow!(
-                "PAYPAL_PLAN_ID_GO not set. Create a PayPal Billing Plan and set this env var."
-            ))?,
-            BillingPlan::Pro => self.plan_id_pro.as_deref().ok_or_else(|| anyhow!(
-                "PAYPAL_PLAN_ID_PRO not set. Create a PayPal Billing Plan and set this env var."
-            ))?,
+            BillingPlan::Go => self.plan_id_go.as_deref().ok_or_else(|| {
+                anyhow!("PAYPAL_PLAN_ID_GO not set. Create a PayPal Billing Plan and set this env var.")
+            })?,
+            BillingPlan::Pro => self.plan_id_pro.as_deref().ok_or_else(|| {
+                anyhow!("PAYPAL_PLAN_ID_PRO not set. Create a PayPal Billing Plan and set this env var.")
+            })?,
             BillingPlan::Enterprise => bail!("Enterprise plan uses manual billing — contact sales"),
             _ => bail!("unexpected plan: {}", plan),
         };
@@ -162,12 +184,12 @@ impl BillingProvider for PayPalProvider {
             .to_string();
 
         Ok(CheckoutSession {
-            session_id:   sub_id,
-            provider:     "paypal".into(),
+            session_id: sub_id,
+            provider: "paypal".into(),
             redirect_url,
-            plan:         plan.clone(),
-            amount_usd:   plan.monthly_price_usd(),
-            expires_at:   chrono::Utc::now() + chrono::Duration::hours(3),
+            plan: plan.clone(),
+            amount_usd: plan.monthly_price_usd(),
+            expires_at: chrono::Utc::now() + chrono::Duration::hours(3),
         })
     }
 
@@ -189,18 +211,22 @@ impl BillingProvider for PayPalProvider {
         }
 
         let event_type = raw["event_type"].as_str().unwrap_or("").to_string();
-        let resource   = &raw["resource"];
+        let resource = &raw["resource"];
 
         // tenant_id is stored in custom_id on subscriptions (set when creating the subscription)
         let tenant_id = resource["custom_id"].as_str().map(String::from);
-        let sub_id    = resource["id"].as_str().unwrap_or("").to_string();
+        let sub_id = resource["id"].as_str().unwrap_or("").to_string();
 
         // Derive plan from the PayPal plan_id → env var mapping
         let plan = {
             let pid = resource["plan_id"].as_str().unwrap_or("");
-            if self.plan_id_go.as_deref() == Some(pid)  { BillingPlan::Go }
-            else if self.plan_id_pro.as_deref() == Some(pid) { BillingPlan::Pro }
-            else { BillingPlan::Go } // safe fallback
+            if self.plan_id_go.as_deref() == Some(pid) {
+                BillingPlan::Go
+            } else if self.plan_id_pro.as_deref() == Some(pid) {
+                BillingPlan::Pro
+            } else {
+                BillingPlan::Go
+            } // safe fallback
         };
 
         let event = match event_type.as_str() {
@@ -221,24 +247,26 @@ impl BillingProvider for PayPalProvider {
                 }
             }
             "PAYMENT.SALE.COMPLETED" | "PAYMENT.CAPTURE.COMPLETED" => {
-                let amount = resource["amount"]["total"].as_str()
+                let amount = resource["amount"]["total"]
+                    .as_str()
                     .or_else(|| resource["amount"]["value"].as_str())
-                    .unwrap_or("0").parse::<f64>().unwrap_or(0.0);
-                let sid = resource["billing_agreement_id"].as_str()
-                    .or_else(|| resource["id"].as_str()).unwrap_or("").to_string();
+                    .unwrap_or("0")
+                    .parse::<f64>()
+                    .unwrap_or(0.0);
+                let sid = resource["billing_agreement_id"]
+                    .as_str()
+                    .or_else(|| resource["id"].as_str())
+                    .unwrap_or("")
+                    .to_string();
                 BillingEvent::PaymentSucceeded {
                     provider_subscription_id: sid,
                     tenant_id,
-                    amount_usd:  amount,
-                    invoice_id:  resource["id"].as_str().map(String::from),
+                    amount_usd: amount,
+                    invoice_id: resource["id"].as_str().map(String::from),
                 }
             }
             "PAYMENT.SALE.DENIED" | "BILLING.SUBSCRIPTION.PAYMENT.FAILED" => {
-                BillingEvent::PaymentFailed {
-                    provider_subscription_id: sub_id,
-                    tenant_id,
-                    reason: event_type.clone(),
-                }
+                BillingEvent::PaymentFailed { provider_subscription_id: sub_id, tenant_id, reason: event_type.clone() }
             }
             "BILLING.SUBSCRIPTION.CANCELLED" | "BILLING.SUBSCRIPTION.EXPIRED" => {
                 BillingEvent::SubscriptionCancelled { provider_subscription_id: sub_id, tenant_id }
@@ -256,13 +284,17 @@ impl BillingProvider for PayPalProvider {
     }
 
     async fn get_subscription(&self, provider_subscription_id: &str) -> Result<ProviderSubscription> {
-        let res    = self.get(&format!("/v1/billing/subscriptions/{}", provider_subscription_id)).await?;
+        let res = self.get(&format!("/v1/billing/subscriptions/{}", provider_subscription_id)).await?;
         let status = res["status"].as_str().unwrap_or("unknown").to_lowercase();
-        let pid    = res["plan_id"].as_str().unwrap_or("");
-        let plan   = if self.plan_id_go.as_deref() == Some(pid)  { BillingPlan::Go }
-                     else if self.plan_id_pro.as_deref() == Some(pid) { BillingPlan::Pro }
-                     else { BillingPlan::Go };
-        let now    = chrono::Utc::now();
+        let pid = res["plan_id"].as_str().unwrap_or("");
+        let plan = if self.plan_id_go.as_deref() == Some(pid) {
+            BillingPlan::Go
+        } else if self.plan_id_pro.as_deref() == Some(pid) {
+            BillingPlan::Pro
+        } else {
+            BillingPlan::Go
+        };
+        let now = chrono::Utc::now();
         let period_end = res["billing_info"]["next_billing_time"]
             .as_str()
             .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
@@ -270,17 +302,22 @@ impl BillingProvider for PayPalProvider {
             .unwrap_or(now + chrono::Duration::days(30));
         Ok(ProviderSubscription {
             provider_subscription_id: provider_subscription_id.to_string(),
-            provider:    "paypal".into(),
+            provider: "paypal".into(),
             plan,
             status,
             current_period_start: now,
-            current_period_end:   period_end,
+            current_period_end: period_end,
         })
     }
 }
 
 impl PayPalProvider {
-    async fn create_credit_order(&self, tenant_id: &str, success_url: &str, cancel_url: &str) -> Result<CheckoutSession> {
+    async fn create_credit_order(
+        &self,
+        tenant_id: &str,
+        success_url: &str,
+        cancel_url: &str,
+    ) -> Result<CheckoutSession> {
         let body = json!({
             "intent": "CAPTURE",
             "purchase_units": [{
@@ -309,18 +346,16 @@ impl PayPalProvider {
             .to_string();
 
         Ok(CheckoutSession {
-            session_id:   order_id,
-            provider:     "paypal".into(),
+            session_id: order_id,
+            provider: "paypal".into(),
             redirect_url,
-            plan:         BillingPlan::Credits,
-            amount_usd:   BillingPlan::credit_pack_price_usd(),
-            expires_at:   chrono::Utc::now() + chrono::Duration::hours(3),
+            plan: BillingPlan::Credits,
+            amount_usd: BillingPlan::credit_pack_price_usd(),
+            expires_at: chrono::Utc::now() + chrono::Duration::hours(3),
         })
     }
 }
 
 fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default().as_secs()
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()
 }

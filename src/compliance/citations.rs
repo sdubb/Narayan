@@ -54,9 +54,11 @@ impl CitationTracker {
         .execute(&self.pool)
         .await?;
         sqlx::query("CREATE INDEX IF NOT EXISTS citations_agent_id ON citations (agent_id)")
-            .execute(&self.pool).await?;
+            .execute(&self.pool)
+            .await?;
         sqlx::query("CREATE INDEX IF NOT EXISTS citations_tenant_id ON citations (tenant_id)")
-            .execute(&self.pool).await?;
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 

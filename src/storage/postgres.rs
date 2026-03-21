@@ -65,9 +65,7 @@ impl PostgresStore {
         )
         .execute(&self.pool)
         .await?;
-        sqlx::query("ALTER TABLE agents ADD COLUMN IF NOT EXISTS final_answer TEXT")
-            .execute(&self.pool)
-            .await?;
+        sqlx::query("ALTER TABLE agents ADD COLUMN IF NOT EXISTS final_answer TEXT").execute(&self.pool).await?;
 
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS agents_next_run ON agents (next_run) WHERE status IN ('pending', 'waiting')",
@@ -153,16 +151,12 @@ impl PostgresStore {
         )
         .execute(&self.pool)
         .await?;
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS conversations_tenant ON conversations (tenant_id, updated_at DESC)",
-        )
-        .execute(&self.pool)
-        .await?;
-
-        // Add conversation_id column to agents table
-        sqlx::query("ALTER TABLE agents ADD COLUMN IF NOT EXISTS conversation_id TEXT")
+        sqlx::query("CREATE INDEX IF NOT EXISTS conversations_tenant ON conversations (tenant_id, updated_at DESC)")
             .execute(&self.pool)
             .await?;
+
+        // Add conversation_id column to agents table
+        sqlx::query("ALTER TABLE agents ADD COLUMN IF NOT EXISTS conversation_id TEXT").execute(&self.pool).await?;
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS agents_conversation ON agents (conversation_id) WHERE conversation_id IS NOT NULL",
         )
@@ -295,6 +289,49 @@ impl PostgresStore {
         Ok(rows.iter().map(|r| row_to_agent_state(r)).collect())
     }
 
+    /// Get all child agents for a given parent agent.
+    pub async fn get_agent_children(&self, tenant_id: &str, parent_id: &str) -> Result<Vec<AgentState>> {
+        let rows = sqlx::query("SELECT * FROM agents WHERE parent_agent_id = $1 AND tenant_id = $2 ORDER BY created_at ASC")
+            .bind(parent_id)
+            .bind(tenant_id)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows.iter().map(|r| row_to_agent_state(r)).collect())
+    }
+
+    /// Update agent plan in the database.
+    pub async fn update_agent_plan(&self, tenant_id: &str, agent_id: &str, plan: &serde_json::Value) -> Result<()> {
+        sqlx::query("UPDATE agents SET plan = $1, updated_at = NOW() WHERE id = $2 AND tenant_id = $3")
+            .bind(plan)
+            .bind(agent_id)
+            .bind(tenant_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Update agent metadata in the database.
+    pub async fn update_agent_metadata(&self, tenant_id: &str, agent_id: &str, metadata: &serde_json::Value) -> Result<()> {
+        sqlx::query("UPDATE agents SET metadata = $1, updated_at = NOW() WHERE id = $2 AND tenant_id = $3")
+            .bind(metadata)
+            .bind(agent_id)
+            .bind(tenant_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Update agent status.
+    pub async fn update_agent_status(&self, tenant_id: &str, agent_id: &str, status: &str) -> Result<()> {
+        sqlx::query("UPDATE agents SET status = $1, updated_at = NOW() WHERE id = $2 AND tenant_id = $3")
+            .bind(status)
+            .bind(agent_id)
+            .bind(tenant_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     pub async fn count_active_agents(&self, tenant_id: &str) -> Result<i64> {
         let row = sqlx::query(
             "SELECT COUNT(*) as cnt FROM agents
@@ -340,12 +377,10 @@ impl PostgresStore {
     }
 
     pub async fn list_conversations(&self, tenant_id: &str) -> Result<Vec<Conversation>> {
-        let rows = sqlx::query(
-            "SELECT * FROM conversations WHERE tenant_id = $1 ORDER BY updated_at DESC LIMIT 100",
-        )
-        .bind(tenant_id)
-        .fetch_all(&self.pool)
-        .await?;
+        let rows = sqlx::query("SELECT * FROM conversations WHERE tenant_id = $1 ORDER BY updated_at DESC LIMIT 100")
+            .bind(tenant_id)
+            .fetch_all(&self.pool)
+            .await?;
         Ok(rows
             .iter()
             .map(|r| Conversation {
@@ -359,18 +394,11 @@ impl PostgresStore {
     }
 
     pub async fn touch_conversation(&self, id: &str) -> Result<()> {
-        sqlx::query("UPDATE conversations SET updated_at = NOW() WHERE id = $1")
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query("UPDATE conversations SET updated_at = NOW() WHERE id = $1").bind(id).execute(&self.pool).await?;
         Ok(())
     }
 
-    pub async fn list_agents_in_conversation(
-        &self,
-        tenant_id: &str,
-        conversation_id: &str,
-    ) -> Result<Vec<AgentState>> {
+    pub async fn list_agents_in_conversation(&self, tenant_id: &str, conversation_id: &str) -> Result<Vec<AgentState>> {
         let rows = sqlx::query(
             "SELECT * FROM agents WHERE tenant_id = $1 AND conversation_id = $2
              ORDER BY created_at ASC",

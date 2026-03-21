@@ -15,7 +15,6 @@
 //!   notion     — (Notion's own OAuth)
 //!   github     — repo, issues, pull_requests
 
-use std::sync::Arc;
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
@@ -23,6 +22,7 @@ use axum::{
     Json,
 };
 use serde::Deserialize;
+use std::sync::Arc;
 
 use crate::api::routes::AppState;
 use crate::tenant::model::AuthenticatedTenant;
@@ -34,18 +34,18 @@ fn err(code: StatusCode, msg: impl Into<String>) -> axum::response::Response {
 /// OAuth provider configuration.
 #[derive(Debug, Clone)]
 pub struct OAuthConfig {
-    pub client_id:     String,
+    pub client_id: String,
     pub client_secret: String,
-    pub auth_url:      String,
-    pub token_url:     String,
-    pub scopes:        Vec<String>,
+    pub auth_url: String,
+    pub token_url: String,
+    pub scopes: Vec<String>,
     pub connector_type: String,
 }
 
 impl OAuthConfig {
     pub fn from_env(provider: &str) -> Option<Self> {
         let prefix = provider.to_uppercase().replace('-', "_");
-        let client_id     = std::env::var(format!("{prefix}_CLIENT_ID")).ok()?;
+        let client_id = std::env::var(format!("{prefix}_CLIENT_ID")).ok()?;
         let client_secret = std::env::var(format!("{prefix}_CLIENT_SECRET")).ok()?;
 
         let (auth_url, token_url, scopes, connector_type): (String, String, Vec<&str>, &str) = match provider {
@@ -58,19 +58,27 @@ impl OAuthConfig {
             "gmail" | "google" => (
                 "https://accounts.google.com/o/oauth2/v2/auth".into(),
                 "https://oauth2.googleapis.com/token".into(),
-                vec!["https://www.googleapis.com/auth/gmail.readonly",
-                     "https://www.googleapis.com/auth/gmail.send",
-                     "https://www.googleapis.com/auth/drive.readonly",
-                     "https://www.googleapis.com/auth/spreadsheets",
-                     "https://www.googleapis.com/auth/documents"],
+                vec![
+                    "https://www.googleapis.com/auth/gmail.readonly",
+                    "https://www.googleapis.com/auth/gmail.send",
+                    "https://www.googleapis.com/auth/drive.readonly",
+                    "https://www.googleapis.com/auth/spreadsheets",
+                    "https://www.googleapis.com/auth/documents",
+                ],
                 "google",
             ),
             "outlook" | "microsoft" => (
                 "https://login.microsoftonline.com/common/oauth2/v2.0/authorize".into(),
                 "https://login.microsoftonline.com/common/oauth2/v2.0/token".into(),
-                vec!["Mail.Read", "Mail.Send", "Calendars.Read", "User.Read", "offline_access",
-                     "https://graph.microsoft.com/Chat.Read",
-                     "https://graph.microsoft.com/ChannelMessage.Send"],
+                vec![
+                    "Mail.Read",
+                    "Mail.Send",
+                    "Calendars.Read",
+                    "User.Read",
+                    "offline_access",
+                    "https://graph.microsoft.com/Chat.Read",
+                    "https://graph.microsoft.com/ChannelMessage.Send",
+                ],
                 "microsoft",
             ),
             "salesforce" => (
@@ -88,14 +96,19 @@ impl OAuthConfig {
             "jira" | "atlassian" => (
                 "https://auth.atlassian.com/authorize".into(),
                 "https://auth.atlassian.com/oauth/token".into(),
-                vec!["read:jira-work", "write:jira-work", "read:confluence-content.all",
-                     "write:confluence-content", "offline_access"],
+                vec![
+                    "read:jira-work",
+                    "write:jira-work",
+                    "read:confluence-content.all",
+                    "write:confluence-content",
+                    "offline_access",
+                ],
                 "atlassian",
             ),
             "notion" => (
                 "https://api.notion.com/v1/oauth/authorize".into(),
                 "https://api.notion.com/v1/oauth/token".into(),
-                vec![],  // Notion doesn't use scope params
+                vec![], // Notion doesn't use scope params
                 "notion",
             ),
             "github" => (
@@ -141,18 +154,26 @@ pub async fn oauth_start(
     // Validate JWT from query param
     let token = match qparams.get("token") {
         Some(t) => t.clone(),
-        None    => return err(StatusCode::UNAUTHORIZED, "missing ?token= query param").into_response(),
+        None => return err(StatusCode::UNAUTHORIZED, "missing ?token= query param").into_response(),
     };
     let tenant_id = match crate::auth::jwt::validate_token(&token, &state.jwt_secret) {
         Ok(claims) => claims.sub,
-        Err(_)     => return err(StatusCode::UNAUTHORIZED, "invalid or expired token").into_response(),
+        Err(_) => return err(StatusCode::UNAUTHORIZED, "invalid or expired token").into_response(),
     };
 
     let cfg = match OAuthConfig::from_env(&provider) {
         Some(c) => c,
-        None    => return err(StatusCode::NOT_FOUND,
-            format!("OAuth not configured for '{provider}'. Set {}_CLIENT_ID and {}_CLIENT_SECRET env vars.",
-                provider.to_uppercase(), provider.to_uppercase())).into_response(),
+        None => {
+            return err(
+                StatusCode::NOT_FOUND,
+                format!(
+                    "OAuth not configured for '{provider}'. Set {}_CLIENT_ID and {}_CLIENT_SECRET env vars.",
+                    provider.to_uppercase(),
+                    provider.to_uppercase()
+                ),
+            )
+            .into_response()
+        }
     };
 
     let csrf_state = crate::util::new_id();
@@ -160,34 +181,42 @@ pub async fn oauth_start(
         return err(StatusCode::INTERNAL_SERVER_ERROR, format!("failed to save OAuth state: {e}")).into_response();
     }
 
-    let base         = std::env::var("NARAYAN_BASE_URL").unwrap_or_else(|_| "http://localhost:8080".into());
+    let base = std::env::var("NARAYAN_BASE_URL").unwrap_or_else(|_| "http://localhost:8080".into());
     let redirect_uri = format!("{}/auth/oauth/{}/callback", base, provider);
-    let scope_str    = cfg.scopes.join(" ");
+    let scope_str = cfg.scopes.join(" ");
 
     let mut params = vec![
-        ("client_id",     cfg.client_id.clone()),
-        ("redirect_uri",  redirect_uri.clone()),
+        ("client_id", cfg.client_id.clone()),
+        ("redirect_uri", redirect_uri.clone()),
         ("response_type", "code".to_string()),
-        ("state",         csrf_state.clone()),
+        ("state", csrf_state.clone()),
     ];
     if !scope_str.is_empty() {
         params.push(("scope", scope_str));
     }
     match provider.as_str() {
-        "google" | "gmail"   => { params.push(("access_type", "offline".into())); params.push(("prompt", "consent".into())); }
-        "jira" | "atlassian" => { params.push(("audience", "api.atlassian.com".into())); params.push(("prompt", "consent".into())); }
+        "google" | "gmail" => {
+            params.push(("access_type", "offline".into()));
+            params.push(("prompt", "consent".into()));
+        }
+        "jira" | "atlassian" => {
+            params.push(("audience", "api.atlassian.com".into()));
+            params.push(("prompt", "consent".into()));
+        }
         _ => {}
     }
 
-    let url = format!("{}?{}", cfg.auth_url,
-        params.iter().map(|(k,v)| format!("{}={}", k, urlencoding::encode(v))).collect::<Vec<_>>().join("&")
+    let url = format!(
+        "{}?{}",
+        cfg.auth_url,
+        params.iter().map(|(k, v)| format!("{}={}", k, urlencoding::encode(v))).collect::<Vec<_>>().join("&")
     );
     Redirect::temporary(&url).into_response()
 }
 
 #[derive(Deserialize)]
 pub struct OAuthCallbackParams {
-    pub code:  Option<String>,
+    pub code: Option<String>,
     pub state: Option<String>,
     pub error: Option<String>,
 }
@@ -207,18 +236,29 @@ pub async fn oauth_callback(
         return Redirect::temporary(&url).into_response();
     }
 
-    let code  = match params.code  { Some(c) => c, None => return Redirect::temporary(&format!("{}/settings/connectors?error=no_code", ui_base)).into_response() };
-    let state_token = match params.state { Some(s) => s, None => return Redirect::temporary(&format!("{}/settings/connectors?error=no_state", ui_base)).into_response() };
+    let code = match params.code {
+        Some(c) => c,
+        None => return Redirect::temporary(&format!("{}/settings/connectors?error=no_code", ui_base)).into_response(),
+    };
+    let state_token = match params.state {
+        Some(s) => s,
+        None => return Redirect::temporary(&format!("{}/settings/connectors?error=no_state", ui_base)).into_response(),
+    };
 
     // Validate CSRF state
     let (tenant_id, _) = match state.connector_installs.consume_oauth_state(&state_token).await {
         Ok(Some(r)) => r,
-        _ => return Redirect::temporary(&format!("{}/settings/connectors?error=invalid_state", ui_base)).into_response(),
+        _ => {
+            return Redirect::temporary(&format!("{}/settings/connectors?error=invalid_state", ui_base)).into_response()
+        }
     };
 
     let cfg = match OAuthConfig::from_env(&provider) {
         Some(c) => c,
-        None    => return Redirect::temporary(&format!("{}/settings/connectors?error=provider_not_configured", ui_base)).into_response(),
+        None => {
+            return Redirect::temporary(&format!("{}/settings/connectors?error=provider_not_configured", ui_base))
+                .into_response()
+        }
     };
 
     let narayan_base = std::env::var("NARAYAN_BASE_URL").unwrap_or_else(|_| "http://localhost:8080".into());
@@ -239,18 +279,29 @@ pub async fn oauth_callback(
                 .post(&cfg.token_url)
                 .header("Accept", "application/json")
                 .basic_auth(&cfg.client_id, Some(&cfg.client_secret))
-                .form(&[
-                    ("grant_type",   "authorization_code"),
-                    ("code",         &code),
-                    ("redirect_uri", &redirect_uri),
-                ])
-                .send().await;
+                .form(&[("grant_type", "authorization_code"), ("code", &code), ("redirect_uri", &redirect_uri)])
+                .send()
+                .await;
             match res {
                 Ok(r) => match r.json().await {
                     Ok(j) => j,
-                    Err(e) => return Redirect::temporary(&format!("{}/settings/connectors?error={}", ui_base, urlencoding::encode(&e.to_string()))).into_response(),
+                    Err(e) => {
+                        return Redirect::temporary(&format!(
+                            "{}/settings/connectors?error={}",
+                            ui_base,
+                            urlencoding::encode(&e.to_string())
+                        ))
+                        .into_response()
+                    }
                 },
-                Err(e) => return Redirect::temporary(&format!("{}/settings/connectors?error={}", ui_base, urlencoding::encode(&e.to_string()))).into_response(),
+                Err(e) => {
+                    return Redirect::temporary(&format!(
+                        "{}/settings/connectors?error={}",
+                        ui_base,
+                        urlencoding::encode(&e.to_string())
+                    ))
+                    .into_response()
+                }
             }
         }
         "jira" | "atlassian" => {
@@ -266,9 +317,23 @@ pub async fn oauth_callback(
             match res {
                 Ok(r) => match r.json().await {
                     Ok(j) => j,
-                    Err(e) => return Redirect::temporary(&format!("{}/settings/connectors?error={}", ui_base, urlencoding::encode(&e.to_string()))).into_response(),
+                    Err(e) => {
+                        return Redirect::temporary(&format!(
+                            "{}/settings/connectors?error={}",
+                            ui_base,
+                            urlencoding::encode(&e.to_string())
+                        ))
+                        .into_response()
+                    }
                 },
-                Err(e) => return Redirect::temporary(&format!("{}/settings/connectors?error={}", ui_base, urlencoding::encode(&e.to_string()))).into_response(),
+                Err(e) => {
+                    return Redirect::temporary(&format!(
+                        "{}/settings/connectors?error={}",
+                        ui_base,
+                        urlencoding::encode(&e.to_string())
+                    ))
+                    .into_response()
+                }
             }
         }
         "notion" => {
@@ -282,13 +347,28 @@ pub async fn oauth_callback(
                 .post(&cfg.token_url)
                 .basic_auth(&cfg.client_id, Some(&cfg.client_secret))
                 .json(&body)
-                .send().await;
+                .send()
+                .await;
             match res {
                 Ok(r) => match r.json().await {
                     Ok(j) => j,
-                    Err(e) => return Redirect::temporary(&format!("{}/settings/connectors?error={}", ui_base, urlencoding::encode(&e.to_string()))).into_response(),
+                    Err(e) => {
+                        return Redirect::temporary(&format!(
+                            "{}/settings/connectors?error={}",
+                            ui_base,
+                            urlencoding::encode(&e.to_string())
+                        ))
+                        .into_response()
+                    }
                 },
-                Err(e) => return Redirect::temporary(&format!("{}/settings/connectors?error={}", ui_base, urlencoding::encode(&e.to_string()))).into_response(),
+                Err(e) => {
+                    return Redirect::temporary(&format!(
+                        "{}/settings/connectors?error={}",
+                        ui_base,
+                        urlencoding::encode(&e.to_string())
+                    ))
+                    .into_response()
+                }
             }
         }
         _ => {
@@ -296,44 +376,79 @@ pub async fn oauth_callback(
             let res = client
                 .post(&cfg.token_url)
                 .basic_auth(&cfg.client_id, Some(&cfg.client_secret))
-                .form(&[
-                    ("grant_type",   "authorization_code"),
-                    ("code",         &code),
-                    ("redirect_uri", &redirect_uri),
-                ])
-                .send().await;
+                .form(&[("grant_type", "authorization_code"), ("code", &code), ("redirect_uri", &redirect_uri)])
+                .send()
+                .await;
             match res {
                 Ok(r) => match r.json().await {
                     Ok(j) => j,
-                    Err(e) => return Redirect::temporary(&format!("{}/settings/connectors?error={}", ui_base, urlencoding::encode(&e.to_string()))).into_response(),
+                    Err(e) => {
+                        return Redirect::temporary(&format!(
+                            "{}/settings/connectors?error={}",
+                            ui_base,
+                            urlencoding::encode(&e.to_string())
+                        ))
+                        .into_response()
+                    }
                 },
-                Err(e) => return Redirect::temporary(&format!("{}/settings/connectors?error={}", ui_base, urlencoding::encode(&e.to_string()))).into_response(),
+                Err(e) => {
+                    return Redirect::temporary(&format!(
+                        "{}/settings/connectors?error={}",
+                        ui_base,
+                        urlencoding::encode(&e.to_string())
+                    ))
+                    .into_response()
+                }
             }
         }
     };
 
-    let access_token  = match token_body["access_token"].as_str() {
+    let access_token = match token_body["access_token"].as_str() {
         Some(t) => t.to_string(),
-        None    => {
+        None => {
             let msg = token_body["error_description"].as_str().unwrap_or("no access_token").to_string();
-            return Redirect::temporary(&format!("{}/settings/connectors?error={}", ui_base, urlencoding::encode(&msg))).into_response();
+            return Redirect::temporary(&format!(
+                "{}/settings/connectors?error={}",
+                ui_base,
+                urlencoding::encode(&msg)
+            ))
+            .into_response();
         }
     };
     let refresh_token = token_body["refresh_token"].as_str().map(String::from);
-    let expires_in    = token_body["expires_in"].as_u64();
-    let expires_at    = expires_in.map(|s| chrono::Utc::now() + chrono::Duration::seconds(s as i64));
+    let expires_in = token_body["expires_in"].as_u64();
+    let expires_at = expires_in.map(|s| chrono::Utc::now() + chrono::Duration::seconds(s as i64));
 
     // Build settings from token response (e.g. store Slack team_id, Salesforce instance_url)
     let mut settings = serde_json::json!({});
-    if let Some(tid) = token_body["team"]["id"].as_str() { settings["team_id"] = tid.into(); }
-    if let Some(iurl) = token_body["instance_url"].as_str() { settings["instance_url"] = iurl.into(); }
-    if let Some(bot) = token_body["bot_user_id"].as_str() { settings["bot_user_id"] = bot.into(); }
+    if let Some(tid) = token_body["team"]["id"].as_str() {
+        settings["team_id"] = tid.into();
+    }
+    if let Some(iurl) = token_body["instance_url"].as_str() {
+        settings["instance_url"] = iurl.into();
+    }
+    if let Some(bot) = token_body["bot_user_id"].as_str() {
+        settings["bot_user_id"] = bot.into();
+    }
 
-    if let Err(e) = state.connector_installs.upsert_oauth_token(
-        &tenant_id, &cfg.connector_type,
-        &access_token, refresh_token.as_deref(), expires_at, settings
-    ).await {
-        return Redirect::temporary(&format!("{}/settings/connectors?error={}", ui_base, urlencoding::encode(&e.to_string()))).into_response();
+    if let Err(e) = state
+        .connector_installs
+        .upsert_oauth_token(
+            &tenant_id,
+            &cfg.connector_type,
+            &access_token,
+            refresh_token.as_deref(),
+            expires_at,
+            settings,
+        )
+        .await
+    {
+        return Redirect::temporary(&format!(
+            "{}/settings/connectors?error={}",
+            ui_base,
+            urlencoding::encode(&e.to_string())
+        ))
+        .into_response();
     }
 
     tracing::info!(tenant_id, connector = cfg.connector_type, "OAuth connector connected");
@@ -351,18 +466,22 @@ pub async fn install_connector(
 ) -> impl IntoResponse {
     let api_key = match body["api_key"].as_str().or_else(|| body["token"].as_str()) {
         Some(k) => k.to_string(),
-        None    => return err(StatusCode::BAD_REQUEST, "'api_key' or 'token' required"),
+        None => return err(StatusCode::BAD_REQUEST, "'api_key' or 'token' required"),
     };
 
     // Extract optional settings from body (e.g. zendesk_subdomain, servicenow_instance_url)
     let settings = body.get("settings").cloned().unwrap_or(serde_json::json!({}));
 
     match state.connector_installs.upsert_api_key(&tenant.tenant_id, &connector_type, &api_key, settings).await {
-        Ok(id) => (StatusCode::CREATED, Json(serde_json::json!({
-            "installed": true,
-            "id":        id,
-            "connector": connector_type,
-        }))).into_response(),
+        Ok(id) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({
+                "installed": true,
+                "id":        id,
+                "connector": connector_type,
+            })),
+        )
+            .into_response(),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
@@ -374,10 +493,11 @@ pub async fn install_webhook_connector(
     Path(connector_type): Path<String>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    let base            = std::env::var("NARAYAN_BASE_URL").unwrap_or_else(|_| "http://localhost:8080".into());
-    let webhook_url     = format!("{}/connectors/{}/webhook", base, connector_type);
+    let base = std::env::var("NARAYAN_BASE_URL").unwrap_or_else(|_| "http://localhost:8080".into());
+    let webhook_url = format!("{}/connectors/{}/webhook", base, connector_type);
     // Use provided secret or generate one
-    let webhook_secret  = body["webhook_secret"].as_str()
+    let webhook_secret = body["webhook_secret"]
+        .as_str()
         .map(String::from)
         .unwrap_or_else(|| format!("nar_whsec_{}", &crate::util::new_id().replace('-', "")[..24]));
     let settings = body.get("settings").cloned().unwrap_or(serde_json::json!({}));
@@ -396,10 +516,7 @@ pub async fn install_webhook_connector(
 }
 
 /// GET /connectors — list all installed connectors for this tenant.
-pub async fn list_connectors(
-    State(state): State<AppState>,
-    tenant: AuthenticatedTenant,
-) -> impl IntoResponse {
+pub async fn list_connectors(State(state): State<AppState>, tenant: AuthenticatedTenant) -> impl IntoResponse {
     match state.connector_installs.list_for_tenant(&tenant.tenant_id).await {
         Ok(installs) => {
             let count = installs.len();
@@ -416,8 +533,8 @@ pub async fn uninstall_connector(
     Path(connector_type): Path<String>,
 ) -> impl IntoResponse {
     match state.connector_installs.delete(&tenant.tenant_id, &connector_type).await {
-        Ok(true)  => Json(serde_json::json!({ "uninstalled": true })).into_response(),
+        Ok(true) => Json(serde_json::json!({ "uninstalled": true })).into_response(),
         Ok(false) => err(StatusCode::NOT_FOUND, "connector not installed"),
-        Err(e)    => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }

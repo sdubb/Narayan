@@ -13,11 +13,11 @@
 //!   2. Add .register(Arc::new(RazorpayProvider::from_env()?)) in main.rs
 //!   3. The webhook route /billing/webhooks/razorpay works automatically
 
-pub mod provider;
-pub mod store;
 pub mod paypal;
-pub mod stripe;
+pub mod provider;
 pub mod routes;
+pub mod store;
+pub mod stripe;
 
 pub use provider::{BillingEvent, BillingPlan, BillingProvider, CheckoutSession, ProviderSubscription};
 pub use store::BillingStore;

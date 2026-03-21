@@ -40,10 +40,8 @@ impl Tool for FileReadTool {
             let mut children = Vec::new();
             let mut total_entries = 0usize;
 
-            while let Some(entry) = entries
-                .next_entry()
-                .await
-                .map_err(|e| anyhow::anyhow!("read_dir entry '{}': {}", path.display(), e))?
+            while let Some(entry) =
+                entries.next_entry().await.map_err(|e| anyhow::anyhow!("read_dir entry '{}': {}", path.display(), e))?
             {
                 total_entries += 1;
                 if children.len() >= MAX_DIRECTORY_ENTRIES {

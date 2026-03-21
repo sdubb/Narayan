@@ -12,12 +12,7 @@ use crate::{
 
 /// Spawn a background task that forwards agent events to the audit log.
 /// Call this when a new agent starts executing.
-pub fn bridge_agent_events(
-    event_bus: Arc<EventBus>,
-    audit_log: Arc<AuditLog>,
-    agent_id: String,
-    tenant_id: String,
-) {
+pub fn bridge_agent_events(event_bus: Arc<EventBus>, audit_log: Arc<AuditLog>, agent_id: String, tenant_id: String) {
     tokio::spawn(async move {
         let mut rx = event_bus.subscribe(&agent_id);
         loop {
@@ -40,10 +35,9 @@ pub fn bridge_agent_events(
 
 fn event_to_audit(event: &AgentEvent) -> (AuditAction, serde_json::Value) {
     match event {
-        AgentEvent::StepStarted { step_index, description, .. } => (
-            AuditAction::StepStarted,
-            serde_json::json!({ "step_index": step_index, "description": description }),
-        ),
+        AgentEvent::StepStarted { step_index, description, .. } => {
+            (AuditAction::StepStarted, serde_json::json!({ "step_index": step_index, "description": description }))
+        }
         AgentEvent::StepCompleted { step_index, success, summary, .. } => (
             AuditAction::StepCompleted,
             serde_json::json!({ "step_index": step_index, "success": success, "summary": summary }),
@@ -59,18 +53,13 @@ fn event_to_audit(event: &AgentEvent) -> (AuditAction, serde_json::Value) {
                 "success": success, "output_preview": output_preview
             }),
         ),
-        AgentEvent::GoalComplete { summary, .. } => (
-            AuditAction::GoalCreated,
-            serde_json::json!({ "outcome": "complete", "summary": summary }),
-        ),
-        AgentEvent::GoalFailed { reason, .. } => (
-            AuditAction::GoalCreated,
-            serde_json::json!({ "outcome": "failed", "reason": reason }),
-        ),
+        AgentEvent::GoalComplete { summary, .. } => {
+            (AuditAction::GoalCreated, serde_json::json!({ "outcome": "complete", "summary": summary }))
+        }
+        AgentEvent::GoalFailed { reason, .. } => {
+            (AuditAction::GoalCreated, serde_json::json!({ "outcome": "failed", "reason": reason }))
+        }
         // All other events logged as custom
-        other => (
-            AuditAction::Custom,
-            serde_json::to_value(other).unwrap_or_default(),
-        ),
+        other => (AuditAction::Custom, serde_json::to_value(other).unwrap_or_default()),
     }
 }

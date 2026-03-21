@@ -13,16 +13,16 @@ use crate::{
 };
 
 pub struct AgentManager {
-    store:             Arc<PostgresStore>,
+    store: Arc<PostgresStore>,
     workspace_manager: Arc<WorkspaceManager>,
-    services:          Arc<AgentServices>,
+    services: Arc<AgentServices>,
 }
 
 fn build_goal_and_agent(
-    goal_id:        String,
-    agent_id:       String,
-    tenant_id:      String,
-    description:    String,
+    goal_id: String,
+    agent_id: String,
+    tenant_id: String,
+    description: String,
     workspace_path: String,
 ) -> (GoalState, AgentState) {
     let agent_state = AgentState::new(agent_id.clone(), tenant_id.clone(), description.clone(), workspace_path);
@@ -36,21 +36,21 @@ fn build_goal_and_agent(
 fn sla_priority_for_job(job_type: &JobType) -> SlaPriority {
     match job_type {
         JobType::CustomerSupport => SlaPriority::Urgent,
-        JobType::ITOpsITSM       => SlaPriority::Critical,
-        JobType::DevOps          => SlaPriority::High,
-        JobType::LegalContract   => SlaPriority::High,
+        JobType::ITOpsITSM => SlaPriority::Critical,
+        JobType::DevOps => SlaPriority::High,
+        JobType::LegalContract => SlaPriority::High,
         JobType::FinanceAccounting => SlaPriority::High,
-        JobType::HRPeopleOps     => SlaPriority::Normal,
-        JobType::SalesRevOps     => SlaPriority::Normal,
-        _                        => SlaPriority::Low,
+        JobType::HRPeopleOps => SlaPriority::Normal,
+        JobType::SalesRevOps => SlaPriority::Normal,
+        _ => SlaPriority::Low,
     }
 }
 
 impl AgentManager {
     pub fn new(
-        store:             Arc<PostgresStore>,
+        store: Arc<PostgresStore>,
         workspace_manager: Arc<WorkspaceManager>,
-        services:          Arc<AgentServices>,
+        services: Arc<AgentServices>,
     ) -> Self {
         Self { store, workspace_manager, services }
     }
@@ -64,10 +64,10 @@ impl AgentManager {
         description: String,
         conversation_id: Option<String>,
     ) -> Result<(GoalState, AgentState)> {
-        let goal_id  = new_id();
+        let goal_id = new_id();
         let agent_id = new_id();
 
-        let handle         = self.workspace_manager.create(&tenant_id, &agent_id).await?;
+        let handle = self.workspace_manager.create(&tenant_id, &agent_id).await?;
         let workspace_path = handle.local_path_str();
 
         tracing::info!(
@@ -88,8 +88,8 @@ impl AgentManager {
             let job_type = JobType::detect(&description);
             let priority = sla_priority_for_job(&job_type);
             if let Some(sla_status) = sla.start(&agent_state.id, &tenant_id, &priority) {
-                agent_state.metadata["sla_status"] = serde_json::to_value(&sla_status)
-                    .unwrap_or(serde_json::Value::Null);
+                agent_state.metadata["sla_status"] =
+                    serde_json::to_value(&sla_status).unwrap_or(serde_json::Value::Null);
                 tracing::debug!(
                     agent_id   = %agent_state.id,
                     ?priority,
@@ -118,8 +118,11 @@ mod tests {
     #[test]
     fn test_build_goal_and_agent_initialises_correctly() {
         let (goal, agent) = build_goal_and_agent(
-            "goal-1".into(), "agent-1".into(), "tenant-1".into(),
-            "fix CI pipeline".into(), "/tmp/ws".into(),
+            "goal-1".into(),
+            "agent-1".into(),
+            "tenant-1".into(),
+            "fix CI pipeline".into(),
+            "/tmp/ws".into(),
         );
         assert_eq!(goal.id, "goal-1");
         assert_eq!(goal.status, GoalStatus::InProgress);
@@ -147,10 +150,18 @@ mod tests {
     fn test_sla_priority_covers_all_job_types() {
         // Regression: every JobType must map to some priority (no panic)
         let types = [
-            JobType::SoftwareEngineer, JobType::ResearchAnalyst, JobType::CustomerSupport,
-            JobType::DevOps, JobType::Marketing, JobType::DataExtraction,
-            JobType::SalesRevOps, JobType::FinanceAccounting, JobType::HRPeopleOps,
-            JobType::LegalContract, JobType::ITOpsITSM, JobType::General,
+            JobType::SoftwareEngineer,
+            JobType::ResearchAnalyst,
+            JobType::CustomerSupport,
+            JobType::DevOps,
+            JobType::Marketing,
+            JobType::DataExtraction,
+            JobType::SalesRevOps,
+            JobType::FinanceAccounting,
+            JobType::HRPeopleOps,
+            JobType::LegalContract,
+            JobType::ITOpsITSM,
+            JobType::General,
         ];
         for jt in &types {
             let _ = sla_priority_for_job(jt); // must not panic

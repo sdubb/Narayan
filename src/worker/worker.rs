@@ -17,14 +17,14 @@ use crate::{
 };
 
 pub struct Worker {
-    id:                usize,
-    store:             Arc<PostgresStore>,
-    queue:             Arc<dyn Queue>,
-    agent_loop:        Arc<AgentLoop>,
-    metrics:           Arc<Metrics>,
+    id: usize,
+    store: Arc<PostgresStore>,
+    queue: Arc<dyn Queue>,
+    agent_loop: Arc<AgentLoop>,
+    metrics: Arc<Metrics>,
     workspace_manager: Arc<WorkspaceManager>,
-    services:          Arc<AgentServices>,
-    event_bus:         Arc<EventBus>,
+    services: Arc<AgentServices>,
+    event_bus: Arc<EventBus>,
 }
 
 fn should_retry_task(task: &Task) -> bool {
@@ -33,14 +33,14 @@ fn should_retry_task(task: &Task) -> bool {
 
 impl Worker {
     pub fn new(
-        id:                usize,
-        store:             Arc<PostgresStore>,
-        queue:             Arc<dyn Queue>,
-        agent_loop:        Arc<AgentLoop>,
-        metrics:           Arc<Metrics>,
+        id: usize,
+        store: Arc<PostgresStore>,
+        queue: Arc<dyn Queue>,
+        agent_loop: Arc<AgentLoop>,
+        metrics: Arc<Metrics>,
         workspace_manager: Arc<WorkspaceManager>,
-        services:          Arc<AgentServices>,
-        event_bus:         Arc<EventBus>,
+        services: Arc<AgentServices>,
+        event_bus: Arc<EventBus>,
     ) -> Self {
         Self { id, store, queue, agent_loop, metrics, workspace_manager, services, event_bus }
     }
@@ -48,7 +48,7 @@ impl Worker {
     pub async fn process_next(&self) -> Result<bool> {
         let task = match self.queue.dequeue().await? {
             Some(t) => t,
-            None    => return Ok(false),
+            None => return Ok(false),
         };
 
         tracing::debug!(worker = self.id, agent_id = %task.agent_id, "dequeued");
@@ -144,14 +144,11 @@ impl Worker {
     fn package_evidence_async(&self, agent_id: String, tenant_id: String, goal: String, status: String) {
         let evidence = match &self.services.evidence {
             Some(ep) => ep.clone(),
-            None     => return,
+            None => return,
         };
         let bus = self.event_bus.clone();
         tokio::spawn(async move {
-            match evidence
-                .package(&agent_id, &tenant_id, &goal, &status, serde_json::json!({ "auto": true }))
-                .await
-            {
+            match evidence.package(&agent_id, &tenant_id, &goal, &status, serde_json::json!({ "auto": true })).await {
                 Ok(pkg) => {
                     tracing::info!(
                         agent_id      = %agent_id,
@@ -161,7 +158,7 @@ impl Worker {
                     );
                     bus.publish(AgentEvent::EvidencePackaged {
                         agent_id,
-                        citations:     pkg.citations.len(),
+                        citations: pkg.citations.len(),
                         audit_entries: pkg.audit_entries.len(),
                     });
                 }
@@ -171,7 +168,7 @@ impl Worker {
     }
 
     fn archive_workspace_async(&self, agent_id: &str, tenant_id: &str) {
-        let wm  = self.workspace_manager.clone();
+        let wm = self.workspace_manager.clone();
         let aid = agent_id.to_string();
         let tid = tenant_id.to_string();
         tokio::spawn(async move {
@@ -193,7 +190,7 @@ impl Worker {
 
     fn mark_failed_async(&self, agent_id: &str) {
         let store = self.store.clone();
-        let id    = agent_id.to_string();
+        let id = agent_id.to_string();
         tokio::spawn(async move {
             if let Ok(Some(mut state)) = store.get_agent_internal(&id).await {
                 state.mark_failed();
@@ -213,14 +210,15 @@ mod tests {
 
     fn sample_plan() -> Plan {
         Plan {
-            goal:     "fix CI pipeline".into(),
+            goal: "fix CI pipeline".into(),
             job_type: Some("software_engineer".into()),
             steps: vec![crate::agent::planner::PlannedStep {
-                index:            0,
-                description:      "Inspect workflow".into(),
-                tool:             Some("file_read".into()),
-                tool_args:        None,
+                index: 0,
+                description: "Inspect workflow".into(),
+                tool: Some("file_read".into()),
+                tool_args: None,
                 success_criteria: "reviewed".into(),
+                condition: None,
             }],
             rationale: "inspect first".into(),
         }
@@ -236,9 +234,8 @@ mod tests {
 
     #[test]
     fn test_plan_on_agent_state_not_in_metadata() {
-        let mut state = crate::state::AgentState::new(
-            "agent-1".into(), "tenant-1".into(), "fix CI".into(), "/tmp/ws".into(),
-        );
+        let mut state =
+            crate::state::AgentState::new("agent-1".into(), "tenant-1".into(), "fix CI".into(), "/tmp/ws".into());
         state.plan = Some(sample_plan());
         assert!(state.metadata.get("plan").is_none(), "plan must not leak into metadata");
         assert_eq!(state.plan.as_ref().unwrap().goal, "fix CI pipeline");
@@ -246,9 +243,7 @@ mod tests {
 
     #[test]
     fn test_plan_field_none_on_new_agent() {
-        let state = crate::state::AgentState::new(
-            "agent-1".into(), "tenant-1".into(), "test".into(), "/tmp".into(),
-        );
+        let state = crate::state::AgentState::new("agent-1".into(), "tenant-1".into(), "test".into(), "/tmp".into());
         assert!(state.plan.is_none());
     }
 

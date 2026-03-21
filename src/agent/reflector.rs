@@ -165,6 +165,7 @@ mod tests {
                 tool: Some("file_read".into()),
                 tool_args: None,
                 success_criteria: "workflow reviewed".into(),
+                condition: None,
             }],
             rationale: "inspect first".into(),
         }
@@ -210,6 +211,7 @@ mod tests {
                     tool: Some("file_read".into()),
                     tool_args: None,
                     success_criteria: "workflow reviewed".into(),
+                    condition: None,
                 },
                 PlannedStep {
                     index: 1,
@@ -217,6 +219,7 @@ mod tests {
                     tool: Some("file_edit".into()),
                     tool_args: None,
                     success_criteria: "workflow fixed".into(),
+                    condition: None,
                 },
             ],
             rationale: "adapt remaining work".into(),
@@ -243,6 +246,7 @@ mod tests {
                     tool: Some("file_read".into()),
                     tool_args: None,
                     success_criteria: "workflow reviewed".into(),
+                    condition: None,
                 },
                 PlannedStep {
                     index: 1,
@@ -250,6 +254,7 @@ mod tests {
                     tool: Some("file_edit".into()),
                     tool_args: None,
                     success_criteria: "workflow fixed".into(),
+                    condition: None,
                 },
             ],
             rationale: "inspect then patch".into(),
@@ -284,6 +289,7 @@ mod tests {
                     tool: Some("file_read".into()),
                     tool_args: None,
                     success_criteria: "workflow reviewed".into(),
+                    condition: None,
                 },
                 PlannedStep {
                     index: 1,
@@ -291,6 +297,7 @@ mod tests {
                     tool: Some("file_edit".into()),
                     tool_args: None,
                     success_criteria: "workflow fixed".into(),
+                    condition: None,
                 },
                 PlannedStep {
                     index: 2,
@@ -298,6 +305,7 @@ mod tests {
                     tool: Some("shell".into()),
                     tool_args: None,
                     success_criteria: "tests green".into(),
+                    condition: None,
                 },
             ],
             rationale: "full repair flow".into(),

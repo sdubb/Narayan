@@ -2,12 +2,12 @@
 //! Covers: market research, competitive intel, M&A due diligence, scientific synthesis.
 //! Note: ResearchAnalyst JobType already exists — this adds the plugin wrapper.
 
-use std::sync::Arc;
 use crate::{
     connectors::notion::NotionConnector,
     policy::rules::{PolicyAction, PolicyCondition, PolicyRule, PolicyRuleSet},
     segments::registry::{SegmentPlugin, SegmentServices, SharedDeps},
 };
+use std::sync::Arc;
 
 pub fn plugin(deps: &SharedDeps, tenant_id: &str) -> SegmentPlugin {
     let mut rules = PolicyRuleSet::new(tenant_id.into());
@@ -25,16 +25,16 @@ pub fn plugin(deps: &SharedDeps, tenant_id: &str) -> SegmentPlugin {
     });
 
     SegmentPlugin {
-        id:   "research_intelligence",
+        id: "research_intelligence",
         name: "Research & Intelligence",
         connectors: vec![Arc::new(NotionConnector::new())],
         services: SegmentServices {
-            policy:    Some(deps.policy_engine.clone()),
+            policy: Some(deps.policy_engine.clone()),
             citations: Some(deps.citation_tracker.clone()),
-            reviews:   Some(deps.review_queue.clone()),
-            evidence:  Some(deps.evidence_packager.clone()),
-            pii:       Some(deps.pii_redactor.clone()),
-            sla:       None,
+            reviews: Some(deps.review_queue.clone()),
+            evidence: Some(deps.evidence_packager.clone()),
+            pii: Some(deps.pii_redactor.clone()),
+            sla: None,
         },
         policy_rules: rules,
         sla_policies: vec![],

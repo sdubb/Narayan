@@ -40,9 +40,7 @@ pub struct PolicyEngine {
 
 impl PolicyEngine {
     pub fn new() -> Self {
-        Self {
-            platform_rules: PolicyRuleSet::platform_defaults(),
-        }
+        Self { platform_rules: PolicyRuleSet::platform_defaults() }
     }
 
     /// Evaluate all applicable rules against the context.
@@ -85,22 +83,18 @@ impl PolicyEngine {
         // Condition matched — return the action as a decision
         Some(match &rule.action {
             PolicyAction::Allow => PolicyDecision::Allow,
-            PolicyAction::Block { reason } => PolicyDecision::Block {
-                rule_id: rule.id.clone(),
-                reason: reason.clone(),
-            },
-            PolicyAction::RequireApproval { message } => PolicyDecision::RequireApproval {
-                rule_id: rule.id.clone(),
-                message: message.clone(),
-            },
-            PolicyAction::Redact { fields } => PolicyDecision::Redact {
-                rule_id: rule.id.clone(),
-                fields: fields.clone(),
-            },
-            PolicyAction::Downgrade { to_model } => PolicyDecision::Downgrade {
-                rule_id: rule.id.clone(),
-                to_model: to_model.clone(),
-            },
+            PolicyAction::Block { reason } => {
+                PolicyDecision::Block { rule_id: rule.id.clone(), reason: reason.clone() }
+            }
+            PolicyAction::RequireApproval { message } => {
+                PolicyDecision::RequireApproval { rule_id: rule.id.clone(), message: message.clone() }
+            }
+            PolicyAction::Redact { fields } => {
+                PolicyDecision::Redact { rule_id: rule.id.clone(), fields: fields.clone() }
+            }
+            PolicyAction::Downgrade { to_model } => {
+                PolicyDecision::Downgrade { rule_id: rule.id.clone(), to_model: to_model.clone() }
+            }
         })
     }
 
@@ -109,28 +103,15 @@ impl PolicyEngine {
             PolicyCondition::Always => true,
             PolicyCondition::ToolIs { tool } => ctx.tool_name == *tool,
             PolicyCondition::PlanIs { plan } => ctx.plan == *plan,
-            PolicyCondition::RiskLevel { min_level } => {
-                risk_ord(&ctx.risk_level) >= risk_ord(min_level)
-            }
+            PolicyCondition::RiskLevel { min_level } => risk_ord(&ctx.risk_level) >= risk_ord(min_level),
             PolicyCondition::ArgThreshold { field, max } => {
-                ctx.tool_args
-                    .get(field)
-                    .and_then(|v| v.as_f64())
-                    .map(|v| v > *max)
-                    .unwrap_or(false)
+                ctx.tool_args.get(field).and_then(|v| v.as_f64()).map(|v| v > *max).unwrap_or(false)
             }
             PolicyCondition::ArgsMatch { pattern } => {
-                regex::Regex::new(pattern)
-                    .ok()
-                    .map(|re| re.is_match(&ctx.tool_args.to_string()))
-                    .unwrap_or(false)
+                regex::Regex::new(pattern).ok().map(|re| re.is_match(&ctx.tool_args.to_string())).unwrap_or(false)
             }
-            PolicyCondition::All { conditions } => {
-                conditions.iter().all(|c| self.matches_condition(c, ctx))
-            }
-            PolicyCondition::Any { conditions } => {
-                conditions.iter().any(|c| self.matches_condition(c, ctx))
-            }
+            PolicyCondition::All { conditions } => conditions.iter().all(|c| self.matches_condition(c, ctx)),
+            PolicyCondition::Any { conditions } => conditions.iter().any(|c| self.matches_condition(c, ctx)),
         }
     }
 }
@@ -199,9 +180,7 @@ mod tests {
             name: "Refunds over $50 need approval".into(),
             tools: vec!["api_call".into()],
             condition: PolicyCondition::ArgThreshold { field: "amount".into(), max: 50.0 },
-            action: PolicyAction::RequireApproval {
-                message: "Refund exceeds $50 — requires human approval".into(),
-            },
+            action: PolicyAction::RequireApproval { message: "Refund exceeds $50 — requires human approval".into() },
             enabled: true,
         });
 

@@ -104,13 +104,15 @@ impl AuditLog {
         .execute(&self.pool)
         .await?;
         sqlx::query("CREATE INDEX IF NOT EXISTS audit_log_tenant_id ON audit_log (tenant_id)")
-            .execute(&self.pool).await?;
+            .execute(&self.pool)
+            .await?;
         sqlx::query("CREATE INDEX IF NOT EXISTS audit_log_agent_id ON audit_log (agent_id)")
-            .execute(&self.pool).await?;
-        sqlx::query("CREATE INDEX IF NOT EXISTS audit_log_action ON audit_log (action)")
-            .execute(&self.pool).await?;
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS audit_log_action ON audit_log (action)").execute(&self.pool).await?;
         sqlx::query("CREATE INDEX IF NOT EXISTS audit_log_created_at ON audit_log (created_at)")
-            .execute(&self.pool).await?;
+            .execute(&self.pool)
+            .await?;
 
         // Immutable audit log — prevent UPDATE/DELETE via trigger
         sqlx::query(
@@ -122,8 +124,7 @@ impl AuditLog {
         )
         .execute(&self.pool)
         .await?;
-        sqlx::query("DROP TRIGGER IF EXISTS enforce_audit_immutability ON audit_log")
-            .execute(&self.pool).await?;
+        sqlx::query("DROP TRIGGER IF EXISTS enforce_audit_immutability ON audit_log").execute(&self.pool).await?;
         sqlx::query(
             "CREATE TRIGGER enforce_audit_immutability
                 BEFORE UPDATE OR DELETE ON audit_log
@@ -235,8 +236,7 @@ struct AuditRow {
 }
 
 fn row_to_entry(r: AuditRow) -> AuditEntry {
-    let action = serde_json::from_value(serde_json::Value::String(r.action.clone()))
-        .unwrap_or(AuditAction::Custom);
+    let action = serde_json::from_value(serde_json::Value::String(r.action.clone())).unwrap_or(AuditAction::Custom);
     AuditEntry {
         id: r.id,
         tenant_id: r.tenant_id,

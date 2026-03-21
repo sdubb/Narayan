@@ -94,14 +94,7 @@ impl CostTracker {
     }
 
     /// Record a completed LLM call — updates both agent and tenant usage.
-    pub async fn record(
-        &self,
-        tenant_id: &str,
-        agent_id: &str,
-        model: &str,
-        input_tokens: u32,
-        output_tokens: u32,
-    ) {
+    pub async fn record(&self, tenant_id: &str, agent_id: &str, model: &str, input_tokens: u32, output_tokens: u32) {
         let cost = self.pricing.get(model).map(|p| p.cost(input_tokens, output_tokens)).unwrap_or(0.0);
 
         // Update per-agent usage
@@ -130,10 +123,7 @@ impl CostTracker {
             entry.total_requests += 1;
         }
 
-        tracing::debug!(
-            tenant_id, agent_id, model, input_tokens, output_tokens, cost_usd = cost,
-            "LLM call recorded"
-        );
+        tracing::debug!(tenant_id, agent_id, model, input_tokens, output_tokens, cost_usd = cost, "LLM call recorded");
     }
 
     /// Check whether a tenant has exceeded their spend limit.
@@ -156,6 +146,11 @@ impl CostTracker {
         }
 
         SpendCheck::Ok
+    }
+
+    /// Calculate cost for a model call without recording it.
+    pub fn cost_for_model(&self, model: &str, input_tokens: u32, output_tokens: u32) -> f64 {
+        self.pricing.get(model).map(|p| p.cost(input_tokens, output_tokens)).unwrap_or(0.0)
     }
 
     pub async fn get_usage(&self, agent_id: &str) -> Option<AgentUsage> {

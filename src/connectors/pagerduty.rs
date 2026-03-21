@@ -33,8 +33,8 @@ impl Connector for PagerDutyConnector {
     async fn handle_inbound(&self, event: &ConnectorEvent, _config: &ConnectorConfig) -> Result<Option<String>> {
         match event.event_type.as_str() {
             "incident.triggered" => {
-                let id      = event.payload["id"].as_str().unwrap_or("unknown");
-                let title   = event.payload["title"].as_str().unwrap_or("incident");
+                let id = event.payload["id"].as_str().unwrap_or("unknown");
+                let title = event.payload["title"].as_str().unwrap_or("incident");
                 let service = event.payload["service"]["summary"].as_str().unwrap_or("unknown service");
                 let urgency = event.payload["urgency"].as_str().unwrap_or("high");
                 Ok(Some(format!(
@@ -49,9 +49,9 @@ impl Connector for PagerDutyConnector {
                 )))
             }
             "incident.resolved" => {
-                let id    = event.payload["id"].as_str().unwrap_or("unknown");
+                let id = event.payload["id"].as_str().unwrap_or("unknown");
                 let title = event.payload["title"].as_str().unwrap_or("incident");
-                let dur   = event.payload["duration_seconds"].as_u64().unwrap_or(0);
+                let dur = event.payload["duration_seconds"].as_u64().unwrap_or(0);
                 Ok(Some(format!(
                     "Prepare postmortem for resolved PagerDuty incident {id}: '{title}' ({dur}s duration). \
                      Gather: timeline of events, commands run, metrics during impact window, \
@@ -89,15 +89,18 @@ impl Connector for PagerDutyConnector {
         match delivery {
             "incident_note" => {
                 let url = format!("https://api.pagerduty.com/incidents/{external_id}/notes");
-                self.http.post(&url)
+                self.http
+                    .post(&url)
                     .header("Authorization", format!("Token token={key}"))
                     .header("Accept", "application/vnd.pagerduty+json;version=2")
                     .json(&serde_json::json!({ "note": { "content": output } }))
-                    .send().await?;
+                    .send()
+                    .await?;
             }
             "status_update" => {
                 let url = format!("https://api.pagerduty.com/incidents/{external_id}");
-                self.http.put(&url)
+                self.http
+                    .put(&url)
                     .header("Authorization", format!("Token token={key}"))
                     .header("Accept", "application/vnd.pagerduty+json;version=2")
                     .json(&serde_json::json!({
@@ -106,7 +109,8 @@ impl Connector for PagerDutyConnector {
                             "status_update": output,
                         }
                     }))
-                    .send().await?;
+                    .send()
+                    .await?;
             }
             _ => {
                 tracing::info!(incident_id = external_id, delivery, "PagerDuty output logged");
@@ -117,10 +121,13 @@ impl Connector for PagerDutyConnector {
 
     async fn validate_config(&self, config: &ConnectorConfig) -> Result<()> {
         let key = Self::api_key(config).ok_or_else(|| anyhow::anyhow!("missing api_key"))?;
-        let resp = self.http.get("https://api.pagerduty.com/abilities")
+        let resp = self
+            .http
+            .get("https://api.pagerduty.com/abilities")
             .header("Authorization", format!("Token token={key}"))
             .header("Accept", "application/vnd.pagerduty+json;version=2")
-            .send().await?;
+            .send()
+            .await?;
         if !resp.status().is_success() {
             anyhow::bail!("PagerDuty auth failed: {}", resp.status());
         }
@@ -129,5 +136,7 @@ impl Connector for PagerDutyConnector {
 }
 
 impl Default for PagerDutyConnector {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }

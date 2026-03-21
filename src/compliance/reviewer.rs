@@ -72,9 +72,11 @@ impl ReviewQueue {
         .execute(&self.pool)
         .await?;
         sqlx::query("CREATE INDEX IF NOT EXISTS review_queue_tenant ON review_queue (tenant_id, status)")
-            .execute(&self.pool).await?;
+            .execute(&self.pool)
+            .await?;
         sqlx::query("CREATE INDEX IF NOT EXISTS review_queue_agent ON review_queue (agent_id)")
-            .execute(&self.pool).await?;
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -118,12 +120,7 @@ impl ReviewQueue {
     }
 
     /// Approve or reject a review item.
-    pub async fn resolve(
-        &self,
-        review_id: &str,
-        status: ReviewStatus,
-        notes: Option<&str>,
-    ) -> Result<()> {
+    pub async fn resolve(&self, review_id: &str, status: ReviewStatus, notes: Option<&str>) -> Result<()> {
         sqlx::query(
             "UPDATE review_queue SET status = $1, reviewer_notes = $2, reviewed_at = NOW()
              WHERE id = $3",

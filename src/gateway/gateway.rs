@@ -79,6 +79,7 @@ pub struct NarayanGateway {
     /// Platform-level fallback providers — used when tenant has no key configured.
     /// In pure BYOK deployments this map is empty.
     fallback_providers: HashMap<String, Arc<dyn Provider>>,
+    event_bus: Option<Arc<crate::events::EventBus>>,
 }
 
 impl NarayanGateway {
@@ -90,7 +91,13 @@ impl NarayanGateway {
         rate_limiter: Arc<RateLimiter>,
         fallback_providers: HashMap<String, Arc<dyn Provider>>,
     ) -> Self {
-        Self { tenant_store, encrypt_key, cache, cost_tracker, rate_limiter, fallback_providers }
+        Self { tenant_store, encrypt_key, cache, cost_tracker, rate_limiter, fallback_providers, event_bus: None }
+    }
+
+    /// Attach an event bus for emitting cost tracking SSE events.
+    pub fn with_event_bus(mut self, bus: Arc<crate::events::EventBus>) -> Self {
+        self.event_bus = Some(bus);
+        self
     }
 
     /// Build a live provider from a tenant credential by decrypting the key.
@@ -212,7 +219,9 @@ impl LlmGateway for NarayanGateway {
                     anyhow::bail!(
                         "tenant '{}' has exceeded spend limit (${:.2} of ${:.2}). \
                          Upgrade your plan or wait for the next billing period.",
-                        request.tenant_id, current_usd, limit_usd
+                        request.tenant_id,
+                        current_usd,
+                        limit_usd
                     );
                 }
                 SpendCheck::Warning { limit_usd, current_usd, pct_used } => {
@@ -243,13 +252,7 @@ impl LlmGateway for NarayanGateway {
             .messages
             .iter()
             .enumerate()
-            .map(|(idx, msg)| {
-                format!(
-                    "#{idx} role={:?} content={}",
-                    msg.role,
-                    truncate_for_log(&msg.content, 800)
-                )
-            })
+            .map(|(idx, msg)| format!("#{idx} role={:?} content={}", msg.role, truncate_for_log(&msg.content, 800)))
             .collect();
         let tool_names: Vec<&str> = request.tools.iter().map(|tool| tool.name.as_str()).collect();
 
@@ -280,9 +283,30 @@ impl LlmGateway for NarayanGateway {
         })?;
 
         // 6. Track cost against tenant + agent
+        let cost_delta = self.cost_tracker.cost_for_model(&provider_name, response.input_tokens, response.output_tokens);
         self.cost_tracker
-            .record(&request.tenant_id, &request.agent_id, &provider_name, response.input_tokens, response.output_tokens)
+            .record(
+                &request.tenant_id,
+                &request.agent_id,
+                &provider_name,
+                response.input_tokens,
+                response.output_tokens,
+            )
             .await;
+
+        // 7. Emit live cost update SSE event
+        if let Some(ref bus) = self.event_bus {
+            let usage = self.cost_tracker.get_usage(&request.agent_id).await;
+            bus.publish(crate::events::AgentEvent::LlmCostUpdate {
+                agent_id: request.agent_id.clone(),
+                model: provider_name.clone(),
+                input_tokens: response.input_tokens,
+                output_tokens: response.output_tokens,
+                cost_delta_usd: cost_delta,
+                total_cost_usd: usage.as_ref().map(|u| u.total_cost_usd).unwrap_or(cost_delta),
+                total_requests: usage.as_ref().map(|u| u.total_requests).unwrap_or(1),
+            });
+        }
 
         tracing::debug!(
             agent_id       = %request.agent_id,
@@ -295,13 +319,7 @@ impl LlmGateway for NarayanGateway {
         let tool_summaries: Vec<String> = response
             .tool_calls
             .iter()
-            .map(|tool| {
-                format!(
-                    "{} {}",
-                    tool.name,
-                    truncate_for_log(&tool.arguments.to_string(), 600)
-                )
-            })
+            .map(|tool| format!("{} {}", tool.name, truncate_for_log(&tool.arguments.to_string(), 600)))
             .collect();
 
         tracing::info!(

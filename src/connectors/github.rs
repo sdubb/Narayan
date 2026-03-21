@@ -17,9 +17,7 @@ pub struct GitHubConnector {
 
 impl GitHubConnector {
     pub fn new() -> Self {
-        Self {
-            http: reqwest::Client::new(),
-        }
+        Self { http: reqwest::Client::new() }
     }
 
     fn api_token(config: &ConnectorConfig) -> Option<String> {
@@ -68,10 +66,7 @@ impl Connector for GitHubConnector {
                 let body = event.payload["comment"]["body"].as_str().unwrap_or("");
                 if body.contains("@narayan") {
                     let issue_title = event.payload["issue"]["title"].as_str().unwrap_or("issue");
-                    return Ok(Some(format!(
-                        "Respond to comment on '{}': {}",
-                        issue_title, body
-                    )));
+                    return Ok(Some(format!("Respond to comment on '{}': {}", issue_title, body)));
                 }
                 Ok(None)
             }
@@ -79,10 +74,7 @@ impl Connector for GitHubConnector {
                 let action = event.payload.get("action").and_then(|v| v.as_str()).unwrap_or("");
                 if action == "requested_action" {
                     let name = event.payload["check_run"]["name"].as_str().unwrap_or("check");
-                    return Ok(Some(format!(
-                        "Run CI check '{}' and report results.",
-                        name
-                    )));
+                    return Ok(Some(format!("Run CI check '{}' and report results.", name)));
                 }
                 Ok(None)
             }
@@ -105,10 +97,7 @@ impl Connector for GitHubConnector {
 
         match delivery_type {
             "pr_review" => {
-                let url = format!(
-                    "https://api.github.com/repos/{}/pulls/{}/reviews",
-                    repo, external_id
-                );
+                let url = format!("https://api.github.com/repos/{}/pulls/{}/reviews", repo, external_id);
                 self.http
                     .post(&url)
                     .header("Authorization", format!("Bearer {}", token))
@@ -123,10 +112,7 @@ impl Connector for GitHubConnector {
             }
             _ => {
                 // Default: post as issue/PR comment
-                let url = format!(
-                    "https://api.github.com/repos/{}/issues/{}/comments",
-                    repo, external_id
-                );
+                let url = format!("https://api.github.com/repos/{}/issues/{}/comments", repo, external_id);
                 self.http
                     .post(&url)
                     .header("Authorization", format!("Bearer {}", token))
