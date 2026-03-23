@@ -12,6 +12,13 @@ use crate::tools::{ParameterSchema, Tool, ToolResult};
 
 pub struct WasmCallTool;
 
+const DEFAULT_TIMEOUT_SECS: u64 = 3;
+const MAX_TIMEOUT_SECS: u64 = 15;
+const DEFAULT_FUEL: u64 = 3_000_000;
+const MAX_FUEL: u64 = 20_000_000;
+const DEFAULT_MEMORY_LIMIT_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_MEMORY_LIMIT_BYTES: u64 = 64 * 1024 * 1024;
+
 #[async_trait]
 impl Tool for WasmCallTool {
     fn name(&self) -> &str {
@@ -28,7 +35,13 @@ impl Tool for WasmCallTool {
             ParameterSchema::optional("bytes_b64", "string", "Base64-encoded .wasm bytes."),
             ParameterSchema::required("function", "string", "Name of the exported function to call."),
             ParameterSchema::optional("args", "array", "Function arguments as numbers or strings ('1', '3.14')."),
-            ParameterSchema::optional("fuel", "integer", "Max instructions. Omit for unlimited."),
+            ParameterSchema::optional("fuel", "integer", "Max fuel (default: 3,000,000; max: 20,000,000)."),
+            ParameterSchema::optional("timeout_secs", "integer", "Hard timeout in seconds (default: 3, max: 15)."),
+            ParameterSchema::optional(
+                "memory_limit_bytes",
+                "integer",
+                "Linear memory limit in bytes (default: 16MB, max: 64MB).",
+            ),
         ]
     }
 
@@ -54,15 +67,28 @@ impl Tool for WasmCallTool {
             None => return Ok(ToolResult::err("'function' is required")),
         };
 
-        let fuel = args["fuel"].as_u64();
+        let fuel = args["fuel"]
+            .as_u64()
+            .unwrap_or(DEFAULT_FUEL)
+            .clamp(100_000, MAX_FUEL);
+        let timeout_secs = args["timeout_secs"]
+            .as_u64()
+            .unwrap_or(DEFAULT_TIMEOUT_SECS)
+            .clamp(1, MAX_TIMEOUT_SECS);
+        let memory_limit_bytes = args["memory_limit_bytes"]
+            .as_u64()
+            .unwrap_or(DEFAULT_MEMORY_LIMIT_BYTES)
+            .clamp(1 * 1024 * 1024, MAX_MEMORY_LIMIT_BYTES);
         let raw_args: Vec<serde_json::Value> = args["args"].as_array().cloned().unwrap_or_default();
 
-        let join = tokio::task::spawn_blocking(move || call_wasm_func(bytes, func_name, raw_args, fuel));
+        let join =
+            tokio::task::spawn_blocking(move || call_wasm_func(bytes, func_name, raw_args, fuel, memory_limit_bytes));
 
-        match join.await {
-            Ok(Ok(v)) => Ok(ToolResult::ok(v)),
-            Ok(Err(e)) => Ok(ToolResult::err(format!("wasm_call error: {}", e))),
-            Err(e) => Ok(ToolResult::err(format!("thread panic: {}", e))),
+        match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), join).await {
+            Err(_) => Ok(ToolResult::err(format!("timed out after {}s", timeout_secs))),
+            Ok(Ok(Ok(v))) => Ok(ToolResult::ok(v)),
+            Ok(Ok(Err(e))) => Ok(ToolResult::err(format!("wasm_call error: {}", e))),
+            Ok(Err(e)) => Ok(ToolResult::err(format!("thread panic: {}", e))),
         }
     }
 }
@@ -71,7 +97,8 @@ fn call_wasm_func(
     bytes: Vec<u8>,
     func_name: String,
     raw_args: Vec<serde_json::Value>,
-    fuel: Option<u64>,
+    fuel: u64,
+    memory_limit_bytes: u64,
 ) -> anyhow::Result<serde_json::Value> {
     use std::time::Instant;
 
@@ -80,17 +107,20 @@ fn call_wasm_func(
     let t0 = Instant::now();
     let mut cfg = Config::new();
     cfg.async_support(false);
-    if fuel.is_some() {
-        cfg.consume_fuel(true);
-    }
+    cfg.consume_fuel(true);
     let engine = Engine::new(&cfg)?;
 
     let module = Module::from_binary(&engine, &bytes)?;
-    let mut store: Store<()> = Store::new(&engine, ());
-    if let Some(f) = fuel {
-        store.set_fuel(f)?;
-    }
-    let linker: Linker<()> = Linker::new(&engine);
+    let limits = StoreLimitsBuilder::new()
+        .memory_size((memory_limit_bytes.min(usize::MAX as u64)) as usize)
+        .instances(1)
+        .tables(2)
+        .memories(1)
+        .build();
+    let mut store: Store<wasmtime::StoreLimits> = Store::new(&engine, limits);
+    store.limiter(|limits| limits);
+    store.set_fuel(fuel)?;
+    let linker: Linker<wasmtime::StoreLimits> = Linker::new(&engine);
     let instance = linker.instantiate(&mut store, &module)?;
 
     let func = instance
@@ -109,7 +139,7 @@ fn call_wasm_func(
     let mut results = vec![Val::I32(0); func_ty.results().len()];
     func.call(&mut store, &wasm_args, &mut results)?;
 
-    let fuel_used = fuel.and_then(|f| store.get_fuel().ok().map(|r| f.saturating_sub(r)));
+    let fuel_used = store.get_fuel().ok().map(|remaining| fuel.saturating_sub(remaining));
     let elapsed_ms = t0.elapsed().as_millis() as u64;
 
     let result_vals: Vec<serde_json::Value> = results.iter().map(val_to_json).collect();
@@ -120,6 +150,8 @@ fn call_wasm_func(
         "result":     result,
         "elapsed_ms": elapsed_ms,
         "fuel_used":  fuel_used,
+        "fuel_limit": fuel,
+        "memory_limit_bytes": memory_limit_bytes,
         "success":    true,
     }))
 }

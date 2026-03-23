@@ -30,7 +30,7 @@ use crate::{
     agent::definition::{
         AgentDefinition, AgentDefinitionStatus, AgentRole, ConnectorAuthType, EndpointDef,
         OutputDestination, OutputFormat, OutputSpec, PlanModeMessage, PlanModePhase,
-        PlanModeSession, RoleCategory, RoleStatus, TenantConnector, TriggerDef, TriggerType,
+        PlanModeSession, RoleCategory, RoleStatus, TenantConnector, TenantWasmTool, TriggerDef, TriggerType,
     },
     connectors::ConnectorInstallStore,
     gateway::{GatewayRequest, LlmGateway, TaskComplexity},
@@ -86,6 +86,7 @@ Respond ONLY with valid JSON. Schema:
   "category": "sales_revops|customer_support|devops|finance_accounting|hr_people_ops|legal_contract|research_analyst|software_engineer|marketing|general",
   "preferred_tool_categories": ["tool category names such as data, web, automation"],
   "preferred_tools": ["exact tool names from the capability directory only"],
+  "candidate_wasm_tools": ["exact registered tenant WASM tool names when custom deterministic logic is needed"],
   "needed_connector_categories": ["connector category suffixes such as crm, support, communication"],
   "candidate_connectors": ["exact installed or built-in connector names if likely"],
   "missing_capabilities": ["custom_db|custom_api|connector/<category>|tool/<category>"],
@@ -111,6 +112,7 @@ Respond ONLY with valid JSON. Schema:
 
 Rules:
 - Use exact tool names only from the capability directory or detailed context
+- Use candidate_wasm_tools only from the listed registered tenant WASM tools
 - Use exact connector names only when they are clearly supported by the context
 - If the user likely needs a database not in the installed connectors, prefer missing_capabilities=["custom_db"]
 - If the user likely needs a custom REST backend, prefer missing_capabilities=["custom_api"]
@@ -155,6 +157,7 @@ Detailed capability context:
 Rules:
 - Preserve the original business intent unless the detailed context proves it impossible
 - Fill preferred_tools with exact tool names only when the tool is clearly relevant
+- Fill candidate_wasm_tools with exact names only when custom deterministic logic is clearly needed
 - Fill candidate_connectors with exact names only when the connector is clearly relevant
 - Keep missing_capabilities accurate if no installed/custom option satisfies the need
 - Keep workflow_outline ordered and practical
@@ -422,6 +425,13 @@ fn terms_match_connector(all_terms: &[&str], tc: &TenantConnector) -> bool {
     })
 }
 
+fn contains_connector_name(answer_lower: &str, connector_name: &str) -> bool {
+    let name = connector_name.to_ascii_lowercase();
+    answer_lower
+        .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_' && ch != '-')
+        .any(|token| token == name)
+}
+
 // ── PlanModeManager ────────────────────────────────────────────────────────
 
 /// Manages the multi-turn plan mode conversation.
@@ -560,6 +570,8 @@ impl PlanModeManager {
                 self.handle_clarifications(&mut session, user_message).await?
             }
             PlanModePhase::CapturingConstraints => {
+                // Compatibility fallback phase: newer flows generally capture
+                // constraints inside the clarification step pipeline.
                 self.handle_constraints(&mut session, user_message).await?
             }
             PlanModePhase::Reviewing => {
@@ -600,16 +612,26 @@ impl PlanModeManager {
             .list_tenant_connectors(&session.tenant_id)
             .await
             .unwrap_or_default();
+        let tenant_wasm_tools = self.store
+            .list_tenant_wasm_tools(&session.tenant_id)
+            .await
+            .unwrap_or_default();
 
-        let capability_directory = build_capability_directory(&self.tools, &installed, &tenant_connectors);
+        let capability_directory =
+            build_capability_directory(&self.tools, &installed, &tenant_connectors, &tenant_wasm_tools);
         let initial_intent = self.extractor.extract_initial(
             &session.id,
             &session.tenant_id,
             description,
             &capability_directory,
         ).await?;
-        let detail_context =
-            build_detailed_capability_context(&self.tools, &initial_intent, &installed, &tenant_connectors);
+        let detail_context = build_detailed_capability_context(
+            &self.tools,
+            &initial_intent,
+            &installed,
+            &tenant_connectors,
+            &tenant_wasm_tools,
+        );
         let intent = if detail_context.trim().is_empty() {
             initial_intent
         } else {
@@ -650,8 +672,19 @@ impl PlanModeManager {
                 inferred_tools.push(tool_override.clone());
             }
         }
+        let enabled_wasm_names = enabled_wasm_tool_names(&tenant_wasm_tools);
+        let inferred_wasm_candidates = inferred_wasm_tool_candidates(&intent, &enabled_wasm_names);
+        if !inferred_wasm_candidates.is_empty() {
+            apply_wasm_tool_scope(&mut role, &inferred_wasm_candidates);
+        }
         if !inferred_tools.is_empty() {
-            role.tools = inferred_tools;
+            for tool_name in inferred_tools {
+                if !role.tools.iter().any(|tool| tool == &tool_name) {
+                    role.tools.push(tool_name);
+                }
+            }
+            role.tools.sort();
+            role.tools.dedup();
         }
 
         // Build execution guidelines from actions
@@ -686,44 +719,175 @@ impl PlanModeManager {
         role.trigger = parsed_trigger;
         role.trigger.confidence = confidence;
 
+        let pending_custom_tool_categories = missing_tool_categories(&intent)
+            .into_iter()
+            .filter(|category| !category.trim().is_empty())
+            .collect::<Vec<_>>();
+        let custom_tool_resolution_pending =
+            !pending_custom_tool_categories.is_empty() && inferred_wasm_candidates.is_empty();
+
         session.draft_role = Some(role);
 
         // Cache the extracted intent — used throughout all subsequent phases
-        session.intent_cache = Some(intent.clone());
+        let mut cached_intent = intent.clone();
+        if let Some(object) = cached_intent.as_object_mut() {
+            if clarifying_q.is_some() {
+                object.insert("_pending_connector_resolution".into(), serde_json::json!(true));
+            }
+            if custom_tool_resolution_pending {
+                object.insert(
+                    "_pending_custom_tool_categories".into(),
+                    serde_json::json!(pending_custom_tool_categories),
+                );
+            }
+        }
+        session.intent_cache = Some(cached_intent.clone());
 
-        if let Some(q) = clarifying_q {
+        if clarifying_q.is_some() || custom_tool_resolution_pending {
             session.phase = PlanModePhase::ResolvingConnectors;
-            return Ok(q);
+            let mut questions: Vec<String> = Vec::new();
+            if let Some(q) = clarifying_q {
+                questions.push(q);
+            }
+            if custom_tool_resolution_pending {
+                if enabled_wasm_names.is_empty() {
+                    questions.push(
+                        "This role needs custom deterministic logic, but no enabled tenant WASM tool is available yet. \
+Please create and test a custom tool in plan mode settings, then reply 'done'."
+                            .into(),
+                    );
+                } else {
+                    questions.push(format!(
+                        "This role needs custom deterministic logic. Which registered WASM tool should be approved for this role? \
+Reply with one exact name: {}",
+                        enabled_wasm_names.join(", ")
+                    ));
+                }
+            }
+            return Ok(questions.join("\n\n"));
         }
 
         // Move to the combined clarifications phase — steps queue drives it
         session.phase = PlanModePhase::CapturingClarifications;
-        Ok(self.build_step_queue_and_ask(session, &intent).await)
+        Ok(self.build_step_queue_and_ask(session, &cached_intent).await)
     }
     async fn handle_connector_clarification(
         &self,
         session: &mut PlanModeSession,
         answer: &str,
     ) -> Result<String> {
-        // User picked a specific connector — update role.connectors
+        let answer_lower = answer.to_lowercase();
+        let mut pending_connector_resolution = false;
+        let mut pending_custom_tool_categories: Vec<String> = Vec::new();
+        if let Some(intent) = session.intent_cache.as_ref() {
+            pending_connector_resolution = intent["_pending_connector_resolution"].as_bool().unwrap_or(false);
+            pending_custom_tool_categories = intent["_pending_custom_tool_categories"]
+                .as_array()
+                .map(|arr| arr.iter().filter_map(|value| value.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+        }
+
         if let Some(role) = session.draft_role.as_mut() {
-            let answer_lower = answer.to_lowercase();
-            // Find matching built-in connector by name mention
-            for entry in BUILTIN_CONNECTORS {
-                if answer_lower.contains(entry.name) || answer_lower.contains(entry.summary.to_lowercase().as_str()) {
-                    // Replace category duplicates with the chosen one
-                    role.connectors.retain(|c| {
+            if !pending_custom_tool_categories.is_empty() {
+                let tenant_wasm_tools = self
+                    .store
+                    .list_tenant_wasm_tools(&session.tenant_id)
+                    .await
+                    .unwrap_or_default();
+                let enabled_wasm_tools = enabled_wasm_tool_names(&tenant_wasm_tools);
+
+                if enabled_wasm_tools.is_empty() {
+                    session.phase = PlanModePhase::ResolvingConnectors;
+                    return Ok(
+                        "I still don't see any enabled tenant WASM tools for this workspace. \
+Please create and test one in plan mode settings, then reply 'done'."
+                            .into(),
+                    );
+                }
+
+                let matched_wasm: Vec<String> = enabled_wasm_tools
+                    .iter()
+                    .filter(|name| contains_connector_name(&answer_lower, name))
+                    .cloned()
+                    .collect();
+
+                if matched_wasm.len() > 1 {
+                    session.phase = PlanModePhase::ResolvingConnectors;
+                    return Ok(format!(
+                        "I found multiple WASM tool names in your answer: {}. Please reply with one exact tool name.",
+                        matched_wasm.join(", ")
+                    ));
+                }
+
+                let selected = if let Some(name) = matched_wasm.first() {
+                    vec![name.clone()]
+                } else if enabled_wasm_tools.len() == 1
+                    && (answer_lower.contains("done") || answer_lower.contains("use"))
+                {
+                    vec![enabled_wasm_tools[0].clone()]
+                } else {
+                    Vec::new()
+                };
+
+                if selected.is_empty() {
+                    session.phase = PlanModePhase::ResolvingConnectors;
+                    return Ok(format!(
+                        "Please reply with one exact registered WASM tool name for this role: {}",
+                        enabled_wasm_tools.join(", ")
+                    ));
+                }
+
+                apply_wasm_tool_scope(role, &selected);
+                if let Some(intent) = session.intent_cache.as_mut().and_then(|value| value.as_object_mut()) {
+                    intent.remove("_pending_custom_tool_categories");
+                }
+                pending_custom_tool_categories.clear();
+            }
+
+            if pending_connector_resolution {
+                let matched: Vec<&crate::tools::connector_tool::ConnectorDef> = BUILTIN_CONNECTORS
+                    .iter()
+                    .filter(|entry| contains_connector_name(&answer_lower, entry.name))
+                    .collect();
+
+                if matched.len() > 1 {
+                    let choices = matched.iter().map(|entry| entry.name).collect::<Vec<_>>().join(", ");
+                    session.phase = PlanModePhase::ResolvingConnectors;
+                    return Ok(format!(
+                        "I found multiple connector names in your answer: {}. Please reply with one exact connector name.",
+                        choices
+                    ));
+                }
+
+                if let Some(entry) = matched.first().copied() {
+                    role.connectors.retain(|connector_name| {
                         BUILTIN_CONNECTORS
                             .iter()
-                            .find(|e| e.name == c.as_str())
-                            .map(|e| e.category != entry.category)
+                            .find(|candidate| candidate.name == connector_name.as_str())
+                            .map(|candidate| candidate.category != entry.category)
                             .unwrap_or(true)
                     });
                     role.connectors.push(entry.name.to_string());
+                    role.connectors.sort();
+                    role.connectors.dedup();
                     session.draft_agent.connectors = role.connectors.clone();
-                    break;
+                    if let Some(intent) = session.intent_cache.as_mut().and_then(|value| value.as_object_mut()) {
+                        intent.remove("_pending_connector_resolution");
+                    }
+                    pending_connector_resolution = false;
+                } else {
+                    session.phase = PlanModePhase::ResolvingConnectors;
+                    return Ok(
+                        "Please reply with the exact connector name to use (for example: salesforce, hubspot, zendesk)."
+                            .into()
+                    );
                 }
             }
+        }
+
+        if !pending_custom_tool_categories.is_empty() || pending_connector_resolution {
+                session.phase = PlanModePhase::ResolvingConnectors;
+            return Ok("Please confirm the pending connector/custom-tool setup first.".into());
         }
 
         // Regenerate the step queue now that the connector is confirmed
@@ -910,6 +1074,8 @@ impl PlanModeManager {
                     parts.push(format!("database '{}'", db_name));
                 } else if let Some(api_name) = t.strip_prefix("external_api:") {
                     parts.push(format!("REST API '{}'", api_name));
+                } else if let Some(wasm_name) = t.strip_prefix("wasm_tool:") {
+                    parts.push(format!("approved custom WASM tool '{}'", wasm_name));
                 } else {
                     parts.push(t.clone());
                 }
@@ -1092,11 +1258,16 @@ fn build_capability_directory(
     registry: &ToolRegistry,
     installed: &[String],
     tenant_connectors: &[TenantConnector],
+    tenant_wasm_tools: &[TenantWasmTool],
 ) -> String {
     let mut lines: Vec<String> = vec![
         "Use categories first. Do not assume every connector is installed or every tool is needed.".into(),
         "Only installed connectors and registered custom connections are immediately usable.".into(),
         "If no installed connector fits, prefer missing_capabilities such as custom_db, custom_api, or connector/<category>.".into(),
+        "Tool category quick map 1: filesystem=shell,file_read,file_write,file_edit,glob_search,content_search; web=web_search_tool,web_fetch,http_request,browser,browser_interact,browser_pdf".into(),
+        "Tool category quick map 2: code=code_run,diff,patch,git_operations,sql_query,run_registered_wasm; data=data_extractor,pdf_read,pdf_create,spreadsheet_read,spreadsheet_write,image_process,image_info".into(),
+        "Tool category quick map 3: memory=memory_store,memory_recall,memory_forget,vector_store,vector_search,vector_delete; infra=docker,kubernetes,ssh_exec,process_monitor".into(),
+        "Tool category quick map 4: integration=mcp_session,search_mcp_registry,acp_session,api_call,register_api_tool; communication=email,notification,pushover,ask_user; security=crypto_tool,plane_guard,request_credential; automation=schedule,cron_add,cron_list,cron_remove,cron_run,delegate".into(),
     ];
 
     let mut tool_categories: Vec<(String, Vec<String>)> = registry.by_category()
@@ -1106,7 +1277,11 @@ fn build_capability_directory(
             (
                 category.to_string(),
                 names.into_iter()
-                    .filter(|name| !name.starts_with("request_more_") && *name != "list_connectors_in_category")
+                    .filter(|name| {
+                        !name.starts_with("request_more_")
+                            && *name != "list_connectors_in_category"
+                            && *name != "create_workspace_tool"
+                    })
                     .take(4)
                     .map(String::from)
                     .collect(),
@@ -1139,6 +1314,30 @@ fn build_capability_directory(
         lines.push(custom_context);
     }
 
+    let enabled_wasm_tools: Vec<&TenantWasmTool> = tenant_wasm_tools.iter().filter(|tool| tool.enabled).collect();
+    if !enabled_wasm_tools.is_empty() {
+        lines.push("Registered tenant WASM tools (pre-approved deterministic custom logic):".into());
+        for tool in enabled_wasm_tools.iter().take(8) {
+            lines.push(format!(
+                "  - {} (v{}, timeout={}s, memory={} bytes): {}",
+                tool.name,
+                tool.version,
+                tool.limits.timeout_secs,
+                tool.limits.max_memory_bytes,
+                tool.description
+            ));
+        }
+        lines.push(
+            "Use candidate_wasm_tools to reference these by exact name when custom deterministic logic is required."
+                .into(),
+        );
+    } else {
+        lines.push(
+            "No registered tenant WASM tools currently enabled. If custom deterministic logic is required, plan mode should request tool setup before deployment."
+                .into(),
+        );
+    }
+
     lines.join("\n")
 }
 
@@ -1147,6 +1346,7 @@ fn build_detailed_capability_context(
     intent: &serde_json::Value,
     installed: &[String],
     tenant_connectors: &[TenantConnector],
+    tenant_wasm_tools: &[TenantWasmTool],
 ) -> String {
     let mut lines: Vec<String> = Vec::new();
 
@@ -1239,6 +1439,24 @@ fn build_detailed_capability_context(
         ));
     }
 
+    let requested_wasm_tools: Vec<String> = intent["candidate_wasm_tools"]
+        .as_array()
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    for tool_name in requested_wasm_tools {
+        if let Some(tool) = tenant_wasm_tools.iter().find(|tool| tool.name == tool_name) {
+            lines.push(format!(
+                "Registered WASM tool '{}': enabled={} version={} timeout={}s memory={} bytes exports={}",
+                tool.name,
+                tool.enabled,
+                tool.version,
+                tool.limits.timeout_secs,
+                tool.limits.max_memory_bytes,
+                tool.exports.join(", ")
+            ));
+        }
+    }
+
     lines.join("\n")
 }
 
@@ -1255,13 +1473,91 @@ fn inferred_preferred_tools(registry: &ToolRegistry, intent: &serde_json::Value)
         .unwrap_or_default()
 }
 
+fn enabled_wasm_tool_names(tenant_wasm_tools: &[TenantWasmTool]) -> Vec<String> {
+    let mut out: Vec<String> = tenant_wasm_tools
+        .iter()
+        .filter(|tool| tool.enabled)
+        .map(|tool| tool.name.clone())
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn inferred_wasm_tool_candidates(intent: &serde_json::Value, enabled_names: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = intent["candidate_wasm_tools"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|value| value.as_str())
+                .filter(|name| enabled_names.iter().any(|candidate| candidate == *name))
+                .map(String::from)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn missing_tool_categories(intent: &serde_json::Value) -> Vec<String> {
+    let mut out: Vec<String> = intent["missing_capabilities"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|value| value.as_str())
+                .filter_map(|value| value.strip_prefix("tool/"))
+                .map(String::from)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn apply_wasm_tool_scope(role: &mut AgentRole, wasm_tool_names: &[String]) {
+    if wasm_tool_names.is_empty() {
+        return;
+    }
+
+    if !role.tools.iter().any(|tool| tool == "run_registered_wasm") {
+        role.tools.push("run_registered_wasm".into());
+    }
+    for tool_name in wasm_tool_names {
+        let scoped = format!("wasm_tool:{}", tool_name);
+        if !role.tools.iter().any(|tool| tool == &scoped) {
+            role.tools.push(scoped);
+        }
+    }
+    role.tools.sort();
+    role.tools.dedup();
+
+    role.execution_guidelines.remove_rules_with_prefix("Use only these registered WASM tools when custom deterministic logic is needed:");
+    role.execution_guidelines.add_rule(crate::agent::definition::GuidelineRule::always(format!(
+        "Use only these registered WASM tools when custom deterministic logic is needed: {}.",
+        wasm_tool_names.join(", ")
+    )));
+    role.execution_guidelines.add_rule(crate::agent::definition::GuidelineRule::always(
+        "Do not create or compile new custom tools during runtime; use only plan-mode-approved registered WASM tools.",
+    ));
+}
+
 fn apply_execution_hints(role: &mut AgentRole, intent: &serde_json::Value) {
+    const TOOL_CATEGORY_RULE_PREFIX: &str = "Prefer these tool categories when relevant:";
+    const CONNECTOR_CATEGORY_RULE_PREFIX: &str = "Prefer connectors from these categories when relevant:";
+
+    // Clear old hint-derived rules so refreshes/reconfiguration do not leave stale copies.
+    role.execution_guidelines.remove_rules_with_prefix(TOOL_CATEGORY_RULE_PREFIX);
+    role.execution_guidelines.remove_rules_with_prefix(CONNECTOR_CATEGORY_RULE_PREFIX);
+    role.execution_guidelines.remove_priority_prefix("step: ");
+
     let workflow_outline: Vec<String> = intent["workflow_outline"]
         .as_array()
         .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
         .unwrap_or_default();
     for item in workflow_outline.into_iter().take(5) {
-        role.execution_guidelines.add_priority(item);
+        role.execution_guidelines.add_priority(format!("step: {}", item.trim()));
     }
 
     let tool_categories: Vec<String> = intent["preferred_tool_categories"]
@@ -1821,5 +2117,52 @@ mod tests {
     fn test_build_custom_context_empty() {
         let ctx = build_custom_context(&[], &[]);
         assert!(ctx.is_empty());
+    }
+
+    #[test]
+    fn test_contains_connector_name_matches_token_only() {
+        assert!(contains_connector_name("please use hubspot for this", "hubspot"));
+        assert!(!contains_connector_name("please use hubspots for this", "hubspot"));
+    }
+
+    #[test]
+    fn test_apply_execution_hints_replaces_old_category_rules_and_round_trips() {
+        let mut role = AgentRole::new(
+            "role-1".into(),
+            "agent-1".into(),
+            "tenant-1".into(),
+            "Primary Role".into(),
+        );
+        role.execution_guidelines.add_rule(crate::agent::definition::GuidelineRule::always(
+            "Prefer these tool categories when relevant: web."
+        ));
+        role.execution_guidelines.add_rule(crate::agent::definition::GuidelineRule::always(
+            "Prefer connectors from these categories when relevant: crm."
+        ));
+        role.execution_guidelines.add_priority("step: old sequencing".into());
+
+        let intent = serde_json::json!({
+            "preferred_tool_categories": ["data", "web"],
+            "needed_connector_categories": ["support", "crm"],
+            "workflow_outline": ["fetch source records", "transform", "write destination"]
+        });
+        apply_execution_hints(&mut role, &intent);
+
+        assert_eq!(
+            role.execution_guidelines.preferred_tool_categories(),
+            vec!["data".to_string(), "web".to_string()]
+        );
+        assert_eq!(
+            role.execution_guidelines.preferred_connector_categories(),
+            vec!["crm".to_string(), "support".to_string()]
+        );
+        assert_eq!(
+            role.execution_guidelines.workflow_hints(),
+            vec![
+                "fetch source records".to_string(),
+                "transform".to_string(),
+                "write destination".to_string(),
+            ]
+        );
     }
 }

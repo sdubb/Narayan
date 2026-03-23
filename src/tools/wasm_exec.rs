@@ -4,14 +4,20 @@
 //!   - stdin/stdout/stderr captured in memory
 //!   - Filesystem scoped to workspace dir only  
 //!   - Allowlisted env vars only
-//!   - Optional fuel metering to cap instruction count
-//!   - Optional TCP networking (off by default)
+//!   - Strict fuel + timeout + memory limits
 
 use async_trait::async_trait;
 
 use crate::tools::{ParameterSchema, Tool, ToolResult};
 
 pub struct WasmExecTool;
+
+const DEFAULT_TIMEOUT_SECS: u64 = 3;
+const MAX_TIMEOUT_SECS: u64 = 15;
+const DEFAULT_FUEL: u64 = 5_000_000;
+const MAX_FUEL: u64 = 20_000_000;
+const DEFAULT_MEMORY_LIMIT_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_MEMORY_LIMIT_BYTES: u64 = 64 * 1024 * 1024;
 
 #[async_trait]
 impl Tool for WasmExecTool {
@@ -32,9 +38,21 @@ impl Tool for WasmExecTool {
             ParameterSchema::optional("args", "array", "Command-line arguments passed to the module."),
             ParameterSchema::optional("env", "object", "Environment variables: {KEY: value}."),
             ParameterSchema::optional("workspace", "string", "Directory mounted as /workspace (read-write)."),
-            ParameterSchema::optional("allow_networking", "boolean", "Allow outbound TCP (default: false)."),
-            ParameterSchema::optional("timeout_secs", "integer", "Hard timeout in seconds (default: 30, max: 300)."),
-            ParameterSchema::optional("fuel", "integer", "Max WASM instructions. Omit for unlimited."),
+            ParameterSchema::optional(
+                "timeout_secs",
+                "integer",
+                "Hard timeout in seconds (default: 3, max: 15).",
+            ),
+            ParameterSchema::optional(
+                "fuel",
+                "integer",
+                "Max WASM fuel (default: 5,000,000; max: 20,000,000).",
+            ),
+            ParameterSchema::optional(
+                "memory_limit_bytes",
+                "integer",
+                "Linear memory limit in bytes (default: 16MB, max: 64MB).",
+            ),
         ]
     }
 
@@ -60,8 +78,18 @@ impl Tool for WasmExecTool {
         }
 
         let stdin_data = args["stdin"].as_str().unwrap_or("").to_string();
-        let timeout_secs = args["timeout_secs"].as_u64().unwrap_or(30).min(300);
-        let fuel_limit = args["fuel"].as_u64();
+        let timeout_secs = args["timeout_secs"]
+            .as_u64()
+            .unwrap_or(DEFAULT_TIMEOUT_SECS)
+            .clamp(1, MAX_TIMEOUT_SECS);
+        let fuel_limit = args["fuel"]
+            .as_u64()
+            .unwrap_or(DEFAULT_FUEL)
+            .clamp(100_000, MAX_FUEL);
+        let memory_limit_bytes = args["memory_limit_bytes"]
+            .as_u64()
+            .unwrap_or(DEFAULT_MEMORY_LIMIT_BYTES)
+            .clamp(1 * 1024 * 1024, MAX_MEMORY_LIMIT_BYTES);
         let workspace = args["workspace"].as_str().unwrap_or(".").to_string();
         let wasm_size = wasm_bytes.len();
 
@@ -74,12 +102,22 @@ impl Tool for WasmExecTool {
             .unwrap_or_default();
 
         let join = tokio::task::spawn_blocking(move || {
-            run_wasm(wasm_bytes, stdin_data, cli_args, env_vars, workspace, fuel_limit)
+            run_wasm(
+                wasm_bytes,
+                stdin_data,
+                cli_args,
+                env_vars,
+                workspace,
+                fuel_limit,
+                memory_limit_bytes,
+            )
         });
 
         match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), join).await {
             Ok(Ok(Ok(mut v))) => {
                 v["wasm_size_bytes"] = serde_json::json!(wasm_size);
+                v["memory_limit_bytes"] = serde_json::json!(memory_limit_bytes);
+                v["fuel_limit"] = serde_json::json!(fuel_limit);
                 Ok(ToolResult::ok(v))
             }
             Ok(Ok(Err(e))) => Ok(ToolResult::err(format!("WASM error: {}", e))),
@@ -95,7 +133,8 @@ fn run_wasm(
     args: Vec<String>,
     env_vars: Vec<(String, String)>,
     workspace: String,
-    fuel: Option<u64>,
+    fuel: u64,
+    memory_limit_bytes: u64,
 ) -> anyhow::Result<serde_json::Value> {
     use std::time::Instant;
 
@@ -109,13 +148,11 @@ fn run_wasm(
     let t0 = Instant::now();
     let mut cfg = Config::new();
     cfg.async_support(false);
-    if fuel.is_some() {
-        cfg.consume_fuel(true);
-    }
+    cfg.consume_fuel(true);
     let engine = Engine::new(&cfg)?;
 
-    let stdout_pipe = MemoryOutputPipe::new(4 * 1024 * 1024);
-    let stderr_pipe = MemoryOutputPipe::new(1 * 1024 * 1024);
+    let stdout_pipe = MemoryOutputPipe::new(512 * 1024);
+    let stderr_pipe = MemoryOutputPipe::new(256 * 1024);
     let stdout_read = stdout_pipe.clone();
     let stderr_read = stderr_pipe.clone();
 
@@ -134,14 +171,18 @@ fn run_wasm(
         wb.preopened_dir(ws, "/workspace", wasmtime_wasi::DirPerms::all(), wasmtime_wasi::FilePerms::all())?;
     }
     let wasi = wb.build_p1();
+    let limits = StoreLimitsBuilder::new()
+        .memory_size((memory_limit_bytes.min(usize::MAX as u64)) as usize)
+        .instances(1)
+        .tables(2)
+        .memories(1)
+        .build();
+    let mut store = Store::new(&engine, (wasi, limits));
+    store.limiter(|state| &mut state.1);
+    store.set_fuel(fuel)?;
 
-    let mut store = Store::new(&engine, wasi);
-    if let Some(f) = fuel {
-        store.set_fuel(f)?;
-    }
-
-    let mut linker: Linker<WasiP1Ctx> = Linker::new(&engine);
-    preview1::add_to_linker_sync(&mut linker, |ctx| ctx)?;
+    let mut linker: Linker<(WasiP1Ctx, wasmtime::StoreLimits)> = Linker::new(&engine);
+    preview1::add_to_linker_sync(&mut linker, |state| &mut state.0)?;
 
     let module = Module::from_binary(&engine, &bytes)?;
     let instance = linker.instantiate(&mut store, &module)?;
@@ -159,7 +200,7 @@ fn run_wasm(
         }
     };
 
-    let fuel_used = fuel.and_then(|f| store.get_fuel().ok().map(|r| f.saturating_sub(r)));
+    let fuel_used = store.get_fuel().ok().map(|remaining| fuel.saturating_sub(remaining));
     let stdout = String::from_utf8_lossy(&stdout_read.try_into_inner().unwrap_or_default()).into_owned();
     let stderr = String::from_utf8_lossy(&stderr_read.try_into_inner().unwrap_or_default()).into_owned();
     let elapsed_ms = t0.elapsed().as_millis() as u64;

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
     Json,
@@ -183,6 +183,49 @@ fn err(code: StatusCode, msg: impl Into<String>) -> Response {
     (code, Json(serde_json::json!({ "error": msg.into() }))).into_response()
 }
 type Response = axum::response::Response;
+const MAX_TENANT_WASM_MODULE_BYTES: usize = 2 * 1024 * 1024;
+const MAX_TENANT_WASM_ENV_KEYS: usize = 32;
+
+fn is_valid_wasm_tool_name(name: &str) -> bool {
+    let trimmed = name.trim();
+    if trimmed.len() < 2 || trimmed.len() > 64 {
+        return false;
+    }
+
+    let mut chars = trimmed.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_alphanumeric() {
+        return false;
+    }
+
+    chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+}
+
+fn normalize_wasm_permissions(
+    mut permissions: crate::agent::definition::WasmToolPermissions,
+) -> crate::agent::definition::WasmToolPermissions {
+    if permissions.allow_workspace_write {
+        permissions.allow_workspace_read = true;
+    }
+
+    if !permissions.allow_env {
+        permissions.allowed_env_keys.clear();
+    } else {
+        permissions.allowed_env_keys = permissions
+            .allowed_env_keys
+            .into_iter()
+            .map(|key| key.trim().to_ascii_uppercase())
+            .filter(|key| !key.is_empty())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .take(MAX_TENANT_WASM_ENV_KEYS)
+            .collect();
+    }
+
+    permissions
+}
 
 /// Verify a webhook HMAC-SHA256 signature (covers GitHub, PagerDuty, HubSpot, etc.)
 fn verify_webhook_hmac(signature: &str, payload: &[u8], secret: &str) -> bool {
@@ -2449,6 +2492,228 @@ pub async fn delete_tenant_connector(
     match state.store.delete_tenant_connector(&tenant.tenant_id, &name).await {
         Ok(_)  => Json(serde_json::json!({ "deleted": true })).into_response(),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct WasmRunQuery {
+    pub tool_name: Option<String>,
+    pub limit: Option<i64>,
+}
+
+/// GET /tenant-wasm-tools — list all registered tenant WASM tools (metadata only).
+pub async fn list_tenant_wasm_tools(
+    State(state): State<AppState>,
+    tenant: AuthenticatedTenant,
+) -> impl IntoResponse {
+    match state.store.list_tenant_wasm_tools(&tenant.tenant_id).await {
+        Ok(tools) => Json(serde_json::json!({ "tools": tools })).into_response(),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+/// GET /tenant-wasm-tools/runs — list recent WASM tool run audits.
+pub async fn list_tenant_wasm_tool_runs(
+    State(state): State<AppState>,
+    tenant: AuthenticatedTenant,
+    Query(query): Query<WasmRunQuery>,
+) -> impl IntoResponse {
+    let limit = query.limit.unwrap_or(50).clamp(1, 200);
+    match state
+        .store
+        .list_wasm_tool_run_audit(&tenant.tenant_id, query.tool_name.as_deref(), limit)
+        .await
+    {
+        Ok(runs) => Json(serde_json::json!({ "runs": runs })).into_response(),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+/// POST /tenant-wasm-tools — register or update a tenant WASM tool.
+/// Body:
+/// {
+///   "name": "lead_score_v1",
+///   "description": "...",
+///   "module_bytes_b64": "...",
+///   "permissions": {...},
+///   "limits": {...},
+///   "enabled": true
+/// }
+pub async fn register_tenant_wasm_tool(
+    State(state): State<AppState>,
+    tenant: AuthenticatedTenant,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    use base64::Engine;
+    use sha2::Digest;
+
+    let raw_name = match body["name"].as_str() {
+        Some(name) => name.trim(),
+        None => return err(StatusCode::BAD_REQUEST, "'name' is required"),
+    };
+    if !is_valid_wasm_tool_name(raw_name) {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "invalid name: use 2-64 chars [a-zA-Z0-9_-], starting with alphanumeric",
+        );
+    }
+    let name = raw_name.to_ascii_lowercase();
+
+    let module_b64 = match body["module_bytes_b64"].as_str() {
+        Some(bytes) => bytes,
+        None => return err(StatusCode::BAD_REQUEST, "'module_bytes_b64' is required"),
+    };
+    let module_bytes = match base64::engine::general_purpose::STANDARD.decode(module_b64) {
+        Ok(bytes) => bytes,
+        Err(err) => return err(StatusCode::BAD_REQUEST, format!("invalid base64 module bytes: {}", err)),
+    };
+    if module_bytes.len() > MAX_TENANT_WASM_MODULE_BYTES {
+        return err(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "WASM module too large: {} bytes (max {})",
+                module_bytes.len(),
+                MAX_TENANT_WASM_MODULE_BYTES
+            ),
+        );
+    }
+    if module_bytes.len() < 4 || &module_bytes[..4] != b"\0asm" {
+        return err(StatusCode::BAD_REQUEST, "invalid WebAssembly module: missing \\0asm magic");
+    }
+
+    let wasm_engine = wasmtime::Engine::default();
+    let wasm_module = match wasmtime::Module::from_binary(&wasm_engine, &module_bytes) {
+        Ok(module) => module,
+        Err(err) => return err(StatusCode::BAD_REQUEST, format!("WASM validation failed: {}", err)),
+    };
+
+    let exports: Vec<String> = wasm_module.exports().map(|export| export.name().to_string()).collect();
+    if exports.is_empty() {
+        return err(StatusCode::BAD_REQUEST, "module exports are empty");
+    }
+    let has_entrypoint = exports.iter().any(|name| name == "_start" || name == "_initialize");
+    if !has_entrypoint {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "module must export '_start' or '_initialize' for run_registered_wasm",
+        );
+    }
+
+    let permissions = body
+        .get("permissions")
+        .cloned()
+        .and_then(|value| serde_json::from_value::<crate::agent::definition::WasmToolPermissions>(value).ok())
+        .map(normalize_wasm_permissions)
+        .unwrap_or_default();
+    let limits = body
+        .get("limits")
+        .cloned()
+        .and_then(|value| serde_json::from_value::<crate::agent::definition::WasmToolResourceLimits>(value).ok())
+        .unwrap_or_default()
+        .clamped();
+    let enabled = body["enabled"].as_bool().unwrap_or(true);
+    let description = body["description"]
+        .as_str()
+        .unwrap_or("Tenant-registered WASM tool")
+        .to_string();
+
+    let existing = match state.store.get_tenant_wasm_tool(&tenant.tenant_id, &name).await {
+        Ok(tool) => tool,
+        Err(err) => return err(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+    };
+
+    let now = chrono::Utc::now();
+    let id = existing
+        .as_ref()
+        .map(|tool| tool.id.clone())
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let created_at = existing
+        .as_ref()
+        .map(|tool| tool.created_at.clone())
+        .unwrap_or(now);
+    let version = existing.as_ref().map(|tool| tool.version).unwrap_or(1);
+
+    let module_sha256 = {
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(&module_bytes);
+        hex::encode(hasher.finalize())
+    };
+
+    let tool = crate::agent::definition::TenantWasmTool {
+        id,
+        tenant_id: tenant.tenant_id.clone(),
+        name: name.clone(),
+        description,
+        permissions,
+        limits,
+        enabled,
+        version,
+        module_sha256,
+        module_size_bytes: module_bytes.len() as u64,
+        exports,
+        created_at,
+        updated_at: now,
+        last_used_at: existing.and_then(|tool| tool.last_used_at),
+    };
+
+    match state.store.upsert_tenant_wasm_tool(&tool, &module_bytes).await {
+        Ok(_) => match state.store.get_tenant_wasm_tool(&tenant.tenant_id, &name).await {
+            Ok(Some(saved_tool)) => Json(serde_json::json!({
+                "registered": true,
+                "tool": saved_tool,
+            }))
+            .into_response(),
+            Ok(None) => Json(serde_json::json!({
+                "registered": true,
+                "tool": tool,
+            }))
+            .into_response(),
+            Err(err) => err(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+        },
+        Err(err) => err(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+    }
+}
+
+/// PUT /tenant-wasm-tools/:name/enabled — enable or disable a tenant WASM tool.
+pub async fn set_tenant_wasm_tool_enabled(
+    State(state): State<AppState>,
+    tenant: AuthenticatedTenant,
+    Path(name): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let enabled = match body["enabled"].as_bool() {
+        Some(enabled) => enabled,
+        None => return err(StatusCode::BAD_REQUEST, "'enabled' boolean is required"),
+    };
+
+    if let Err(err) = state
+        .store
+        .set_tenant_wasm_tool_enabled(&tenant.tenant_id, &name, enabled)
+        .await
+    {
+        return err(StatusCode::INTERNAL_SERVER_ERROR, err.to_string());
+    }
+
+    match state.store.get_tenant_wasm_tool(&tenant.tenant_id, &name).await {
+        Ok(Some(tool)) => Json(serde_json::json!({
+            "updated": true,
+            "tool": tool,
+        }))
+        .into_response(),
+        Ok(None) => err(StatusCode::NOT_FOUND, "tenant wasm tool not found"),
+        Err(err) => err(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+    }
+}
+
+/// DELETE /tenant-wasm-tools/:name
+pub async fn delete_tenant_wasm_tool(
+    State(state): State<AppState>,
+    tenant: AuthenticatedTenant,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    match state.store.delete_tenant_wasm_tool(&tenant.tenant_id, &name).await {
+        Ok(_) => Json(serde_json::json!({ "deleted": true })).into_response(),
+        Err(err) => err(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
     }
 }
 

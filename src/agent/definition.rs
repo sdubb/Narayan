@@ -441,7 +441,12 @@ impl ExecutionGuidelines {
 
         if !self.priorities.is_empty() {
             let items: Vec<String> = self.priorities.iter().take(Self::MAX_PRIORITIES)
-                .enumerate().map(|(i, p)| format!("{}. {}", i + 1, p)).collect();
+                .enumerate()
+                .map(|(i, p)| {
+                    let display = p.strip_prefix("step: ").map(str::trim).unwrap_or(p.as_str());
+                    format!("{}. {}", i + 1, display)
+                })
+                .collect();
             parts.push(format!("PRIORITIES:\n{}", items.join("\n")));
         }
 
@@ -484,6 +489,14 @@ impl ExecutionGuidelines {
         for c in other.completion_criteria { self.add_completion(c); }
     }
 
+    pub fn remove_rules_with_prefix(&mut self, prefix: &str) {
+        self.rules.retain(|rule| !rule.text.starts_with(prefix));
+    }
+
+    pub fn remove_priority_prefix(&mut self, prefix: &str) {
+        self.priorities.retain(|value| !value.starts_with(prefix));
+    }
+
     pub fn preferred_tool_categories(&self) -> Vec<String> {
         self.extract_csv_rule_values("Prefer these tool categories when relevant:")
     }
@@ -493,25 +506,32 @@ impl ExecutionGuidelines {
     }
 
     pub fn workflow_hints(&self) -> Vec<String> {
-        self.priorities.clone()
+        self.priorities
+            .iter()
+            .filter_map(|priority| priority.strip_prefix("step: "))
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .collect()
     }
 
     fn extract_csv_rule_values(&self, prefix: &str) -> Vec<String> {
-        self.rules
+        let mut out = self.rules
             .iter()
-            .find_map(|rule| {
-                rule.text.strip_prefix(prefix).map(|value| {
-                    value
-                        .trim()
-                        .trim_end_matches('.')
-                        .split(',')
-                        .map(|part| part.trim())
-                        .filter(|part| !part.is_empty())
-                        .map(String::from)
-                        .collect::<Vec<_>>()
-                })
+            .filter_map(|rule| rule.text.strip_prefix(prefix))
+            .flat_map(|value| {
+                value
+                    .trim()
+                    .trim_end_matches('.')
+                    .split(',')
+                    .map(|part| part.trim())
+                    .filter(|part| !part.is_empty())
+                    .map(String::from)
+                    .collect::<Vec<_>>()
             })
-            .unwrap_or_default()
+            .collect::<Vec<_>>();
+        out.sort();
+        out.dedup();
+        out
     }
 
     /// Parse a domain skill EXECUTION BRIEF text section into typed guidelines.
@@ -949,7 +969,9 @@ pub enum PlanModePhase {
     /// Replaces the old CapturingTrigger + CapturingOutput phases.
     /// One LLM-context-aware turn covers everything.
     CapturingClarifications,
-    /// Gathering constraints and guidelines (domain skill mandatory questions).
+    /// Reserved compatibility phase.
+    /// Current normal flow captures constraints via clarification steps, but older
+    /// sessions or external callers may still set this phase.
     CapturingConstraints,
     /// Reviewing the complete configuration with the user before saving.
     Reviewing,
@@ -1050,6 +1072,107 @@ pub enum ParamLocation {
     Query,
     Body,
     Header,
+}
+
+// ── TenantWasmTool (user-defined deterministic compute tools) ─────────────
+
+/// Execution permissions for a tenant-registered WASM tool.
+/// Deliberately narrow by default; each permission must be explicitly enabled.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WasmToolPermissions {
+    /// Mount workspace into the module as read-only.
+    pub allow_workspace_read: bool,
+    /// Allow creating/modifying files under mounted workspace.
+    pub allow_workspace_write: bool,
+    /// Allow passing selected env keys into module execution.
+    pub allow_env: bool,
+    /// Explicit env allowlist when allow_env=true.
+    pub allowed_env_keys: Vec<String>,
+}
+
+impl Default for WasmToolPermissions {
+    fn default() -> Self {
+        Self {
+            allow_workspace_read: false,
+            allow_workspace_write: false,
+            allow_env: false,
+            allowed_env_keys: Vec::new(),
+        }
+    }
+}
+
+/// Hard runtime caps for a tenant-registered WASM tool.
+/// These are intentionally strict to prevent host resource abuse.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WasmToolResourceLimits {
+    pub max_memory_bytes: u64,
+    pub max_fuel: u64,
+    pub timeout_secs: u64,
+}
+
+impl Default for WasmToolResourceLimits {
+    fn default() -> Self {
+        Self {
+            max_memory_bytes: 16 * 1024 * 1024,
+            max_fuel: 5_000_000,
+            timeout_secs: 3,
+        }
+    }
+}
+
+impl WasmToolResourceLimits {
+    pub const MAX_MEMORY_BYTES_HARD: u64 = 64 * 1024 * 1024;
+    pub const MAX_FUEL_HARD: u64 = 20_000_000;
+    pub const MAX_TIMEOUT_SECS_HARD: u64 = 10;
+
+    /// Clamp user-specified values to platform hard maxima and sane minima.
+    pub fn clamped(&self) -> Self {
+        Self {
+            max_memory_bytes: self.max_memory_bytes.clamp(1 * 1024 * 1024, Self::MAX_MEMORY_BYTES_HARD),
+            max_fuel: self.max_fuel.clamp(100_000, Self::MAX_FUEL_HARD),
+            timeout_secs: self.timeout_secs.clamp(1, Self::MAX_TIMEOUT_SECS_HARD),
+        }
+    }
+}
+
+/// Persisted tenant-defined WASM tool metadata.
+/// Module bytes are stored separately in DB read/write methods.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TenantWasmTool {
+    pub id: String,
+    pub tenant_id: String,
+    pub name: String,
+    pub description: String,
+    pub permissions: WasmToolPermissions,
+    pub limits: WasmToolResourceLimits,
+    pub enabled: bool,
+    pub version: u32,
+    pub module_sha256: String,
+    pub module_size_bytes: u64,
+    pub exports: Vec<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub last_used_at: Option<DateTime<Utc>>,
+}
+
+/// Audit event for one registered-WASM invocation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WasmToolRunAudit {
+    pub id: String,
+    pub tenant_id: String,
+    pub tool_name: String,
+    pub tool_version: u32,
+    pub agent_id: Option<String>,
+    pub role_id: Option<String>,
+    pub goal_instance_id: Option<String>,
+    pub success: bool,
+    pub elapsed_ms: u64,
+    pub fuel_used: Option<u64>,
+    pub memory_limit_bytes: u64,
+    pub error: Option<String>,
+    pub created_at: DateTime<Utc>,
 }
 
 // ── WorkforceEvent (subscription model) ────────────────────────────────────
@@ -1379,5 +1502,27 @@ mod tests {
         let s = MemoryScope::Role;
         let json = serde_json::to_value(&s).unwrap();
         assert_eq!(json, "role");
+    }
+
+    #[test]
+    fn test_wasm_limits_clamped_to_safe_bounds() {
+        let limits = WasmToolResourceLimits {
+            max_memory_bytes: 512 * 1024 * 1024,
+            max_fuel: u64::MAX,
+            timeout_secs: 999,
+        }
+        .clamped();
+        assert_eq!(limits.max_memory_bytes, WasmToolResourceLimits::MAX_MEMORY_BYTES_HARD);
+        assert_eq!(limits.max_fuel, WasmToolResourceLimits::MAX_FUEL_HARD);
+        assert_eq!(limits.timeout_secs, WasmToolResourceLimits::MAX_TIMEOUT_SECS_HARD);
+    }
+
+    #[test]
+    fn test_wasm_permissions_default_locked_down() {
+        let permissions = WasmToolPermissions::default();
+        assert!(!permissions.allow_workspace_read);
+        assert!(!permissions.allow_workspace_write);
+        assert!(!permissions.allow_env);
+        assert!(permissions.allowed_env_keys.is_empty());
     }
 }

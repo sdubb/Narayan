@@ -148,6 +148,7 @@ pub mod connector_meta {
 
 pub mod connector_tool;
 pub mod create_custom_connector;
+pub mod create_workspace_tool;
 pub mod credential_requirements;
 pub mod list_connectors_in_category;
 pub mod memory_store_internal;
@@ -210,6 +211,7 @@ pub mod ssh_exec;
 pub mod suggest_connectors;
 pub mod tool_output;
 pub mod tool_validation;
+pub mod run_registered_wasm;
 pub mod vector_delete;
 pub mod vector_search;
 pub mod vector_store;
@@ -270,6 +272,7 @@ pub fn default_registry() -> ToolRegistry {
     r.register(Arc::new(list_connectors_in_category::ListConnectorsInCategoryTool));
     r.register(Arc::new(request_more_connectors::RequestMoreConnectorsTool));
     r.register(Arc::new(create_custom_connector::CreateCustomConnectorTool));
+    r.register(Arc::new(create_workspace_tool::CreateWorkspaceToolTool));
     r.register(Arc::new(request_more_tools::RequestMoreToolsTool));
 
     // Register all built-in connector tools (salesforce, github, slack, etc.)
@@ -306,6 +309,7 @@ pub fn default_registry() -> ToolRegistry {
     r.register(Arc::new(wasm_compile::WasmCompileTool));
     r.register(Arc::new(wasm_inspect::WasmInspectTool));
     r.register(Arc::new(wasm_call::WasmCallTool));
+    r.register(Arc::new(run_registered_wasm::RunRegisteredWasmTool::new()));
     // NOTE: vector tools are registered in main.rs (they need Arc<PgVectorStore> + Arc<dyn EmbeddingModel>)
     // NOTE: browser tools with pool are registered in main.rs (they need Arc<BrowserPool>)
     r

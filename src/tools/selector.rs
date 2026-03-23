@@ -22,6 +22,8 @@ use crate::{
 
 /// Maximum tools sent to any single LLM call.
 pub const MAX_TOOLS: usize = 20;
+const MAX_ROLE_CATEGORY_TOOLS: usize = 4;
+const RUNTIME_BLOCKED_TOOLS: &[&str] = &["create_workspace_tool"];
 
 /// Tools always included regardless of job type or step.
 /// Every agent needs these for basic operation.
@@ -53,6 +55,9 @@ pub fn select_tools_for_step(
     let mut seen = std::collections::HashSet::new();
 
     let add = |name: &str, selected: &mut Vec<String>, seen: &mut std::collections::HashSet<String>| {
+        if RUNTIME_BLOCKED_TOOLS.contains(&name) {
+            return;
+        }
         if seen.insert(name.to_string()) && registry.get(name).is_some() {
             selected.push(name.to_string());
         }
@@ -83,7 +88,7 @@ pub fn select_tools_for_step(
             break;
         }
         if let Some(names) = tools_by_category.get(category.as_str()) {
-            for name in names {
+            for name in names.iter().take(MAX_ROLE_CATEGORY_TOOLS) {
                 if selected.len() >= MAX_TOOLS {
                     break;
                 }
@@ -227,6 +232,7 @@ pub fn tool_manifest(registry: &ToolRegistry) -> String {
                 "wasm_compile",
                 "wasm_inspect",
                 "wasm_call",
+                "run_registered_wasm",
                 "diff",
                 "patch",
                 "git_operations",
@@ -317,6 +323,7 @@ pub fn tool_manifest_from_names(names: &[&str]) -> String {
                 "wasm_compile",
                 "wasm_inspect",
                 "wasm_call",
+                "run_registered_wasm",
                 "diff",
                 "patch",
                 "git_operations",
@@ -454,6 +461,30 @@ mod tests {
         let specs = select_tools_for_step(&registry, &step, &JobType::General, &[], &["integration".into()]);
         let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"api_call") || names.contains(&"http_request"));
+    }
+
+    #[test]
+    fn test_role_tool_category_respects_per_category_cap() {
+        let registry = default_registry();
+        let step = PlannedStep {
+            index: 0,
+            description: "handle integrations broadly".into(),
+            tool: None,
+            tool_args: None,
+            success_criteria: String::new(),
+            condition: None,
+        };
+        let specs = select_tools_for_step(&registry, &step, &JobType::General, &[], &["integration".into()]);
+        let integration_count = specs
+            .iter()
+            .filter(|spec| {
+                registry
+                    .get(&spec.name)
+                    .map(|tool| tool.category() == "integration")
+                    .unwrap_or(false)
+            })
+            .count();
+        assert!(integration_count <= MAX_ROLE_CATEGORY_TOOLS);
     }
 
     #[test]

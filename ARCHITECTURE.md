@@ -60,12 +60,19 @@ One automation responsibility within an agent. A single `AgentDefinition` can ha
 ```
 AgentRole {
     trigger:               TriggerDef,
+    role_category:         RoleCategory,
     execution_guidelines:  ExecutionGuidelines,
     output_spec:           OutputSpec,
     connectors:            Vec<String>,
-    tools:                 Vec<String>,   // tool overrides, e.g. "external_db:prod"
+    tools:                 Vec<String>,   // tool overrides/scopes, e.g. "external_db:prod", "run_registered_wasm", "wasm_tool:lead_score_v1"
+    memory_scope:          MemoryScope,   // global | agent | role
+    execution_limits:      ExecutionLimits,
 }
 ```
+
+`role_category` is persisted and treated as first-class runtime policy (planner/executor derive job type from it before falling back to heuristic detection).
+
+`memory_scope` and `execution_limits` are also persisted on each role and injected into planner/executor role-policy context on every run.
 
 ### TriggerDef
 ```
@@ -115,9 +122,11 @@ Plan mode is the one-time conversational setup for an agent role. Users either d
 
 ```
 CapturingIntent
-    ↓  (1 LLM call — IntentExtractor)
+    ↓  (LLM pass 1 — IntentExtractor with compact capability directory)
+    ↓  (code builds targeted detailed capability context from pass-1 categories/candidates)
+    ↓  (LLM pass 2 — IntentExtractor refinement with focused tool/connector detail)
     ↓  generate_steps() → pending_steps queue in session
-    ↓  [ResolvingConnectors? — one clarifying Q if ambiguous]
+    ↓  [ResolvingConnectors? — one or more clarifying questions if connector or custom-tool scope is unresolved]
 CapturingClarifications    ← one step per turn from the queue
     ↓  (queue empty)
     ↓  domain skill execution brief injected
@@ -128,11 +137,99 @@ Complete → save() → AgentDefinition + AgentRole persisted
 ```
 
 ### IntentExtractor
-One LLM call with a rich JSON schema. Returns not just intent but also:
+Two-pass LLM extraction with a typed JSON schema.
+
+Pass 1 receives a compact capability directory (tool categories, connector categories, installed vs available status, tenant custom connections) and returns inferred intent categories/candidates.
+
+Pass 2 receives targeted detailed context only for inferred categories/candidates (selected tool-category specs and connector operation summaries) and refines the result.
+
+Returns intent plus runtime policy hints, including:
 - `trigger_confidence: "high"|"medium"|"low"` + `trigger_confirmation` question
 - `output_questions: []` — LLM-generated specific questions about output destination
 - `multi_role_suggested: bool` + `responsibilities: []` — multi-role split detection
 - `uses_external_db`, `uses_external_api` — named custom connection references
+- `preferred_tool_categories`, `preferred_tools`
+- `candidate_wasm_tools` (exact tenant WASM tool names when deterministic custom logic is needed)
+- `needed_connector_categories`, `candidate_connectors`
+- `missing_capabilities` (`custom_db`, `custom_api`, `connector/<category>`, `tool/<category>`)
+- `workflow_outline` (ordered high-level execution hints persisted into role policy)
+
+#### Two-pass inference example
+
+User input:
+
+> "When a new Zendesk ticket arrives, summarize it, create a Notion page, and notify #support-alerts in Slack."
+
+Pass 1 prompt context includes:
+- compact tool category map (names only, no full schema dump)
+- connector categories and names with status (`installed` / `available`)
+- tenant custom connections by name/summary
+
+Pass 1 output (abridged):
+```json
+{
+  "category": "customer_support",
+  "preferred_tool_categories": ["data", "communication"],
+  "preferred_tools": ["data_extractor"],
+  "candidate_wasm_tools": [],
+  "needed_connector_categories": ["support", "project_management", "communication"],
+  "candidate_connectors": ["zendesk", "notion", "slack"],
+  "missing_capabilities": [],
+  "workflow_outline": [
+    "fetch new support ticket",
+    "summarize issue and context",
+    "create destination knowledge record",
+    "send notification to channel"
+  ],
+  "trigger_hint": "webhook",
+  "trigger_source": "zendesk",
+  "trigger_event": "ticket_created"
+}
+```
+
+Code then builds targeted detail for pass 2:
+- tool specs for `data` and `communication` categories
+- connector ops/status for `zendesk`, `notion`, `slack`
+
+Pass 2 output refines exact preferences and keeps the same intent shape. Plan mode persists these as role policy (`role.tools`, connector scope, `ExecutionGuidelines` hints) before runtime planning starts.
+
+#### Plan mode vs runtime tool discovery
+
+Plan mode does not execute tools and does not call `request_more_tools`. Its job is to infer durable policy and scope.
+
+- Plan mode grounding:
+  - pass 1 gets compact capability directory (category maps + connector directory + tenant custom connections + enabled tenant WASM names)
+  - pass 2 gets targeted detail for inferred categories/candidates only
+- Runtime grounding:
+  - planner/executor prompts include category quick maps
+  - when a step needs more depth, runtime can call `request_more_tools` by category
+  - selector still enforces hard tool budget and role scope
+
+This split keeps plan mode deterministic and lightweight while still letting runtime fetch detailed tool context exactly when needed.
+
+#### How hint persistence works
+
+`apply_execution_hints()` writes intent hints into typed role policy with explicit hygiene:
+- `preferred_tool_categories` → `GuidelineRule`: `Prefer these tool categories when relevant: ...`
+- `candidate_wasm_tools` → role tool scope entries: `run_registered_wasm` + `wasm_tool:<name>`
+- `needed_connector_categories` → `GuidelineRule`: `Prefer connectors from these categories when relevant: ...`
+- `workflow_outline` → `ExecutionGuidelines.priorities` as `step: ...` tagged entries
+
+Before writing fresh hint-derived values, plan mode removes prior entries with those prefixes so re-runs/reconfiguration don't keep stale duplicates.
+
+At runtime:
+- `workflow_hints()` returns only `step:` tagged priorities (so policy rules like "Never auto-send..." are not misinterpreted as workflow order)
+- `preferred_*_categories()` reads all matching prefixed rules (not just first match), then de-duplicates.
+
+#### Role policy defaults at setup time
+
+After intent extraction, plan mode sets durable role policy defaults from inferred `role_category`:
+- `role.role_category = RoleCategory::from_slug(intent.category)`
+- if agent persona is empty, use category default persona
+- set role `memory_scope` from category default
+- set role `execution_limits` from category default (when still default/empty)
+
+Template fast-path applies the same policy defaults so template-created roles and free-form roles follow the same runtime contract.
 
 ### ClarificationStep pipeline (`plan_mode_steps.rs`)
 `generate_steps(intent, category, installed, existing_roles)` builds an ordered queue. `existing_roles` is the list of role names already on the agent — loaded from the DB before queue generation so the pipeline can ask about cross-role relationships.
@@ -147,6 +244,10 @@ Step order:
 4. `OutputDestination` — ask where output goes if `output_destination_hint` is empty
 5. Domain steps — 4–5 typed questions per category (see below)
 6. `CompletionCriteria` — "what does done look like?" or "auto"
+
+`ResolvingConnectors` clarification now uses exact connector-name token matching (not free substring matching against summaries). If multiple connector names are present in one reply, plan mode asks the user to choose one exact name; if none are detected, it re-prompts with explicit examples.
+
+The same resolving phase is also used for custom deterministic logic gaps. If intent inference returns `missing_capabilities` like `tool/<category>` and no suitable `candidate_wasm_tools`, plan mode blocks progression and asks the user to select (or set up) an enabled tenant WASM tool before moving to runtime.
 
 Each `ClarificationStep { id, question, field: StepField, required, hint }` maps to one field on the draft role. `parse_and_apply()` is a typed switch — no free-text blob parsing. The queue is serialised as `pending_steps: Vec<serde_json::Value>` in the session and persisted between turns.
 
@@ -233,6 +334,11 @@ StepOutcome {
 11. GoalComplete path  → check_completion_criteria() → Complete | PartiallyComplete
 12. Persistence        → write criteria_checks to goal_instance.result
 ```
+
+Custom tool policy in runtime is strict:
+- `create_workspace_tool` is blocked during run execution.
+- `run_registered_wasm` is allowed only for plan-mode-approved role scopes (`wasm_tool:<name>` markers persisted on `role.tools`).
+- If a step requests an out-of-scope WASM tool, executor returns an explicit scope error instead of attempting dynamic tool creation.
 
 ### FailureAction override (`loop.rs: apply_failure_action_override`)
 Before the evaluator verdict is dispatched, `apply_failure_action_override` checks the role's `failure_handling` rules against the current step failure. It matches by `tool_scope` (which tools were called) and error text. If a match is found:
@@ -447,6 +553,12 @@ src/
 
 **Savings estimation is quality-gated.** A run that produced no output gets 0 credit. Partial runs are pro-rated. The estimator uses structured `step_outputs` metadata, not output text.
 
+**Tool expansion is staged and bounded.** Both plan mode and executor prompts include compact category quick maps (filesystem/web/code/data/memory/infra/integration/communication/security/automation) so the model can call `request_more_tools` by category when needed without receiving all tool schemas up front.
+
+**Runtime custom tool creation is disabled.** Custom deterministic logic must be onboarded and tested in plan mode (or tenant settings) first, then explicitly approved per role. Runtime only executes those approved tools through `run_registered_wasm`.
+
+**Role-category tool injection is capped.** The selector limits role-category expansion to a small per-category slice (currently 4 tools/category) before applying keyword scoring, preventing broad categories from consuming the full 20-tool budget.
+
 **All tenant_id bindings come from JWT.** Every DB query in PostgresStore takes `tenant_id: &str` as the first parameter. The HTTP layer always passes `tenant.tenant_id` from `AuthenticatedTenant` — never from request body or path params.
 
 ---
@@ -495,12 +607,26 @@ You type: _"Every Monday enrich our Salesforce leads — pull company info and r
 
 ---
 
-**Step 2 — IntentExtractor fires (1 LLM call)**
+**Step 2 — IntentExtractor runs in two passes**
 
-Returns:
+Pass 1 (compact capability directory) infers categories/candidates.  
+Pass 2 (targeted detail for inferred categories/candidates) refines exact tool/connector preferences.
+
+Final output includes:
 ```json
 {
   "category": "sales_revops",
+  "preferred_tool_categories": ["web", "communication", "data"],
+  "preferred_tools": ["web_search_tool", "file_write"],
+  "needed_connector_categories": ["crm", "communication"],
+  "candidate_connectors": ["salesforce", "slack"],
+  "missing_capabilities": [],
+  "workflow_outline": [
+    "fetch new leads from CRM",
+    "enrich each lead with recent company data",
+    "draft outreach per lead",
+    "notify channel with run summary"
+  ],
   "trigger_hint": "schedule",
   "trigger_cron": "0 9 * * 1",
   "trigger_confidence": "medium",
@@ -610,7 +736,7 @@ Role 2 fires via WorkforceEvent → Slack posts: _"Lead enrichment complete: 47 
 
 You type: _"When a new Zendesk ticket comes in, search our help docs at docs.acme.com and draft a reply. Billing disputes should always go to a human. Drafts only — never send automatically."_
 
-IntentExtractor returns:
+IntentExtractor (pass 1 + pass 2 refinement) returns:
 ```json
 {
   "category": "customer_support",
@@ -795,9 +921,18 @@ Beyond the 20 built-in connectors, tenants register their own connections that a
 
 All three show up in the `ConnectorsTab` under "Your connections" with type labels, connection status, and summary. Deleting a connection removes it from `tenant_connectors` and clears the stored token.
 
+### Tenant custom deterministic tools (WASM)
+
+Tenants can also register WASM modules via Settings (`POST /tenant-wasm-tools`). These are validated, resource-capped, and audit-logged at registration time. Plan mode can then infer/select exact WASM tool names (`candidate_wasm_tools`) and persist them as role scope (`wasm_tool:<name>`), so runtime can execute only pre-approved custom logic through `run_registered_wasm`.
+
 ### How plan mode uses custom connections
 
-`IntentExtractor` receives a `TENANT'S REGISTERED CONNECTIONS` block in its system prompt listing every custom connection by name, type, and summary:
+`IntentExtractor` pass 1 receives a broader `CAPABILITY DIRECTORY` block. It includes:
+- compact tool category quick maps (names only, no full schema dump)
+- built-in connector categories with connector names and status (`installed` vs `available`)
+- tenant custom connections by name/type/summary
+
+Tenant custom connection section looks like:
 
 ```
 Databases (use external_db tool, reference by name):
@@ -809,6 +944,8 @@ REST APIs (use external_api tool, reference by name):
 MCP servers (available as connector tools):
   - name='acme-data-tools' — 8 tools: query_orders, list_customers, ...
 ```
+
+Then pass 2 receives targeted detail only for inferred categories/candidates (for example, selected tool categories plus connector operation summaries).
 
 When a user says _"query our database for orders over $10k"_, the LLM extracts `uses_external_db: "prod_db"` and `ConnectorResolver` writes `tool_overrides: ["external_db:prod_db"]` into the role. At execution time, the executor injects `tenant_id` into tool args so `external_db` can look up the stored credentials without the LLM ever seeing the connection string.
 
@@ -935,14 +1072,20 @@ These limits are configurable via `AgentLoop::with_limits()` and can be overridd
 
 ## WASM tools
 
-Four WASM-related tools in `tools/`:
+WASM-related tools in `tools/`:
 
 - **`wasm_compile`** — compiles Rust or AssemblyScript source to `.wasm` using a sandboxed build environment
 - **`wasm_inspect`** — reads a `.wasm` file and lists its exported functions, memory, and imports
 - **`wasm_call`** — calls a named export in a loaded `.wasm` module with typed args
 - **`wasm_exec`** — executes a `.wasm` file with WASI support for file/stdio access within the workspace
+- **`run_registered_wasm`** — executes tenant-registered WASM modules with strict per-tool permissions and resource limits
 
-These enable agents to compile, inspect, and run custom WASM modules as part of their plan — useful for data transformation tasks where the LLM writes a transformation function, compiles it to WASM, and runs it deterministically on large datasets.
+For production role execution, the preferred path is `run_registered_wasm` with plan-mode approval:
+- register and test module first in tenant settings/plan mode
+- persist role scope as `wasm_tool:<name>`
+- runtime executes only approved names
+
+Runtime dynamic custom-tool creation is intentionally blocked; this keeps execution deterministic, auditable, and policy-bound.
 
 ---
 
@@ -1074,7 +1217,7 @@ Narayan started as a basic agent loop with a plan/execute/evaluate cycle. Over m
 
 **Session 1-2:** Basic `AgentLoop` (plan → execute → evaluate), `WorkerPool`, `PostgresStore`, JWT auth, basic connectors.
 
-**Session 3-4:** Plan mode — the conversational setup flow. The key insight was that users shouldn't configure YAML or JSON — they should describe what they want in one sentence and the system should derive the full role config. This led to `IntentExtractor` (one LLM call) + `ClarificationStep` pipeline (typed, sequential, no free-text blob parsing).
+**Session 3-4:** Plan mode — the conversational setup flow. The key insight was that users shouldn't configure YAML or JSON — they should describe what they want in one sentence and the system should derive the full role config. This led to `IntentExtractor` + `ClarificationStep` pipeline (typed, sequential, no free-text blob parsing). The current implementation runs `IntentExtractor` in two passes: compact capability directory first, then targeted detail refinement.
 
 **Session 5-6:** `ExecutionGuidelines` typed contract. Before this, guidelines were `Vec<String>`. The switch to typed `GuidelineRule` / `FailureRule` / `CompletionCriterion` was the most important architectural decision in the project — it made the planner prompt, the evaluator prompt, and the completion check all derive from the same source of truth.
 
@@ -1087,6 +1230,8 @@ Narayan started as a basic agent loop with a plan/execute/evaluate cycle. Over m
 **Session 13:** Plan mode connected to everything — `WorkforceEventFilter` + `WorkforceEventInputMapping` + `DependsOnRole` steps so workforce chaining is configured through plan mode, not manually. `active_services_for_category()` discloses segment services in review card.
 
 **Session 14:** 20 pre-built templates in `agent/templates.rs` — static `RoleTemplate` structs with `build_role` fn pointers. Template fast-path in `start_plan_mode_session` skips `IntentExtractor` entirely, enters `CapturingClarifications` with 0-3 questions.
+
+**Session 15:** Role-policy grounding pass — persisted `role_category`, defaulted persona/memory scope/execution limits by category, two-pass intent capability grounding, execution-hint hygiene (`step:` workflow priorities + stale-hint cleanup), safer connector clarification matching, and bounded per-category tool expansion in selector/runtime prompts.
 
 ---
 
@@ -1120,7 +1265,11 @@ agent/definition.rs          ← THE source of truth
 
 agent/plan_mode.rs            ← plan mode conversation manager
     PlanModeManager::turn()   ← dispatches to handle_intent / handle_clarifications / handle_review
-    handle_intent()           ← calls IntentExtractor, ConnectorResolver, build_step_queue_and_ask
+    handle_intent()           ← calls IntentExtractor pass 1 + pass 2 refinement, ConnectorResolver, build_step_queue_and_ask
+    build_capability_directory() / build_detailed_capability_context() ← staged grounding input for plan mode inference
+    apply_execution_hints()   ← stores preferred categories + workflow_outline into ExecutionGuidelines (with stale-hint cleanup)
+    apply_role_policy_defaults() ← category-derived persona/memory_scope/execution_limits defaults
+    handle_connector_clarification() ← exact connector-name token matching with explicit disambiguation
     build_step_queue_and_ask()← loads existing_roles from DB, calls generate_steps()
     save()                    ← resolves "name:Role Name" hints to UUIDs, calls sync_subscriptions_for_role
     build_review_summary()    ← shows trigger description, connectors, services, active_services_for_category()
@@ -1134,6 +1283,23 @@ agent/plan_mode_steps.rs      ← the step pipeline
 agent/templates.rs            ← 20 pre-built templates
     RoleTemplate              ← static struct with build_role fn pointer + intent fn pointer
     find_template(id)         ← used by start_plan_mode_session template fast-path
+
+agent/planner.rs              ← LLM planner
+    load_role_context()       ← injects role policy context (category, limits, memory scope, tool/category hints)
+
+agent/executor.rs             ← LLM executor
+    load_role_execution_policy() ← injects same role policy into step execution prompting
+    execute_step()            ← selector gets role.tools + preferred_tool_categories before heuristic fallback
+    run_registered_wasm guard ← enforces role-approved `wasm_tool:<name>` scope, blocks out-of-scope tool_name
+    create_workspace_tool     ← hard-blocked at runtime (plan-mode-only onboarding policy)
+
+tools/selector.rs             ← per-step tool budgeter
+    select_tools_for_step()   ← honors role.tools + role categories, capped to MAX_TOOLS=20
+    MAX_ROLE_CATEGORY_TOOLS   ← per-category cap to prevent broad-category tool flooding
+    RUNTIME_BLOCKED_TOOLS     ← excludes runtime-only forbidden tools (e.g. `create_workspace_tool`)
+
+agent/prompts.rs              ← prompt renderers
+    ExecutorPrompt::system()  ← includes request_more_tools category quick maps + connector category hints + "no runtime custom tool creation" rule
 
 agent/evaluator.rs            ← step evaluation + completion criteria check
     check_completion_criteria()← returns Vec<CriterionResult> — NOT (bool, String)
@@ -1278,12 +1444,49 @@ All 8 are test infrastructure issues from the `StepResult` field additions and `
 
 ## State of the codebase as of this session
 
-- **Build:** 0 errors ✅
-- **Tests:** 363/363 passing. 0 failures are test mock infrastructure, not production logic ✅        
-- **All 20 templates:** Defined, wired, tested end-to-end ✅
-- **Plan mode:** Fully connected — WorkforceEvent filter, input_mapping, depends_on, segment services disclosure ✅
-- **Completion criteria:** Mechanical checks, typed results, written to DB, shown in UI ✅
-- **SkipAndLog:** Writes file AND sets metadata flag — ErrorsLogged criterion passes correctly ✅
-- **Savings:** Quality-gated, pro-rated for partial runs ✅
-- **ARCHITECTURE.md:** 1059 lines covering everything including this section ✅
+- **Templates:** All 20 templates are defined and wired through template fast-path.
+- **Plan mode:** Includes two-pass intent extraction, connector resolution, clarification pipeline, and workforce-event setup steps.
+- **Role policy:** `role_category`, `memory_scope`, and `execution_limits` are persisted and used by planner/executor runtime prompts.
+- **Completion criteria:** Mechanical checks produce typed `criteria_checks` persisted to DB and shown in run detail UI.
+- **Failure handling:** `SkipAndLog` writes the log file and sets metadata for `ErrorsLogged` checks.
+- **Savings:** Estimation remains quality-gated and pro-rated for partial runs.
+- **Tenant WASM tools:** Tenant-specific WASM modules can be registered/tested up front, approved in plan mode per role, and executed with strict per-tool CPU/memory/time caps and audit logging.
+- **Docs:** This file is continuously updated; avoid relying on static line-count/build-count claims.
 
+---
+
+## Tenant WASM tool architecture (new)
+
+Narayan supports tenant-specific custom WASM tools as a policy-first path:
+
+1. Register
+- `POST /tenant-wasm-tools` accepts a base64 `.wasm` module + metadata.
+- Module is validated before storing.
+- The system persists:
+  - `permissions` (workspace read/write, env allowlist)
+  - `limits` (memory, fuel, timeout), clamped to hard platform maxima
+  - export names, hash, version, and timestamps
+
+2. Approve in plan mode
+- Intent inference can return `candidate_wasm_tools` by exact name.
+- Plan mode persists role scope as:
+  - `run_registered_wasm`
+  - `wasm_tool:<name>` (one or more approved tool names)
+- If custom deterministic logic is needed but no suitable enabled tool is available, plan mode blocks and asks for setup/selection before save.
+
+3. Execute (runtime-enforced)
+- Executor can call `run_registered_wasm` only when the requested `tool_name` is in the role's approved scope.
+- Executor injects `tenant_id`, workspace path, and run context (`agent_id`, `role_id`, `goal_instance_id`) automatically.
+- The tool loads the module from `tenant_wasm_tools`, enforces strict caps at runtime, and runs in a WASI sandbox.
+- Runtime `create_workspace_tool` is blocked to prevent unapproved dynamic tool creation.
+
+4. Observe
+- Every invocation is recorded in `wasm_tool_runs` with:
+  - success/failure
+  - elapsed time
+  - fuel used
+  - memory limit used
+  - associated agent/role/goal instance IDs
+- `GET /tenant-wasm-tools/runs` returns recent audits.
+
+Design intent: use LLMs for reasoning and orchestration, but execute tenant business logic in deterministic, bounded WASM with hard resource ceilings.

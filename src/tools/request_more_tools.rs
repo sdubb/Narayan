@@ -64,7 +64,7 @@ impl Tool for RequestMoreToolsTool {
                 "Core tool categories to expand. Available: \
                  filesystem (shell, file_read, file_write, glob_search, compress...), \
                  web (web_search_tool, web_fetch, http_request, browser...), \
-                 code (code_run, wasm_exec, wasm_compile, sql_query, diff, patch...), \
+                 code (code_run, wasm_exec, wasm_compile, wasm_call, run_registered_wasm, sql_query, diff, patch...), \
                  data (data_extractor, pdf_read, pdf_create, spreadsheet...), \
                  memory (vector_store, vector_search, memory_store...), \
                  infra (docker, kubernetes, ssh_exec, process_monitor), \

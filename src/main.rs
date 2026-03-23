@@ -366,6 +366,9 @@ async fn main() -> Result<()> {
         tools::external_api::ExternalApiTool::new()
             .with_stores(connector_installs.clone(), store.clone())
     ));
+    tool_registry.register(Arc::new(
+        tools::run_registered_wasm::RunRegisteredWasmTool::new().with_store(store.clone())
+    ));
 
     // Re-register all built-in connector tools with the install store so stored
     // OAuth tokens / API keys are injected automatically into mcp_session calls.

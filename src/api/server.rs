@@ -114,6 +114,12 @@ pub fn build_router(
         // Tenant connectors (custom)
         .route("/tenant-connectors", get(list_tenant_connectors))
         .route("/tenant-connectors/:name", delete(delete_tenant_connector))
+        // Tenant-specific WASM tools
+        .route("/tenant-wasm-tools", get(list_tenant_wasm_tools))
+        .route("/tenant-wasm-tools", post(register_tenant_wasm_tool))
+        .route("/tenant-wasm-tools/runs", get(list_tenant_wasm_tool_runs))
+        .route("/tenant-wasm-tools/:name/enabled", put(set_tenant_wasm_tool_enabled))
+        .route("/tenant-wasm-tools/:name", delete(delete_tenant_wasm_tool))
         // Custom connections — MCP server, REST API, database
         .route("/connections/mcp/test",  post(test_mcp_connection))
         .route("/connections/mcp",       post(register_mcp_connection))

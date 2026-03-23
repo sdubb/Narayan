@@ -125,8 +125,40 @@ impl LlmPlanner {
         if !role.connectors.is_empty() {
             parts.push(format!("Available connectors for this role: {}", role.connectors.join(", ")));
         }
-        if !role.tools.is_empty() {
-            parts.push(format!("Specific tools for this role: {}", role.tools.join(", ")));
+        if let Ok(tenant_wasm_tools) = store.list_tenant_wasm_tools(&state.tenant_id).await {
+            let names: Vec<String> = tenant_wasm_tools
+                .into_iter()
+                .filter(|tool| tool.enabled)
+                .map(|tool| tool.name)
+                .collect();
+            if !names.is_empty() {
+                parts.push(format!(
+                    "Registered tenant WASM tools (strictly sandboxed): {}",
+                    names.join(", ")
+                ));
+            }
+        }
+        let mut role_tools = Vec::new();
+        let mut allowed_wasm_tools = Vec::new();
+        for tool_name in &role.tools {
+            if let Some(name) = tool_name.strip_prefix("wasm_tool:") {
+                if !name.trim().is_empty() {
+                    allowed_wasm_tools.push(name.trim().to_string());
+                }
+            } else {
+                role_tools.push(tool_name.clone());
+            }
+        }
+        allowed_wasm_tools.sort();
+        allowed_wasm_tools.dedup();
+        if !role_tools.is_empty() {
+            parts.push(format!("Specific tools for this role: {}", role_tools.join(", ")));
+        }
+        if !allowed_wasm_tools.is_empty() {
+            parts.push(format!(
+                "Allowed registered WASM tools for this role: {}",
+                allowed_wasm_tools.join(", ")
+            ));
         }
         if !role.execution_guidelines.is_empty() {
             parts.push(format!("Execution guidelines:\n{}", role.execution_guidelines.to_prompt()));

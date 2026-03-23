@@ -8,7 +8,8 @@ use crate::{
     agent::definition::{
         AgentDefinition, AgentDefinitionStatus, AgentRole, ConnectorAuthType, ConnectorSource,
         EndpointDef, ExecutionLimits, MemoryScope, OutputDestination, OutputFormat, OutputSpec,
-        RoleStatus, TenantConnector, TriggerDef, TriggerType, WorkforceEventSubscription,
+        RoleStatus, TenantConnector, TenantWasmTool, TriggerDef, TriggerType, WasmToolPermissions,
+        WasmToolResourceLimits, WasmToolRunAudit, WorkforceEventSubscription,
     },
     state::{AgentState, AgentStatus, GoalInstance, GoalInstanceStatus, GoalState, GoalStatus, TriggerSource},
     workspace::{manager::WorkspaceInfo, resolver::WorkspaceMode},
@@ -297,6 +298,63 @@ impl PostgresStore {
             .execute(&self.pool)
             .await?;
         sqlx::query("CREATE INDEX IF NOT EXISTS tenant_conn_category ON tenant_connectors (tenant_id, category)")
+            .execute(&self.pool)
+            .await?;
+
+        // ── TenantWasmTools ──────────────────────────────────────────────────
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS tenant_wasm_tools (
+                id                 TEXT PRIMARY KEY,
+                tenant_id          TEXT NOT NULL,
+                name               TEXT NOT NULL,
+                description        TEXT NOT NULL DEFAULT '',
+                module_bytes       BYTEA NOT NULL,
+                module_sha256      TEXT NOT NULL,
+                module_size_bytes  BIGINT NOT NULL DEFAULT 0,
+                exports            JSONB NOT NULL DEFAULT '[]',
+                permissions        JSONB NOT NULL DEFAULT '{}',
+                limits             JSONB NOT NULL DEFAULT '{}',
+                enabled            BOOLEAN NOT NULL DEFAULT TRUE,
+                version            INTEGER NOT NULL DEFAULT 1,
+                last_used_at       TIMESTAMPTZ,
+                created_at         TIMESTAMPTZ NOT NULL,
+                updated_at         TIMESTAMPTZ NOT NULL,
+                UNIQUE (tenant_id, name)
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS tenant_wasm_tools_tenant ON tenant_wasm_tools (tenant_id, name)")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS tenant_wasm_tools_enabled ON tenant_wasm_tools (tenant_id, enabled)")
+            .execute(&self.pool)
+            .await?;
+
+        // ── Wasm tool run audit ──────────────────────────────────────────────
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS wasm_tool_runs (
+                id                 TEXT PRIMARY KEY,
+                tenant_id          TEXT NOT NULL,
+                tool_name          TEXT NOT NULL,
+                tool_version       INTEGER NOT NULL DEFAULT 1,
+                agent_id           TEXT,
+                role_id            TEXT,
+                goal_instance_id   TEXT,
+                success            BOOLEAN NOT NULL,
+                elapsed_ms         BIGINT NOT NULL DEFAULT 0,
+                fuel_used          BIGINT,
+                memory_limit_bytes BIGINT NOT NULL DEFAULT 0,
+                error              TEXT,
+                created_at         TIMESTAMPTZ NOT NULL
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS wasm_tool_runs_tenant ON wasm_tool_runs (tenant_id, created_at DESC)")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS wasm_tool_runs_tool ON wasm_tool_runs (tenant_id, tool_name, created_at DESC)")
             .execute(&self.pool)
             .await?;
 
@@ -1281,6 +1339,209 @@ impl PostgresStore {
         Ok(())
     }
 
+    // ── TenantWasmTool CRUD ────────────────────────────────────────────────
+
+    pub async fn upsert_tenant_wasm_tool(
+        &self,
+        tool: &TenantWasmTool,
+        module_bytes: &[u8],
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO tenant_wasm_tools
+                (id, tenant_id, name, description, module_bytes, module_sha256, module_size_bytes,
+                 exports, permissions, limits, enabled, version, last_used_at, created_at, updated_at)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+            ON CONFLICT (tenant_id, name) DO UPDATE SET
+                description        = EXCLUDED.description,
+                module_bytes       = EXCLUDED.module_bytes,
+                module_sha256      = EXCLUDED.module_sha256,
+                module_size_bytes  = EXCLUDED.module_size_bytes,
+                exports            = EXCLUDED.exports,
+                permissions        = EXCLUDED.permissions,
+                limits             = EXCLUDED.limits,
+                enabled            = EXCLUDED.enabled,
+                version            = tenant_wasm_tools.version + 1,
+                updated_at         = EXCLUDED.updated_at
+            "#,
+        )
+        .bind(&tool.id)
+        .bind(&tool.tenant_id)
+        .bind(&tool.name)
+        .bind(&tool.description)
+        .bind(module_bytes)
+        .bind(&tool.module_sha256)
+        .bind((tool.module_size_bytes.min(i64::MAX as u64)) as i64)
+        .bind(serde_json::to_value(&tool.exports).unwrap_or_default())
+        .bind(serde_json::to_value(&tool.permissions).unwrap_or_default())
+        .bind(serde_json::to_value(&tool.limits.clamped()).unwrap_or_default())
+        .bind(tool.enabled)
+        .bind(tool.version as i32)
+        .bind(tool.last_used_at)
+        .bind(tool.created_at)
+        .bind(tool.updated_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn get_tenant_wasm_tool(
+        &self,
+        tenant_id: &str,
+        name: &str,
+    ) -> Result<Option<TenantWasmTool>> {
+        let row = sqlx::query(
+            "SELECT id, tenant_id, name, description, module_sha256, module_size_bytes, exports,
+                    permissions, limits, enabled, version, last_used_at, created_at, updated_at
+             FROM tenant_wasm_tools
+             WHERE tenant_id = $1 AND name = $2",
+        )
+        .bind(tenant_id)
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.as_ref().map(row_to_tenant_wasm_tool))
+    }
+
+    pub async fn get_tenant_wasm_tool_with_module(
+        &self,
+        tenant_id: &str,
+        name: &str,
+    ) -> Result<Option<(TenantWasmTool, Vec<u8>)>> {
+        let row = sqlx::query(
+            "SELECT * FROM tenant_wasm_tools WHERE tenant_id = $1 AND name = $2",
+        )
+        .bind(tenant_id)
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| {
+            let module_bytes = r.try_get::<Vec<u8>, _>("module_bytes").unwrap_or_default();
+            (row_to_tenant_wasm_tool(&r), module_bytes)
+        }))
+    }
+
+    pub async fn list_tenant_wasm_tools(&self, tenant_id: &str) -> Result<Vec<TenantWasmTool>> {
+        let rows = sqlx::query(
+            "SELECT id, tenant_id, name, description, module_sha256, module_size_bytes, exports,
+                    permissions, limits, enabled, version, last_used_at, created_at, updated_at
+             FROM tenant_wasm_tools
+             WHERE tenant_id = $1
+             ORDER BY name",
+        )
+        .bind(tenant_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(row_to_tenant_wasm_tool).collect())
+    }
+
+    pub async fn set_tenant_wasm_tool_enabled(
+        &self,
+        tenant_id: &str,
+        name: &str,
+        enabled: bool,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE tenant_wasm_tools
+             SET enabled = $1, updated_at = NOW()
+             WHERE tenant_id = $2 AND name = $3",
+        )
+        .bind(enabled)
+        .bind(tenant_id)
+        .bind(name)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn touch_tenant_wasm_tool_last_used(
+        &self,
+        tenant_id: &str,
+        name: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE tenant_wasm_tools
+             SET last_used_at = NOW(), updated_at = NOW()
+             WHERE tenant_id = $1 AND name = $2",
+        )
+        .bind(tenant_id)
+        .bind(name)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn delete_tenant_wasm_tool(&self, tenant_id: &str, name: &str) -> Result<()> {
+        sqlx::query("DELETE FROM tenant_wasm_tools WHERE tenant_id = $1 AND name = $2")
+            .bind(tenant_id)
+            .bind(name)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    // ── Wasm tool run audit ────────────────────────────────────────────────
+
+    pub async fn insert_wasm_tool_run_audit(&self, run: &WasmToolRunAudit) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO wasm_tool_runs
+                (id, tenant_id, tool_name, tool_version, agent_id, role_id, goal_instance_id,
+                 success, elapsed_ms, fuel_used, memory_limit_bytes, error, created_at)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+            "#,
+        )
+        .bind(&run.id)
+        .bind(&run.tenant_id)
+        .bind(&run.tool_name)
+        .bind(run.tool_version as i32)
+        .bind(&run.agent_id)
+        .bind(&run.role_id)
+        .bind(&run.goal_instance_id)
+        .bind(run.success)
+        .bind((run.elapsed_ms.min(i64::MAX as u64)) as i64)
+        .bind(run.fuel_used.map(|v| (v.min(i64::MAX as u64)) as i64))
+        .bind((run.memory_limit_bytes.min(i64::MAX as u64)) as i64)
+        .bind(&run.error)
+        .bind(run.created_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn list_wasm_tool_run_audit(
+        &self,
+        tenant_id: &str,
+        tool_name: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<WasmToolRunAudit>> {
+        let rows = if let Some(tool_name) = tool_name {
+            sqlx::query(
+                "SELECT * FROM wasm_tool_runs
+                 WHERE tenant_id = $1 AND tool_name = $2
+                 ORDER BY created_at DESC
+                 LIMIT $3",
+            )
+            .bind(tenant_id)
+            .bind(tool_name)
+            .bind(limit.max(1).min(200))
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query(
+                "SELECT * FROM wasm_tool_runs
+                 WHERE tenant_id = $1
+                 ORDER BY created_at DESC
+                 LIMIT $2",
+            )
+            .bind(tenant_id)
+            .bind(limit.max(1).min(200))
+            .fetch_all(&self.pool)
+            .await?
+        };
+        Ok(rows.iter().map(row_to_wasm_tool_run_audit).collect())
+    }
+
     // ── WorkforceEventSubscription CRUD ─────────────────────────────────────
 
     pub async fn upsert_workforce_subscription(
@@ -1732,6 +1993,63 @@ fn row_to_tenant_connector(row: &PgRow) -> TenantConnector {
 }
 
 // ── WorkforceEventSubscription helpers ────────────────────────────────────
+
+fn row_to_tenant_wasm_tool(row: &PgRow) -> TenantWasmTool {
+    let exports: Vec<String> = row
+        .try_get::<serde_json::Value, _>("exports")
+        .ok()
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+    let permissions: WasmToolPermissions = row
+        .try_get::<serde_json::Value, _>("permissions")
+        .ok()
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+    let limits: WasmToolResourceLimits = row
+        .try_get::<serde_json::Value, _>("limits")
+        .ok()
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+
+    TenantWasmTool {
+        id: row.get("id"),
+        tenant_id: row.get("tenant_id"),
+        name: row.get("name"),
+        description: row.try_get("description").unwrap_or_default(),
+        module_sha256: row.get("module_sha256"),
+        module_size_bytes: row.try_get::<i64, _>("module_size_bytes").unwrap_or_default().max(0) as u64,
+        exports,
+        permissions,
+        limits,
+        enabled: row.try_get("enabled").unwrap_or(true),
+        version: row.try_get::<i32, _>("version").unwrap_or(1).max(1) as u32,
+        last_used_at: row.try_get("last_used_at").ok().flatten(),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    }
+}
+
+fn row_to_wasm_tool_run_audit(row: &PgRow) -> WasmToolRunAudit {
+    WasmToolRunAudit {
+        id: row.get("id"),
+        tenant_id: row.get("tenant_id"),
+        tool_name: row.get("tool_name"),
+        tool_version: row.try_get::<i32, _>("tool_version").unwrap_or(1).max(1) as u32,
+        agent_id: row.try_get("agent_id").ok().flatten(),
+        role_id: row.try_get("role_id").ok().flatten(),
+        goal_instance_id: row.try_get("goal_instance_id").ok().flatten(),
+        success: row.try_get("success").unwrap_or(false),
+        elapsed_ms: row.try_get::<i64, _>("elapsed_ms").unwrap_or_default().max(0) as u64,
+        fuel_used: row
+            .try_get::<Option<i64>, _>("fuel_used")
+            .ok()
+            .flatten()
+            .map(|v| v.max(0) as u64),
+        memory_limit_bytes: row.try_get::<i64, _>("memory_limit_bytes").unwrap_or_default().max(0) as u64,
+        error: row.try_get("error").ok().flatten(),
+        created_at: row.get("created_at"),
+    }
+}
 
 fn row_to_workforce_subscription(row: &PgRow) -> WorkforceEventSubscription {
     WorkforceEventSubscription {

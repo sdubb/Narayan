@@ -9,7 +9,7 @@
 //! All three checks are opt-in via AgentServices — if a service is None the step
 //! is skipped with zero overhead (no Arc dereference cost either).
 
-use std::{collections::HashSet, path::Path};
+use std::{collections::{HashMap, HashSet}, path::Path};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -36,6 +36,14 @@ use crate::{
     tools::{selector::select_tools_for_step, ParameterSchema, ToolRegistry, ToolResult},
 };
 
+const WORKSPACE_TOOLS_DIR: &str = ".narayan_tools";
+const WORKSPACE_TOOLS_MANIFEST: &str = ".narayan_tools/tools.json";
+const MAX_WORKSPACE_TOOL_CODE_BYTES: usize = 200_000;
+const MAX_WORKSPACE_TOOL_STDIN_BYTES: usize = 32 * 1024;
+const MAX_WORKSPACE_TOOLS_PER_WORKSPACE: usize = 32;
+const DEFAULT_WORKSPACE_TOOL_TIMEOUT_SECS: u64 = 20;
+const MAX_WORKSPACE_TOOL_TIMEOUT_SECS: u64 = 30;
+
 fn truncate_for_log(value: &str, max_chars: usize) -> String {
     let mut out = String::with_capacity(value.len().min(max_chars));
     for ch in value.chars().take(max_chars) {
@@ -60,6 +68,16 @@ pub struct StepResult {
     pub items_processed: u64,
     /// Connectors that wrote data successfully this step (for RecordUpdated criterion check).
     pub connector_writes: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct WorkspaceGeneratedTool {
+    name: String,
+    language: String,
+    description: String,
+    script_path: String,
+    timeout_secs: u64,
+    input_schema: Option<serde_json::Value>,
 }
 
 fn sanitize_final_answer_candidate(output: &str) -> Option<String> {
@@ -175,7 +193,7 @@ fn normalize_tool_args_for_workspace(tool_name: &str, args: &mut serde_json::Val
                 }
             }
         }
-        "code_run" => {
+        "code_run" | "run_registered_wasm" => {
             let workspace = object
                 .get("workspace")
                 .and_then(|value| value.as_str())
@@ -184,6 +202,120 @@ fn normalize_tool_args_for_workspace(tool_name: &str, args: &mut serde_json::Val
             object.insert("workspace".into(), serde_json::Value::String(workspace));
         }
         _ => {}
+    }
+}
+
+fn normalize_workspace_tool_name(raw_name: &str) -> Option<String> {
+    let normalized = raw_name
+        .trim()
+        .to_ascii_lowercase()
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+        .collect::<String>()
+        .trim_matches('_')
+        .to_string();
+    if normalized.is_empty() {
+        return None;
+    }
+    let mut collapsed = String::with_capacity(normalized.len());
+    let mut prev_underscore = false;
+    for ch in normalized.chars() {
+        if ch == '_' {
+            if !prev_underscore {
+                collapsed.push('_');
+            }
+            prev_underscore = true;
+        } else {
+            prev_underscore = false;
+            collapsed.push(ch);
+        }
+    }
+    let collapsed = collapsed.trim_matches('_').to_string();
+    if collapsed.is_empty() {
+        return None;
+    }
+    let trimmed = if collapsed.len() > 48 {
+        collapsed[..48].trim_end_matches('_').to_string()
+    } else {
+        collapsed
+    };
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(format!("workspace_tool_{}", trimmed))
+}
+
+fn workspace_tool_language_config(language: &str) -> Option<(&'static str, &'static str)> {
+    match language.to_ascii_lowercase().as_str() {
+        "python" | "python3" | "py" => Some(("python", "py")),
+        "node" | "nodejs" | "js" => Some(("node", "js")),
+        "deno" | "ts" | "typescript" => Some(("deno", "ts")),
+        "bun" => Some(("bun", "js")),
+        "ruby" | "rb" => Some(("ruby", "rb")),
+        "bash" | "sh" => Some(("bash", "sh")),
+        _ => None,
+    }
+}
+
+fn build_workspace_tool_spec(tool: &WorkspaceGeneratedTool) -> crate::providers::ToolSpec {
+    let mut properties = serde_json::Map::new();
+    properties.insert(
+        "timeout_secs".into(),
+        serde_json::json!({
+            "type": "integer",
+            "description": format!(
+                "Execution timeout in seconds (capped by tool default of {}s; hard max {}s).",
+                tool.timeout_secs,
+                MAX_WORKSPACE_TOOL_TIMEOUT_SECS
+            )
+        }),
+    );
+    properties.insert(
+        "stdin".into(),
+        serde_json::json!({
+            "type": "string",
+            "description": format!(
+                "Raw stdin payload (overrides input serialization, max {} bytes).",
+                MAX_WORKSPACE_TOOL_STDIN_BYTES
+            )
+        }),
+    );
+    properties.insert(
+        "input".into(),
+        serde_json::json!({
+            "type": "object",
+            "description": "Structured input for this custom tool; serialized to stdin as JSON."
+        }),
+    );
+    properties.insert(
+        "input_schema_hint".into(),
+        serde_json::json!({
+            "type": "object",
+            "description": "Design-time schema hint captured when the tool was created (read-only hint)."
+        }),
+    );
+    if let Some(schema) = &tool.input_schema {
+        properties.insert(
+            "input_schema_hint_example".into(),
+            serde_json::json!({
+                "type": "object",
+                "description": "Example shape for input_schema_hint.",
+                "example": schema,
+            }),
+        );
+    }
+
+    crate::providers::ToolSpec {
+        name: tool.name.clone(),
+        description: format!(
+            "{} (workspace custom tool, language={})",
+            tool.description, tool.language
+        ),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": properties,
+            "required": Vec::<String>::new(),
+        }),
     }
 }
 
@@ -771,6 +903,7 @@ struct RoleExecutionPolicy {
     job_type: JobType,
     tool_preferences: Vec<String>,
     preferred_tool_categories: Vec<String>,
+    allowed_wasm_tools: Vec<String>,
     prompt_context: String,
 }
 
@@ -865,11 +998,44 @@ impl LlmExecutor {
                 preferred_connector_categories.join(", ")
             ));
         }
+        if let Ok(tenant_wasm_tools) = store.list_tenant_wasm_tools(&state.tenant_id).await {
+            let names: Vec<String> = tenant_wasm_tools
+                .into_iter()
+                .filter(|tool| tool.enabled)
+                .map(|tool| tool.name)
+                .collect();
+            if !names.is_empty() {
+                parts.push(format!(
+                    "Registered tenant WASM tools (strictly sandboxed): {}",
+                    names.join(", ")
+                ));
+            }
+        }
         if !role.connectors.is_empty() {
             parts.push(format!("Allowed connectors: {}", role.connectors.join(", ")));
         }
-        if !role.tools.is_empty() {
-            parts.push(format!("Preferred tools for this role: {}", role.tools.join(", ")));
+        let mut preferred_tools = Vec::new();
+        let mut allowed_wasm_tools = Vec::new();
+        for tool_name in &role.tools {
+            if let Some(name) = tool_name.strip_prefix("wasm_tool:") {
+                if !name.trim().is_empty() {
+                    allowed_wasm_tools.push(name.trim().to_string());
+                }
+            } else {
+                preferred_tools.push(tool_name.clone());
+            }
+        }
+        allowed_wasm_tools.sort();
+        allowed_wasm_tools.dedup();
+
+        if !preferred_tools.is_empty() {
+            parts.push(format!("Preferred tools for this role: {}", preferred_tools.join(", ")));
+        }
+        if !allowed_wasm_tools.is_empty() {
+            parts.push(format!(
+                "Allowed registered WASM tools for this role: {}",
+                allowed_wasm_tools.join(", ")
+            ));
         }
         if !role.output_spec.description.is_empty() {
             parts.push(format!("Expected output: {}", role.output_spec.description));
@@ -885,9 +1051,101 @@ impl LlmExecutor {
 
         Some(RoleExecutionPolicy {
             job_type: JobType::from_role_category(&role.role_category),
-            tool_preferences: role.tools,
+            tool_preferences: preferred_tools,
             preferred_tool_categories,
+            allowed_wasm_tools,
             prompt_context: parts.join("\n\n"),
+        })
+    }
+
+    async fn load_workspace_generated_tools(
+        &self,
+        state: &AgentState,
+        tool_specs: &mut Vec<crate::providers::ToolSpec>,
+    ) -> HashMap<String, WorkspaceGeneratedTool> {
+        let manifest_path = Path::new(&state.workspace_path).join(WORKSPACE_TOOLS_MANIFEST);
+        let Ok(contents) = tokio::fs::read_to_string(&manifest_path).await else {
+            return HashMap::new();
+        };
+
+        let tools: Vec<WorkspaceGeneratedTool> = serde_json::from_str(&contents).unwrap_or_default();
+        let mut loaded = HashMap::new();
+        for tool in tools {
+            let script_abs = Path::new(&state.workspace_path).join(&tool.script_path);
+            if !script_abs.exists() {
+                continue;
+            }
+            if !tool_specs.iter().any(|spec| spec.name == tool.name) {
+                tool_specs.push(build_workspace_tool_spec(&tool));
+            }
+            loaded.insert(tool.name.clone(), tool);
+        }
+        loaded
+    }
+
+    async fn execute_workspace_generated_tool(
+        &self,
+        tool: &WorkspaceGeneratedTool,
+        args: serde_json::Value,
+        state: &AgentState,
+    ) -> Result<ToolResult> {
+        let script_abs = Path::new(&state.workspace_path).join(&tool.script_path);
+        let code = tokio::fs::read_to_string(&script_abs)
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to read workspace tool '{}': {}", tool.name, e))?;
+
+        let stdin = if let Some(s) = args.get("stdin").and_then(|v| v.as_str()) {
+            Some(s.to_string())
+        } else if let Some(input) = args.get("input") {
+            Some(if let Some(s) = input.as_str() {
+                s.to_string()
+            } else {
+                serde_json::to_string(input).unwrap_or_default()
+            })
+        } else {
+            None
+        };
+        if let Some(stdin_text) = &stdin {
+            if stdin_text.len() > MAX_WORKSPACE_TOOL_STDIN_BYTES {
+                return Ok(ToolResult::err(format!(
+                    "workspace tool input too large ({} bytes, max {})",
+                    stdin_text.len(),
+                    MAX_WORKSPACE_TOOL_STDIN_BYTES
+                )));
+            }
+        }
+
+        let timeout_secs = args
+            .get("timeout_secs")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(tool.timeout_secs)
+            .clamp(1, tool.timeout_secs.min(MAX_WORKSPACE_TOOL_TIMEOUT_SECS).max(1));
+
+        let mut code_run_args = serde_json::json!({
+            "code": code,
+            "language": tool.language,
+            "workspace": state.workspace_path,
+            "timeout_secs": timeout_secs,
+        });
+        if let Some(stdin) = stdin {
+            code_run_args["stdin"] = serde_json::json!(stdin);
+        }
+
+        let Some(code_run_tool) = self.tools.get("code_run") else {
+            return Ok(ToolResult::err("code_run tool is unavailable in registry"));
+        };
+
+        let result = code_run_tool.execute(code_run_args).await?;
+        let output = serde_json::json!({
+            "workspace_tool": tool.name,
+            "language": tool.language,
+            "script_path": tool.script_path,
+            "result": result.output,
+        });
+        Ok(ToolResult {
+            success: result.success,
+            output,
+            error: result.error,
         })
     }
 
@@ -903,6 +1161,7 @@ impl LlmExecutor {
         args: &serde_json::Value,
         state: &AgentState,
         tool_specs: &mut Vec<crate::providers::ToolSpec>,
+        workspace_tools: &mut HashMap<String, WorkspaceGeneratedTool>,
     ) -> serde_json::Value {
         match tool_name {
             "list_connectors_in_category" => {
@@ -1136,9 +1395,9 @@ impl LlmExecutor {
 
             "request_more_tools" => {
                 // Expand core tool categories — distinct from connector expansion.
-                let categories: Vec<String> = args["categories"]
-                    .as_array()
-                    .unwrap_or(&vec![])
+                let categories_value: Vec<serde_json::Value> =
+                    args["categories"].as_array().cloned().unwrap_or_default();
+                let categories: Vec<String> = categories_value
                     .iter()
                     .filter_map(|v| v.as_str().map(String::from))
                     .collect();
@@ -1150,18 +1409,40 @@ impl LlmExecutor {
                 }
 
                 let mut added: Vec<String> = Vec::new();
-                let current_names: std::collections::HashSet<String> =
+                let mut current_names: std::collections::HashSet<String> =
                     tool_specs.iter().map(|s| s.name.clone()).collect();
 
                 for cat in &categories {
                     let new_specs = self.tools.tool_specs_for_category(cat);
                     for spec in new_specs {
                         if !current_names.contains(&spec.name) {
+                            current_names.insert(spec.name.clone());
                             added.push(spec.name.clone());
                             tool_specs.push(spec);
                         }
                     }
                 }
+
+                let mut category_names: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+                for spec in tool_specs.iter() {
+                    if let Some(tool) = self.tools.get(&spec.name) {
+                        category_names
+                            .entry(tool.category().to_string())
+                            .or_default()
+                            .push(spec.name.clone());
+                    }
+                }
+                for tools in category_names.values_mut() {
+                    tools.sort();
+                    tools.dedup();
+                }
+                let category_preview: Vec<String> = category_names
+                    .into_iter()
+                    .map(|(category, mut names)| {
+                        names.truncate(8);
+                        format!("{category}: {}", names.join(", "))
+                    })
+                    .collect();
 
                 tracing::info!(
                     tenant_id  = %state.tenant_id,
@@ -1174,7 +1455,16 @@ impl LlmExecutor {
                     "status":              "expanded",
                     "requested_categories": categories,
                     "tools_added":         added,
+                    "available_categories": category_preview,
                     "message":             "Your toolset has been expanded. Use the new tools in your next action.",
+                })
+            }
+
+            "create_workspace_tool" => {
+                serde_json::json!({
+                    "status": "blocked",
+                    "error": "create_workspace_tool is disabled at runtime",
+                    "message": "Create and test custom tools during plan mode (or pre-register tenant WASM tools), then execute only approved tools via run_registered_wasm."
                 })
             }
 
@@ -1246,6 +1536,10 @@ impl Executor for LlmExecutor {
             .as_ref()
             .map(|policy| policy.job_type.clone())
             .unwrap_or_else(|| JobType::detect(&state.goal));
+        let allowed_wasm_tools = role_policy
+            .as_ref()
+            .map(|policy| policy.allowed_wasm_tools.clone())
+            .unwrap_or_default();
         let direct_response_mode = is_direct_response_goal(&state.goal) && plan.steps.len() == 1 && step.tool.is_none();
         let answer_only_step = !direct_response_mode && is_answer_only_step(step);
         let mut tool_specs = if direct_response_mode || answer_only_step {
@@ -1261,6 +1555,7 @@ impl Executor for LlmExecutor {
                 .unwrap_or_default();
             select_tools_for_step(&self.tools, step, &job_type, &role_tools, &role_tool_categories)
         };
+        let mut workspace_tools: HashMap<String, WorkspaceGeneratedTool> = HashMap::new();
 
         tracing::debug!(
             agent_id    = %state.id,
@@ -1339,6 +1634,7 @@ impl Executor for LlmExecutor {
                 &call.arguments,
                 state,
                 &mut tool_specs,
+                &mut workspace_tools,
             ).await;
 
             // Inject the meta-tool result as a tool_result message and rebuild request
@@ -1426,7 +1722,7 @@ impl Executor for LlmExecutor {
             {
                 let needs_tenant = matches!(
                     tool_call.name.as_str(),
-                    "external_db" | "external_api"
+                    "external_db" | "external_api" | "run_registered_wasm"
                 ) || crate::tools::connector_tool::ALL_CONNECTORS
                     .iter()
                     .any(|c| c.name == tool_call.name.as_str());
@@ -1436,6 +1732,69 @@ impl Executor for LlmExecutor {
                         obj.entry("tenant_id")
                             .or_insert_with(|| serde_json::json!(state.tenant_id));
                     }
+                }
+
+                if tool_call.name == "run_registered_wasm" {
+                    if let Some(obj) = tool_call.arguments.as_object_mut() {
+                        obj.entry("workspace")
+                            .or_insert_with(|| serde_json::json!(state.workspace_path));
+                        obj.entry("agent_id")
+                            .or_insert_with(|| serde_json::json!(state.id));
+                        if let Some(role_id) = state.metadata.get("role_id").and_then(|value| value.as_str()) {
+                            obj.entry("role_id")
+                                .or_insert_with(|| serde_json::json!(role_id));
+                        }
+                        if let Some(goal_instance_id) =
+                            state.metadata.get("goal_instance_id").and_then(|value| value.as_str())
+                        {
+                            obj.entry("goal_instance_id")
+                                .or_insert_with(|| serde_json::json!(goal_instance_id));
+                        }
+                    }
+                }
+            }
+
+            if tool_call.name == "create_workspace_tool" {
+                tools_called.push(tool_call.name.clone());
+                tool_results.push(ToolResult::err(
+                    "create_workspace_tool is disabled at runtime. Configure and test custom tools in plan mode, then use run_registered_wasm.",
+                ));
+                continue;
+            }
+
+            if tool_call.name == "run_registered_wasm" {
+                let requested_tool = tool_call.arguments
+                    .get("tool_name")
+                    .and_then(|value| value.as_str())
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(String::from);
+
+                if requested_tool.is_none() {
+                    tools_called.push(tool_call.name.clone());
+                    tool_results.push(ToolResult::err(
+                        "run_registered_wasm requires tool_name; configure and approve it in plan mode",
+                    ));
+                    continue;
+                }
+
+                let requested_tool = requested_tool.unwrap();
+                if allowed_wasm_tools.is_empty() {
+                    tools_called.push(tool_call.name.clone());
+                    tool_results.push(ToolResult::err(
+                        "run_registered_wasm is not approved for this role. Configure custom tools in plan mode first.",
+                    ));
+                    continue;
+                }
+
+                if !allowed_wasm_tools.iter().any(|name| name == &requested_tool) {
+                    tools_called.push(tool_call.name.clone());
+                    tool_results.push(ToolResult::err(format!(
+                        "WASM tool '{}' is out of scope for this role. Allowed: {}",
+                        requested_tool,
+                        allowed_wasm_tools.join(", ")
+                    )));
+                    continue;
                 }
             }
 
@@ -1449,12 +1808,25 @@ impl Executor for LlmExecutor {
             );
 
             // ── 1. PII redaction — scrub args before they leave the process ──────
-            let Some(tool) = self.tools.get(&tool_call.name) else {
-                tool_results.push(ToolResult::err(format!("tool '{}' not found in registry", tool_call.name)));
-                continue;
+            let workspace_tool = workspace_tools.get(&tool_call.name).cloned();
+            let builtin_tool = if workspace_tool.is_none() {
+                self.tools.get(&tool_call.name)
+            } else {
+                None
             };
+            if workspace_tool.is_none() && builtin_tool.is_none() {
+                tool_results.push(ToolResult::err(format!(
+                    "tool '{}' not found in registry or workspace custom tools",
+                    tool_call.name
+                )));
+                continue;
+            }
 
-            let missing = missing_required_args(&tool_call.arguments, &tool.parameters_schema());
+            let missing = if let Some(tool) = &builtin_tool {
+                missing_required_args(&tool_call.arguments, &tool.parameters_schema())
+            } else {
+                Vec::new()
+            };
             if !missing.is_empty() {
                 tool_results.push(ToolResult::err(format!(
                     "tool '{}' missing required args: {}",
@@ -1606,7 +1978,15 @@ impl Executor for LlmExecutor {
             }
 
             // ── 4. Execute ───────────────────────────────────────────────────────
-            match tool.execute(clean_args).await {
+            let execution = if let Some(workspace_tool) = workspace_tool {
+                self.execute_workspace_generated_tool(&workspace_tool, clean_args, state).await
+            } else if let Some(tool) = builtin_tool {
+                tool.execute(clean_args).await
+            } else {
+                Ok(ToolResult::err(format!("tool '{}' is unavailable", tool_call.name)))
+            };
+
+            match execution {
                 Ok(result) => {
                     let filtered_result = apply_result_relevance_filter(&tool_call.name, result, state, step);
                     tracing::info!(
@@ -1677,6 +2057,10 @@ impl Executor for LlmExecutor {
 
 /// Risk classification — hard floor, runs even when PolicyEngine is None.
 fn plane_guard_risk(tool_name: &str) -> &'static str {
+    if tool_name.starts_with("workspace_tool_") {
+        return "medium";
+    }
+
     match tool_name {
         "file_read"
         | "glob_search"
@@ -1702,6 +2086,7 @@ fn plane_guard_risk(tool_name: &str) -> &'static str {
 
         "file_write" | "file_edit" | "memory_store" | "memory_forget" | "git_operations" | "api_call" | "pushover"
         | "schedule" | "cron_add" | "cron_update" | "cron_remove" | "wasm_exec" | "wasm_compile" | "wasm_call"
+        | "run_registered_wasm"
         | "code_run" | "compress" | "decompress" | "image_process" | "pdf_create" | "spreadsheet_write" | "email"
         | "notification" | "vector_store" | "vector_delete" | "crypto_tool" | "screenshot" | "browser_interact"
         | "browser_pdf" | "browser_network" | "ssh_exec" => "medium",
