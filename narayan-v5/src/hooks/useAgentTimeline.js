@@ -29,15 +29,18 @@ function isTerminalStatus(status) {
 
 function nextStatusFromEvent(type) {
   return {
-    goal_complete: 'completed',
-    goal_failed: 'failed',
-    step_started: 'running',
-    clarification_needed: 'clarifying',
+    goal_complete:          'completed',
+    goal_failed:            'failed',
+    step_started:           'running',
+    clarification_needed:   'clarifying',
     clarification_received: 'running',
-    child_spawned: 'delegating',
-    planning_started: 'running',
-    step_retrying: 'waiting',
-    step_completed: 'waiting',
+    child_spawned:          'delegating',
+    planning_started:       'running',
+    step_retrying:          'waiting',
+    step_completed:         'waiting',
+    plan_approval_needed:   'plan_approval_needed',
+    plan_approved:          'waiting',
+    plan_rejected:          'plan_rejected',
   }[type];
 }
 
@@ -45,7 +48,11 @@ function nextStatusFromEvent(type) {
 function buildGroupedEvents(events) {
   const grouped = {
     preflight: { started: false, passed: false, failed: false, failReason: '', questions: [] },
-    plan: { stepCount: 0, rationale: '', jobType: '', steps: [] },
+    plan: {
+      stepCount: 0, rationale: '', jobType: '', steps: [],
+      approvalNeeded: false, replanning: false,
+      rejectionCount: 0, missingCredentials: [], stepConfidence: [],
+    },
     steps: [],
     delegation: { children: [], allComplete: false },
     terminal: { type: null, summary: '', reason: '' },
@@ -67,8 +74,28 @@ function buildGroupedEvents(events) {
     if (t === 'plan_created') {
       grouped.plan.stepCount = ev.step_count || 0;
       grouped.plan.rationale = ev.rationale || '';
-      grouped.plan.jobType = ev.job_type || '';
-      grouped.plan.steps = ev.steps || [];
+      grouped.plan.jobType   = ev.job_type  || '';
+      grouped.plan.steps     = ev.steps     || [];
+    }
+    if (t === 'plan_approval_needed') {
+      grouped.plan.approvalNeeded       = true;
+      grouped.plan.replanning           = false;
+      grouped.plan.stepCount            = ev.step_count            || grouped.plan.stepCount;
+      grouped.plan.rationale            = ev.rationale             || grouped.plan.rationale;
+      grouped.plan.steps                = ev.steps                 || grouped.plan.steps;
+      grouped.plan.jobType              = ev.job_type              || grouped.plan.jobType;
+      grouped.plan.rejectionCount       = ev.rejection_count       || 0;
+      grouped.plan.missingCredentials   = ev.missing_credentials   || [];
+      grouped.plan.stepConfidence       = ev.step_confidence       || [];
+    }
+    if (t === 'plan_rejected') {
+      grouped.plan.replanning     = true;
+      grouped.plan.approvalNeeded = false;
+      grouped.plan.rejectionCount = ev.rejection_count || 0;
+    }
+    if (t === 'plan_approved') {
+      grouped.plan.approvalNeeded = false;
+      grouped.plan.replanning     = false;
     }
 
     // Steps

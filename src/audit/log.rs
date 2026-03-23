@@ -44,6 +44,8 @@ pub enum AuditAction {
     WebhookRegistered,
     WebhookDelivered,
     WebhookFailed,
+    // ── Goal lifecycle ──────────────────────────────────────────
+    GoalFailed,
     // ── Catch-all ────────────────────────────────────────────────
     Custom,
 }

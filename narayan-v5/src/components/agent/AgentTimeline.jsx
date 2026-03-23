@@ -4,7 +4,7 @@ import clsx from 'clsx';
 import { Activity, Loader2, Network, Layers, Zap, Wrench, RotateCcw, Bell, Cpu, StopCircle } from 'lucide-react';
 import { useAgentTimeline } from '../../hooks/useAgentTimeline';
 import { PhaseBar } from '../layout';
-import { PlanCard, StepCard, ClarificationCard, ReviewCard, GoalCompleteCard, GoalFailedCard, ConnectorTriggerCard, PolicyCard, CitationCard } from '../cards';
+import { PlanCard, StepCard, ClarificationCard, ReviewCard, GoalCompleteCard, GoalFailedCard, ConnectorTriggerCard, PolicyCard, CitationCard, PlanApprovalCard } from '../cards';
 import CostCounter from './CostCounter';
 import ReplayScrubber from './ReplayScrubber';
 import { agents as agentsApi } from '../../api';
@@ -102,6 +102,15 @@ export default function AgentTimeline({ agentId, initialStatus, onStatusChange, 
     }
   }, [isTerminal, agentId]);
 
+  // Replay fallback: if the page is refreshed while plan approval is pending
+  // and the SSE history has no steps, fetch the stored plan from the server
+  // so the PlanApprovalCard can reconstruct itself.
+  useEffect(() => {
+    if (liveStatus === 'plan_approval_needed' && groupedEvents?.plan?.steps?.length === 0 && agentId) {
+      agentsApi.get(agentId).catch(() => {});
+    }
+  }, [liveStatus, agentId]);
+
   const cost = useMemo(() => {
     return events.reduce((sum, ev) => {
       if (ev.cost_usd) return sum + ev.cost_usd;
@@ -170,6 +179,27 @@ export default function AgentTimeline({ agentId, initialStatus, onStatusChange, 
       {plan?.stepCount > 0 && (
         <div className="mb-3">
           <PlanCard event={events.find(e => e.type === 'plan_created') || { step_count: plan.stepCount, rationale: plan.rationale, steps: plan.steps, job_type: plan.jobType }} />
+        </div>
+      )}
+
+      {/* Plan approval gate */}
+      {plan?.approvalNeeded && liveStatus === 'plan_approval_needed' && (
+        <div className="mb-3">
+          <PlanApprovalCard
+            agentId={agentId}
+            plan={plan}
+            replanning={false}
+            onDone={() => onStatusChange?.('waiting')}
+            onNavigateSettings={onNavigateSettings}
+          />
+        </div>
+      )}
+
+      {/* Replanning bridge — shown between rejection and new plan arriving */}
+      {plan?.replanning && liveStatus !== 'plan_approval_needed' && (
+        <div className="my-3 rounded-xl border border-warn/25 bg-warn-soft/20 p-4 flex items-center gap-3">
+          <Loader2 size={14} className="text-warn animate-spin shrink-0" />
+          <span className="text-sm text-tx-2">Replanning with your feedback…</span>
         </div>
       )}
 

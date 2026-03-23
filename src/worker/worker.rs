@@ -112,16 +112,46 @@ impl Worker {
                     "step done — rescheduled"
                 );
             }
+            StepOutcome::PlanApprovalNeeded => {
+                tracing::info!(
+                    agent_id = %task.agent_id,
+                    "plan created — awaiting user approval"
+                );
+            }
             StepOutcome::Complete => {
                 tracing::info!(agent_id = %task.agent_id, "✓ goal complete");
                 self.archive_workspace_async(&task.agent_id, &state.tenant_id);
-                // ── Evidence packaging — fire-and-forget on completion ────────
                 self.package_evidence_async(
                     task.agent_id.clone(),
                     state.tenant_id.clone(),
                     state.goal.clone(),
                     "completed".into(),
                 );
+                if let Some(goal_instance_id) = state.metadata.get("goal_instance_id")
+                    .and_then(|v| v.as_str()).map(String::from)
+                {
+                    let store  = Arc::clone(&self.store);
+                    let tenant = state.tenant_id.clone();
+                    spawn_savings_estimation(store, tenant, goal_instance_id);
+                }
+            }
+            StepOutcome::PartiallyComplete { note } => {
+                tracing::warn!(agent_id = %task.agent_id, note = %note, "⚠ goal partially complete");
+                self.archive_workspace_async(&task.agent_id, &state.tenant_id);
+                self.package_evidence_async(
+                    task.agent_id.clone(),
+                    state.tenant_id.clone(),
+                    state.goal.clone(),
+                    "partially_complete".into(),
+                );
+                // Pro-rated savings estimation for partial runs
+                if let Some(goal_instance_id) = state.metadata.get("goal_instance_id")
+                    .and_then(|v| v.as_str()).map(String::from)
+                {
+                    let store  = Arc::clone(&self.store);
+                    let tenant = state.tenant_id.clone();
+                    spawn_savings_estimation(store, tenant, goal_instance_id);
+                }
             }
             StepOutcome::Failed(reason) => {
                 tracing::error!(agent_id = %task.agent_id, reason = %reason, "✗ agent failed");
@@ -198,6 +228,36 @@ impl Worker {
             }
         });
     }
+}
+
+/// Fire-and-forget savings estimation — spawned on every Complete outcome.
+/// Loads the GoalInstance + its AgentRole, runs the estimator, persists.
+fn spawn_savings_estimation(
+    store:            Arc<crate::storage::PostgresStore>,
+    tenant_id:        String,
+    goal_instance_id: String,
+) {
+    tokio::spawn(async move {
+        // Load goal instance
+        let gi = match store.get_goal_instance(&tenant_id, &goal_instance_id).await {
+            Ok(Some(gi)) => gi,
+            _ => return,
+        };
+        // Only estimate completed, non-test runs that haven't been estimated yet
+        if gi.human_hours_saved > 0.0 || gi.is_test { return; }
+
+        // Load the role
+        let role = match store.get_agent_role(&tenant_id, &gi.role_id).await {
+            Ok(Some(r)) => r,
+            _ => return,
+        };
+
+        let estimator = crate::agent::savings::WorkSavingsEstimator::new(Arc::clone(&store));
+        let mut gi_mut = gi;
+        if let Err(e) = estimator.estimate_and_persist(&mut gi_mut, &role).await {
+            tracing::warn!(error = %e, "savings estimation failed — non-fatal");
+        }
+    });
 }
 
 #[cfg(test)]

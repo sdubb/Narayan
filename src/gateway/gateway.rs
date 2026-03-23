@@ -1,6 +1,6 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::{HashMap, HashSet}, sync::Arc};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 
 use crate::{
@@ -110,12 +110,13 @@ impl NarayanGateway {
             anyhow::bail!("provider '{}' is disabled for this tenant", provider);
         }
 
-        let api_key = decrypt_secret(&cred.secret_enc, &self.encrypt_key)?;
+        let api_key = decrypt_secret(&cred.secret_enc, &self.encrypt_key)
+            .with_context(|| format!("failed to decrypt credential for provider '{}'", provider))?;
         let model = cred.model.clone();
 
         crate::providers::build_provider(provider, api_key, model)
             .ok_or_else(|| anyhow::anyhow!(
-                "unknown provider type '{}'. Supported: anthropic, openai, gemini, ollama, openrouter,                  copilot, glm, novita, sglang, compatible",
+                "unknown provider type '{}'. Supported: anthropic, openai, groq, gemini, nvidia, ollama, openrouter, copilot, glm, novita, sglang, compatible",
                 provider
             ))
     }
@@ -138,27 +139,45 @@ impl NarayanGateway {
         }
         .clone();
 
+        let mut enabled_provider_names: Vec<String> = config
+            .credentials
+            .values()
+            .filter(|cred| cred.enabled)
+            .map(|cred| cred.provider.clone())
+            .collect();
+        enabled_provider_names.sort();
+
+        let mut attempted = HashSet::new();
+        let mut candidate_names = Vec::new();
+        for name in [&preferred, &config.routing.fallback] {
+            if enabled_provider_names.iter().any(|provider| provider == name) && attempted.insert(name.clone()) {
+                candidate_names.push(name.clone());
+            }
+        }
+        for name in &enabled_provider_names {
+            if attempted.insert(name.clone()) {
+                candidate_names.push(name.clone());
+            }
+        }
+
+        let mut tenant_errors = Vec::new();
+
         // Try tenant's own credential for preferred provider
-        if let Ok(p) = self.build_provider(&config, &preferred) {
-            tracing::debug!(tenant_id, provider = %preferred, "using tenant BYOK credential");
-            return Ok((p, preferred));
-        }
-
-        // Try tenant's fallback provider
-        if let Ok(p) = self.build_provider(&config, &config.routing.fallback) {
-            let fb = config.routing.fallback.clone();
-            tracing::debug!(tenant_id, provider = %fb, "using tenant fallback credential");
-            return Ok((p, fb));
-        }
-
-        // Try any enabled tenant credential
-        let enabled: Vec<_> = config.credentials.values().filter(|c| c.enabled).collect();
-
-        if let Some(cred) = enabled.first() {
-            if let Ok(p) = self.build_provider(&config, &cred.provider) {
-                let name = cred.provider.clone();
-                tracing::debug!(tenant_id, provider = %name, "using first available tenant credential");
-                return Ok((p, name));
+        for provider_name in candidate_names {
+            match self.build_provider(&config, &provider_name) {
+                Ok(provider) => {
+                    tracing::debug!(tenant_id, provider = %provider_name, "using tenant BYOK credential");
+                    return Ok((provider, provider_name));
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        tenant_id,
+                        provider = %provider_name,
+                        error = %error,
+                        "tenant credential exists but could not be used"
+                    );
+                    tenant_errors.push(format!("{}: {}", provider_name, error));
+                }
             }
         }
 
@@ -179,6 +198,14 @@ impl NarayanGateway {
                 "tenant has no credentials — using first platform fallback key"
             );
             return Ok((p.clone(), name.clone()));
+        }
+
+        if !enabled_provider_names.is_empty() && !tenant_errors.is_empty() {
+            anyhow::bail!(
+                "tenant '{}' has provider credentials configured, but none are usable: {}",
+                tenant_id,
+                tenant_errors.join("; ")
+            );
         }
 
         anyhow::bail!(

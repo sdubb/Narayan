@@ -5,6 +5,8 @@ firmware/*/target
 *.db
 *.db-journal
 .DS_Store
+*:Zone.Identifier
+*Zone.Identifier
 .wt-pr37/
 __pycache__/
 *.pyc

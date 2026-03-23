@@ -17,6 +17,9 @@ function getPhaseStatus(phase, groupedEvents) {
   }
   if (phase === 'planning') {
     if (!preflight?.passed) return 'future';
+    // While the user is reviewing the plan, keep Planning as "active" (pulsing
+    // amber) so it's clear we're still in the planning gate, not in execution.
+    if (plan?.approvalNeeded || plan?.replanning) return 'active';
     if (plan?.stepCount > 0) return 'completed';
     if (preflight?.passed && !plan?.stepCount) return 'active';
     return 'future';

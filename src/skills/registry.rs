@@ -376,5 +376,143 @@ fn curated_skills() -> Vec<Skill> {
             ],
         )
         .with_aliases(vec!["setup connector", "connect service", "oauth setup", "connect integration"]),
+
+        // ── Plan mode domain skills ──────────────────────────────────────────────
+        // These are injected during plan mode's CapturingConstraints phase when the
+        // intent category matches. Each skill encodes the mandatory questions to ask
+        // for that domain AND the execution brief that goes into the role's guidelines.
+
+        Skill::new(
+            "planmode:customer_support",
+            "Domain configuration for customer support agents.",
+            vec![
+                "MANDATORY QUESTIONS — ask all of these before confirming:\n\
+                 1. Response mode: should I draft replies for human approval, or send automatically?\n\
+                 2. First-response SLA: how fast must the first reply go out? (15 min / 1 hr / 4 hr / best-effort)\n\
+                 3. Escalation: which ticket types should always escalate to a human? (billing, legal threats, VIP, angry tone?)\n\
+                 4. Tone: formal, friendly, or match the customer?\n\
+                 5. Knowledge source: is there a URL, Notion page, or help docs to search for answers?".into(),
+                "EXECUTION BRIEF for the agent:\n\
+                 - Always search the knowledge base before composing a reply\n\
+                 - If knowledge base returns nothing: say so explicitly, do NOT hallucinate\n\
+                 - On escalation: tag the ticket, add an internal note explaining why, do not send public reply\n\
+                 - On SLA breach risk: warn in an internal note before the deadline, do not auto-close\n\
+                 - Never share PII from one ticket with another customer".into(),
+            ],
+        ).with_aliases(vec!["customer_support", "support agent", "helpdesk", "zendesk", "intercom", "freshdesk"]),
+
+        Skill::new(
+            "planmode:sales_revops",
+            "Domain configuration for sales, CRM, and revenue operations agents.",
+            vec![
+                "MANDATORY QUESTIONS — ask all of these before confirming:\n\
+                 1. Data source: which CRM fields to read? (Lead, Contact, Account, Opportunity?)\n\
+                 2. Write-back: update records automatically, or create tasks/notes only?\n\
+                 3. Enrichment sources: web search, LinkedIn, company data APIs, or CRM only?\n\
+                 4. Outreach: draft email in workspace, add to sequence, or send directly?\n\
+                 5. Qualification criteria: what makes a lead worth enriching? (minimum company size, industry, title?)".into(),
+                "EXECUTION BRIEF for the agent:\n\
+                 - Read before writing: always fetch current record state before any update\n\
+                 - Deduplication: check if a contact/company already exists before creating new records\n\
+                 - On missing data: skip the record and log it, do not fill with guesses\n\
+                 - On outreach: save draft to workspace first, only send if explicitly configured to auto-send\n\
+                 - Never overwrite existing CRM notes — always append".into(),
+            ],
+        ).with_aliases(vec!["sales_revops", "crm", "salesforce", "hubspot", "lead enrichment", "outreach", "pipeline"]),
+
+        Skill::new(
+            "planmode:finance_accounting",
+            "Domain configuration for finance and accounting agents.",
+            vec![
+                "MANDATORY QUESTIONS — ask all of these before confirming:\n\
+                 1. Write access: read-only reporting, or can the agent create/update records?\n\
+                 2. Approval gate: any transaction above what amount needs human approval before posting?\n\
+                 3. Reconciliation window: which date range should be reconciled?\n\
+                 4. Output format: QuickBooks, spreadsheet, PDF report, or Slack summary?\n\
+                 5. Error handling: if a record doesn't match, flag for review or block the entire run?".into(),
+                "EXECUTION BRIEF for the agent:\n\
+                 - Never DELETE financial records — use void/reversal instead\n\
+                 - Transactions above the approval threshold: create a pending record, notify, wait for confirmation\n\
+                 - Always log the before/after state of any record you modify\n\
+                 - On reconciliation mismatch: add a flagged note, do not auto-correct\n\
+                 - Redact SSN, account numbers, and routing numbers from any output".into(),
+            ],
+        ).with_aliases(vec!["finance_accounting", "finance", "accounting", "quickbooks", "invoices", "reconciliation"]),
+
+        Skill::new(
+            "planmode:devops",
+            "Domain configuration for DevOps, infrastructure, and SRE agents.",
+            vec![
+                "MANDATORY QUESTIONS — ask all of these before confirming:\n\
+                 1. Environment: prod, staging, or dev? (Never default to prod)\n\
+                 2. Blast radius: can this agent modify infrastructure, or read-only?\n\
+                 3. Rollback plan: if a change fails, what's the recovery path?\n\
+                 4. Alerting: which Slack channel or PagerDuty service for failure notifications?\n\
+                 5. Change window: is there a maintenance window, or can changes run anytime?".into(),
+                "EXECUTION BRIEF for the agent:\n\
+                 - Dry-run first: always run with --dry-run or equivalent before applying changes\n\
+                 - Snapshot before mutation: take a state snapshot before any destructive operation\n\
+                 - On failure: stop immediately, do not attempt partial recovery — alert and wait\n\
+                 - Never touch prod without an explicit confirmation in the current run\n\
+                 - Log every command and its exit code to the workspace".into(),
+            ],
+        ).with_aliases(vec!["devops", "it_ops_itsm", "infrastructure", "kubernetes", "sre", "deployment", "pagerduty", "servicenow"]),
+
+        Skill::new(
+            "planmode:hr_people_ops",
+            "Domain configuration for HR and people operations agents.",
+            vec![
+                "MANDATORY QUESTIONS — ask all of these before confirming:\n\
+                 1. Data sensitivity: does this touch compensation, performance ratings, or termination data?\n\
+                 2. Visibility: who can see the agent's output? (HR only, manager, candidate, everyone?)\n\
+                 3. Write-back: update ATS records, or report only?\n\
+                 4. Compliance: any GDPR/CCPA regions where candidates have data deletion rights?\n\
+                 5. Communication: draft offers/rejections in workspace, or send directly?".into(),
+                "EXECUTION BRIEF for the agent:\n\
+                 - Compensation and performance data: never include in outbound messages or logs\n\
+                 - Candidate PII: process in workspace only, do not write to external systems without explicit config\n\
+                 - On rejection: use approved template language, no improvisation\n\
+                 - Right-to-erasure requests: log them immediately, do not process other tasks until acknowledged\n\
+                 - Never compare candidates by protected characteristics (age, gender, race, religion)".into(),
+            ],
+        ).with_aliases(vec!["hr_people_ops", "hr", "recruiting", "greenhouse", "hiring", "candidates", "onboarding"]),
+
+        Skill::new(
+            "planmode:legal_contract",
+            "Domain configuration for legal and contract management agents.",
+            vec![
+                "MANDATORY QUESTIONS — ask all of these before confirming:\n\
+                 1. Action scope: flag issues only, or redline and suggest edits?\n\
+                 2. Governing law: which jurisdiction? (affects which clauses are standard vs. unusual)\n\
+                 3. Counterparty type: customer, vendor, partner, or employee?\n\
+                 4. Escalation: which clause types must always go to legal counsel? (indemnity cap, IP assignment, exclusivity?)\n\
+                 5. Output: annotated PDF, tracked-changes Word doc, or summary report?".into(),
+                "EXECUTION BRIEF for the agent:\n\
+                 - This agent identifies and flags risks — it does NOT give legal advice\n\
+                 - Always include a disclaimer: 'Review by qualified counsel before signing'\n\
+                 - Escalation clauses: indemnity, IP assignment, exclusivity, non-compete — always flag, never auto-accept\n\
+                 - On missing standard clause: note the gap, do not fill it with boilerplate\n\
+                 - Version every document: never overwrite the original, save redlines separately".into(),
+            ],
+        ).with_aliases(vec!["legal_contract", "legal", "contract", "docusign", "nda", "agreement", "redline"]),
+
+        Skill::new(
+            "planmode:research_analyst",
+            "Domain configuration for research and analysis agents.",
+            vec![
+                "MANDATORY QUESTIONS — ask all of these before confirming:\n\
+                 1. Sources: web search only, or also internal documents, databases, specific URLs?\n\
+                 2. Depth: quick summary (3-5 sources) or deep research (10+ sources with citations)?\n\
+                 3. Output format: bullet summary, structured report, or raw data?\n\
+                 4. Freshness: how recent must sources be? (last 7 days / 30 days / any)\n\
+                 5. Confidence threshold: flag uncertain findings, or only report high-confidence data?".into(),
+                "EXECUTION BRIEF for the agent:\n\
+                 - Always cite sources with URLs — never present findings without attribution\n\
+                 - Contradictory sources: present both views, do not pick one without evidence\n\
+                 - On paywalled content: note the source exists but could not be accessed\n\
+                 - Distinguish clearly between facts and inferences\n\
+                 - If fewer than 3 sources found: say so and ask whether to proceed or broaden scope".into(),
+            ],
+        ).with_aliases(vec!["research_analyst", "research", "analysis", "report", "competitor analysis", "market research"]),
     ]
 }

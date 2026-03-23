@@ -114,7 +114,9 @@ impl Executor for MockExecutor {
                 final_answer_candidate: Some("mock output".into()),
                 tool_results: Vec::new(),
                 tools_called: Vec::new(),
-            })
+                        items_processed: 0,
+            connector_writes: vec![],
+        })
         } else {
             Ok(queue.remove(0))
         }

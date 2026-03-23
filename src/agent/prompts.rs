@@ -684,20 +684,31 @@ CONSTRAINTS:
 
     /// User message for initial plan creation.
     /// Uses tool_manifest (grouped categories) instead of a flat list.
-    pub fn user_create(state: &AgentState, context: &str, tool_manifest: &str, conversation_history: &str) -> String {
+    pub fn user_create(
+        state: &AgentState,
+        context: &str,
+        tool_manifest: &str,
+        conversation_history: &str,
+        role_context: Option<&str>,
+    ) -> String {
         let conv_ctx =
             if conversation_history.is_empty() { String::new() } else { format!("\n{conversation_history}\n") };
         let clarification_ctx = clarification_context(state)
             .map(|value| format!("\nLATEST USER INPUT:\n{value}\n"))
             .unwrap_or_default();
+        let role_ctx = role_context
+            .filter(|s| !s.is_empty())
+            .map(|s| format!("\nROLE CONTEXT (follow these guidelines):\n{s}\n"))
+            .unwrap_or_default();
         format!(
-            "{conv_ctx}GOAL: {goal}\n\nWORKSPACE: {ws}{clarification_ctx}\nADDITIONAL CONTEXT:\n{ctx}\n\n{manifest}\n\nCreate the plan now.",
-            conv_ctx = conv_ctx,
-            goal = state.goal,
-            ws = state.workspace_path,
+            "{conv_ctx}GOAL: {goal}\n\nWORKSPACE: {ws}{clarification_ctx}{role_ctx}\nADDITIONAL CONTEXT:\n{ctx}\n\n{manifest}\n\nCreate the plan now.",
+            conv_ctx          = conv_ctx,
+            goal              = state.goal,
+            ws                = state.workspace_path,
             clarification_ctx = clarification_ctx,
-            ctx = if context.is_empty() { "none" } else { context },
-            manifest = tool_manifest,
+            role_ctx          = role_ctx,
+            ctx               = if context.is_empty() { "none" } else { context },
+            manifest          = tool_manifest,
         )
     }
 

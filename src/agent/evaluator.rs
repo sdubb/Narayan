@@ -105,13 +105,37 @@ impl Evaluator for LlmEvaluator {
         if plan.is_complete(state.current_step as usize + 1) && result.success {
             let summary = result
                 .final_answer_candidate
-                .clone()
+                .as_deref()
+                .and_then(|s| {
+                    let trimmed = s.trim();
+                    if trimmed.is_empty()
+                        || trimmed.eq_ignore_ascii_case("no output")
+                        || trimmed.starts_with("STEP FAILED:")
+                    {
+                        return None;
+                    }
+                    let answer = trimmed
+                        .strip_suffix("STEP COMPLETE")
+                        .map(str::trim)
+                        .unwrap_or(trimmed)
+                        .trim();
+                    if answer.is_empty() { None } else { Some(answer.to_string()) }
+                })
                 .or_else(|| {
                     let trimmed = result.output.trim();
-                    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("no output") {
+                    if trimmed.is_empty()
+                        || trimmed.eq_ignore_ascii_case("no output")
+                        || trimmed == "STEP COMPLETE"
+                    {
                         None
                     } else {
-                        Some(trimmed.to_string())
+                        Some(
+                            trimmed
+                                .strip_suffix("STEP COMPLETE")
+                                .unwrap_or(trimmed)
+                                .trim()
+                                .to_string(),
+                        )
                     }
                 })
                 .unwrap_or_else(|| "goal complete".into());
@@ -268,6 +292,147 @@ impl Evaluator for LlmEvaluator {
     }
 }
 
+/// Per-criterion result from a completion check — written to goal_instance.result.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CriterionResult {
+    pub description: String,
+    pub satisfied:   bool,
+    pub check_type:  String,  // "output_exists" | "all_items_processed" | etc.
+    pub detail:      String,  // human-readable explanation of why pass/fail
+}
+
+/// Check whether a completed run satisfies its CompletionCriteria.
+/// Returns (all_satisfied, results_per_criterion).
+/// Caller writes results into goal_instance.result["criteria_checks"].
+pub fn check_completion_criteria(
+    role:  &crate::agent::definition::AgentRole,
+    state: &AgentState,
+) -> (bool, Vec<CriterionResult>) {
+    use crate::agent::definition::CompletionCheck;
+
+    if role.execution_guidelines.completion_criteria.is_empty() {
+        return (true, vec![]);
+    }
+
+    let mut results: Vec<CriterionResult> = Vec::new();
+
+    for criterion in &role.execution_guidelines.completion_criteria {
+        let (satisfied, check_type, detail) = match &criterion.check {
+            CompletionCheck::OutputExists { path_hint } => {
+                let ws = &state.workspace_path;
+                let path = if path_hint.starts_with('/') {
+                    path_hint.clone()
+                } else {
+                    format!("{}/{}", ws.trim_end_matches('/'), path_hint.trim_start_matches('/'))
+                };
+                let exists = std::path::Path::new(&path).exists();
+                (
+                    exists,
+                    "output_exists".into(),
+                    if exists {
+                        format!("✓ Found output at {}", path)
+                    } else {
+                        format!("✗ No output at {} — workspace may be empty", path)
+                    },
+                )
+            }
+            CompletionCheck::ErrorsLogged { log_hint } => {
+                let ws = &state.workspace_path;
+                let log_path = format!("{}/{}", ws.trim_end_matches('/'), log_hint.trim_start_matches('/'));
+                let exists = std::path::Path::new(&log_path).exists()
+                    || state.metadata.get("errors_logged").and_then(|v| v.as_bool()).unwrap_or(false);
+                (
+                    exists,
+                    "errors_logged".into(),
+                    if exists {
+                        format!("✓ Error log written at {}", log_path)
+                    } else {
+                        format!("✗ Error log missing at {} — skipped records may not have been logged", log_path)
+                    },
+                )
+            }
+            CompletionCheck::AllItemsProcessed { collection_hint } => {
+                let processed = state.metadata
+                    .get("step_outputs")
+                    .and_then(|v| v.as_array())
+                    .and_then(|arr| {
+                        arr.iter().filter_map(|o| {
+                            o.get("processed").or_else(|| o.get("count"))
+                                .and_then(|v| v.as_u64())
+                        }).reduce(|a, b| a + b)
+                    })
+                    .unwrap_or(0);
+                let ok = processed > 0;
+                (
+                    ok,
+                    "all_items_processed".into(),
+                    if ok {
+                        format!("✓ {} items processed from {}", processed, collection_hint)
+                    } else {
+                        format!("✗ 0 items processed from {} — query may have returned nothing", collection_hint)
+                    },
+                )
+            }
+            CompletionCheck::RecordUpdated { connector } => {
+                let written = state.metadata
+                    .get("step_outputs")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| arr.iter().any(|o| {
+                        o.get("connectors")
+                            .and_then(|c| c.as_array())
+                            .map(|cs| cs.iter().any(|c| c.as_str() == Some(connector.as_str())))
+                            .unwrap_or(false)
+                    }))
+                    .unwrap_or(false);
+                (
+                    written,
+                    "record_updated".into(),
+                    if written {
+                        format!("✓ {} record updated", connector)
+                    } else {
+                        format!("✗ No successful write to {} found in step outputs", connector)
+                    },
+                )
+            }
+            CompletionCheck::CountMatches { source, target } => {
+                let get_count = |key: &str| -> u64 {
+                    state.metadata.get("step_outputs")
+                        .and_then(|v| v.as_array())
+                        .and_then(|arr| arr.iter().find_map(|o| o.get(key)?.as_u64()))
+                        .unwrap_or(0)
+                };
+                let sc = get_count(source);
+                let tc = get_count(target);
+                let ok = sc > 0 && sc == tc;
+                (
+                    ok,
+                    "count_matches".into(),
+                    if ok {
+                        format!("✓ {} {} = {} {} (counts match)", sc, source, tc, target)
+                    } else if sc == 0 {
+                        format!("✗ {} count is 0 — source step may not have run", source)
+                    } else {
+                        format!("✗ {}/{} items: {} processed, {} output (mismatch)", sc, tc, source, target)
+                    },
+                )
+            }
+            CompletionCheck::Custom { assertion } => {
+                // Custom criteria pass through — show as informational
+                (true, "custom".into(), format!("ℹ {}", assertion))
+            }
+        };
+
+        results.push(CriterionResult {
+            description: criterion.description.clone(),
+            satisfied,
+            check_type,
+            detail,
+        });
+    }
+
+    let all_satisfied = results.iter().all(|r| r.satisfied);
+    (all_satisfied, results)
+}
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
@@ -336,6 +501,8 @@ mod tests {
             final_answer_candidate: Some("STEP COMPLETE".into()),
             tool_results: vec![ToolResult::ok(serde_json::json!({"ok": true}))],
             tools_called: vec!["shell".into()],
+            items_processed: 0,
+            connector_writes: vec![],
         }
     }
 
@@ -347,6 +514,8 @@ mod tests {
             final_answer_candidate: None,
             tool_results: vec![ToolResult::err("timeout")],
             tools_called: vec!["shell".into()],
+            items_processed: 0,
+            connector_writes: vec![],
         }
     }
 

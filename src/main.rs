@@ -357,6 +357,22 @@ async fn main() -> Result<()> {
     // Wire connector install store into McpSessionTool for auto token injection
     tool_registry
         .register(Arc::new(tools::mcp_session::McpSessionTool::new().with_install_store(connector_installs.clone())));
+
+    // Wire stores into external DB and API tools
+    tool_registry.register(Arc::new(
+        tools::external_db::ExternalDbTool::with_install_store(connector_installs.clone())
+    ));
+    tool_registry.register(Arc::new(
+        tools::external_api::ExternalApiTool::new()
+            .with_stores(connector_installs.clone(), store.clone())
+    ));
+
+    // Re-register all built-in connector tools with the install store so stored
+    // OAuth tokens / API keys are injected automatically into mcp_session calls.
+    // This overwrites the no-store versions registered by default_registry().
+    tools::connector_tool::register_all_connectors(&mut tool_registry, Some(connector_installs.clone()));
+    tracing::info!("{} connector tools registered with OAuth token injection", tools::connector_tool::ALL_CONNECTORS.len());
+
     let tool_registry = Arc::new(tool_registry);
     tracing::info!("{} tools registered", tool_registry.list().len());
 
@@ -392,14 +408,15 @@ async fn main() -> Result<()> {
             knowledge_graph.clone(),
             vector_store.clone(),
             embedder.clone(),
-            agent_services.clone(), // ← wired: citations, SLA, reviews
+            agent_services.clone(),
         )
+        .with_store(Arc::clone(&store))
         .with_limits(50, 300),
     );
 
     // AgentManager uses WorkspaceManager to create workspaces
     // agent_services provides SLA start-on-create per job type
-    let manager = Arc::new(AgentManager::new(store.clone(), workspace_manager.clone(), agent_services.clone()));
+    let manager = Arc::new(AgentManager::new(store.clone(), workspace_manager.clone(), agent_services.clone(), gateway.clone()));
 
     // ── Scheduler ──────────────────────────────────────────────────────────
     let scheduler = Arc::new(DbPollingScheduler::new(

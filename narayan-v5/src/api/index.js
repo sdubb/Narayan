@@ -93,6 +93,13 @@ export const agents = {
   replay:  (id) => req('GET', `/agents/${id}/replay`),
   children: (id) => req('GET', `/agents/${id}/children`),
   cancel:  (id) => req('POST', `/agents/${id}/cancel`),
+  approvePlan: (id, approved, feedback = '', editedSteps = null, revise = false) =>
+    req('POST', `/agents/${id}/approve-plan`, {
+      approved,
+      revise,
+      feedback: feedback || '',
+      edited_steps: editedSteps || null,
+    }),
 };
 
 // ── Workspace ─────────────────────────────────────────────────────────────
@@ -202,6 +209,85 @@ export const skills = {
   list:     () => req('GET', '/skills'),
   install:  (name) => req('POST', '/skills/install', { name }),
   registry: () => req('GET', '/skills/registry'),
+};
+
+// ── Savings / ROI ──────────────────────────────────────────────────────────
+export const savings = {
+  getSummary: () => req('GET', '/savings'),
+};
+
+// ── Goal instance detail (criteria checks, step outputs) ───────────────────
+export const goalInstances = {
+  getDetail: (id) => req('GET', `/goal-instances/${id}`),
+};
+
+// ── Role chat ─────────────────────────────────────────────────────────────
+export const roleChat = {
+  start:  (roleId)                     => req('POST', `/roles/${roleId}/chat`, {}),
+  turn:   (roleId, sessionId, message) => req('POST', `/roles/${roleId}/chat/${sessionId}/turn`, { message }),
+  apply:  (roleId, sessionId, change)  => req('POST', `/roles/${roleId}/chat/${sessionId}/apply`, { change }),
+};
+
+// ── Custom connections (MCP, REST API, Database) ──────────────────────────
+export const connections = {
+  // MCP server
+  testMcp:       (server_url, token) => req('POST', '/connections/mcp/test', { server_url, token }),
+  registerMcp:   (name, server_url, token, summary) => req('POST', '/connections/mcp', { name, server_url, token, summary }),
+  // REST API
+  testApi:       (base_url, token, auth_type, auth_header_name, test_path) =>
+    req('POST', '/connections/api/test', { base_url, token, auth_type, auth_header_name, test_path }),
+  registerApi:   (body) => req('POST', '/connections/api', body),
+  // Database
+  testDb:        (connection_string) => req('POST', '/connections/db/test', { connection_string }),
+  registerDb:    (name, connection_string, allow_writes) =>
+    req('POST', '/connections/db', { name, connection_string, allow_writes }),
+  // List all custom connections
+  list:          () => req('GET', '/tenant-connectors'),
+  remove:        (name) => req('DELETE', `/tenant-connectors/${name}`),
+};
+
+// ── Agent Definitions (multi-role agents) ─────────────────────────────────
+export const agentDefs = {
+  list:   () => req('GET', '/agent-definitions'),
+  get:    (id) => req('GET', `/agent-definitions/${id}`),
+  update: (id, body) => req('PUT', `/agent-definitions/${id}`, body),
+  delete: (id) => req('DELETE', `/agent-definitions/${id}`),
+  // Roles
+  listRoles:  (agentId) => req('GET', `/agent-definitions/${agentId}/roles`),
+  createRole: (agentId, body) => req('POST', `/agent-definitions/${agentId}/roles`, body),
+  updateRole: (agentId, roleId, body) => req('PUT', `/agent-definitions/${agentId}/roles/${roleId}`, body),
+  deleteRole: (agentId, roleId) => req('DELETE', `/agent-definitions/${agentId}/roles/${roleId}`),
+  triggerRole: (agentId, roleId, inputData = {}) =>
+    req('POST', `/agent-definitions/${agentId}/roles/${roleId}/trigger`, { input_data: inputData }),
+  // Goal instances
+  listGoalInstances: (agentId, limit = 50) =>
+    req('GET', `/agent-definitions/${agentId}/goal-instances?limit=${limit}`),
+  listRoleInstances: (agentId, roleId, limit = 50) =>
+    req('GET', `/agent-definitions/${agentId}/roles/${roleId}/goal-instances?limit=${limit}`),
+  // Custom connectors
+  listConnectors:   () => req('GET', '/tenant-connectors'),
+  deleteConnector:  (name) => req('DELETE', `/tenant-connectors/${name}`),
+};
+
+// ── Plan Mode ─────────────────────────────────────────────────────────────
+export const planMode = {
+  // Start a new plan mode session, optionally for an existing agent (to add a role)
+  // If templateId is provided, skips intent capture and uses pre-built role
+  start: (agentName, agentId = null, templateId = null) =>
+    req('POST', '/plan-mode/sessions', {
+      agent_name: agentName,
+      ...(agentId ? { agent_id: agentId } : {}),
+      ...(templateId ? { template_id: templateId } : {}),
+    }),
+  // Send a turn in the conversation — session tracks phase and history server-side
+  turn: (sessionId, message) =>
+    req('POST', `/plan-mode/sessions/${sessionId}/turn`, { message }),
+  // Save and deploy — creates AgentDefinition + AgentRole in DB
+  // The draft_role is stored in the session, no need to send it from the frontend
+  save: (sessionId) =>
+    req('POST', `/plan-mode/sessions/${sessionId}/save`, {}),
+  // List available templates
+  listTemplates: () => req('GET', '/plan-mode/templates'),
 };
 
 // ── Swarm ──────────────────────────────────────────────────────────────────

@@ -1,163 +1,200 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState } from 'react';
 import clsx from 'clsx';
-import { Settings, LogOut, Bell, Plus, GitBranch, Loader2 } from 'lucide-react';
-import AgentListItem from '../sidebar/AgentListItem';
-import SkillAutocomplete from '../sidebar/SkillAutocomplete';
-import { conversations as conversationsApi } from '../../api';
+import { Settings, LogOut, Bell, Plus, Loader2, Cpu, Zap, ChevronRight } from 'lucide-react';
+import { motion, AnimatePresence } from 'framer-motion';
 
-function dateGroup(iso) {
-  const d = new Date(iso);
-  const now = new Date();
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const yesterday = new Date(today); yesterday.setDate(yesterday.getDate() - 1);
-  if (d >= today) return 'Today';
-  if (d >= yesterday) return 'Yesterday';
-  return d.toLocaleDateString('en', { month: 'short', day: 'numeric' });
+function timeAgo(iso) {
+  if (!iso) return '';
+  const d = Date.now() - new Date(iso).getTime();
+  const h = Math.floor(d / 3600000), m = Math.floor((d % 3600000) / 60000);
+  if (h > 24) return `${Math.floor(h / 24)}d ago`;
+  if (h > 0)  return `${h}h ago`;
+  if (m > 0)  return `${m}m ago`;
+  return 'just now';
 }
 
+const ROLE_STATUS_DOT = {
+  active:   'bg-ok',
+  testing:  'bg-info',
+  paused:   'bg-warn',
+  draft:    'bg-tx-4',
+  archived: 'bg-tx-4 opacity-40',
+};
+
+// ── Single agent item ──────────────────────────────────────────────────────
+function AgentItem({ agent, selected, expanded, onToggleExpand, onClick }) {
+  const roles = agent.roles || [];
+  const activeCount = roles.filter(r => r.status === 'active').length;
+
+  return (
+    <div>
+      <motion.button
+        onClick={onClick}
+        layout
+        layoutId={agent.id}
+        className={clsx(
+          'w-full text-left rounded-lg transition-all group',
+          selected
+            ? 'bg-bg-active border-l-2 border-l-accent pl-2.5 pr-3 py-2.5'
+            : 'hover:bg-bg-hover px-3 py-2.5',
+        )}
+      >
+        <div className="flex items-center gap-2">
+          {roles.length > 0 && (
+            <button
+              onClick={e => { e.stopPropagation(); onToggleExpand(); }}
+              className="p-0.5 rounded text-tx-4 hover:text-tx-2 transition-all shrink-0"
+            >
+              <ChevronRight
+                size={11}
+                className={clsx('transition-transform', expanded && 'rotate-90')}
+              />
+            </button>
+          )}
+          <Cpu size={12} className={clsx('shrink-0', selected ? 'text-accent' : 'text-tx-4')} />
+          <p className="text-xs font-medium text-tx-1 truncate flex-1">{agent.name}</p>
+          <span className={clsx(
+            'text-[9px] font-semibold uppercase shrink-0 px-1 py-0.5 rounded',
+            agent.status === 'active'
+              ? 'text-ok bg-ok-soft'
+              : 'text-tx-4 bg-bg-active',
+          )}>
+            {agent.status || 'draft'}
+          </span>
+        </div>
+        <div className="flex items-center gap-2 text-[10px] text-tx-4 mt-0.5 pl-5">
+          {roles.length > 0
+            ? <><span>{roles.length} role{roles.length !== 1 ? 's' : ''}</span>
+                {activeCount > 0 && <span className="text-ok">{activeCount} active</span>}</>
+            : <span className="italic">No roles yet</span>}
+          <span className="ml-auto">{timeAgo(agent.updated_at)}</span>
+        </div>
+      </motion.button>
+
+      {/* Expanded role list */}
+      <AnimatePresence>
+        {expanded && roles.length > 0 && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: 'auto', opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            className="overflow-hidden"
+          >
+            {roles.map(role => (
+              <div
+                key={role.id}
+                className="flex items-center gap-2 pl-7 pr-3 py-1.5 text-[10px] text-tx-3"
+              >
+                <span className={clsx(
+                  'size-1.5 rounded-full shrink-0',
+                  ROLE_STATUS_DOT[role.status] || 'bg-tx-4',
+                )} />
+                <span className="truncate flex-1">{role.name}</span>
+                <span className="text-tx-4 capitalize shrink-0">{role.status}</span>
+              </div>
+            ))}
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
+// ── Main Sidebar ───────────────────────────────────────────────────────────
 export default function Sidebar({
-  conversations, selectedId, onSelect, onNewConversation,
-  onNavigate, pendingReviews = [], swarmDepth, convLatestStatus = {},
-  loading, skills = [], onRefresh,
+  agents, selectedAgentId, onSelectAgent, onNewAgent,
+  onNavigate, pendingReviews = [], loading,
 }) {
-  const [goalInput, setGoalInput] = useState('');
-  const [convAgents, setConvAgents] = useState({}); // { convId: [agent, ...] }
+  // Expanded set lives here so it survives parent re-renders
+  const [expandedIds, setExpandedIds] = useState(() => new Set());
 
-  // Fetch agents for all conversations to show in expandable list
-  const fetchConvAgents = useCallback(async () => {
-    if (!conversations?.length) return;
-    const results = {};
-    // Only fetch for recent conversations (limit to 10 to avoid spamming)
-    const recent = conversations.slice(0, 10);
-    await Promise.all(
-      recent.map(conv =>
-        conversationsApi.get(conv.id)
-          .then(data => { results[conv.id] = data.agents || []; })
-          .catch(() => { results[conv.id] = []; })
-      )
-    );
-    setConvAgents(prev => ({ ...prev, ...results }));
-  }, [conversations]);
-
-  useEffect(() => {
-    fetchConvAgents();
-    // Refresh every 8 seconds to catch status changes
-    const iv = setInterval(fetchConvAgents, 8000);
-    return () => clearInterval(iv);
-  }, [fetchConvAgents]);
-
-  function handleAgentCancelled(agentId) {
-    // Optimistically remove from active status and refresh
-    setConvAgents(prev => {
-      const updated = { ...prev };
-      for (const convId of Object.keys(updated)) {
-        updated[convId] = updated[convId].map(a =>
-          a.id === agentId ? { ...a, status: 'failed' } : a
-        );
-      }
-      return updated;
+  function toggleExpand(id) {
+    setExpandedIds(prev => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
     });
-    // Trigger a refresh from parent after a short delay
-    setTimeout(() => {
-      fetchConvAgents();
-      onRefresh?.();
-    }, 500);
   }
-
-  const grouped = {};
-  (conversations || []).forEach(conv => {
-    const g = dateGroup(conv.updated_at || conv.created_at);
-    if (!grouped[g]) grouped[g] = [];
-    grouped[g].push(conv);
-  });
 
   return (
     <aside className="w-64 flex flex-col border-r border-border bg-bg-card shrink-0 h-screen">
+
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-4 border-b border-border">
         <p className="font-serif text-xl text-tx-1">Narayan</p>
         <div className="flex items-center gap-0.5">
           {pendingReviews.length > 0 && (
-            <button onClick={() => onNavigate('settings')}
-              className="relative p-1.5 rounded-lg text-warn hover:bg-warn-soft transition-all" title={`${pendingReviews.length} pending`}>
+            <button
+              onClick={() => onNavigate('settings')}
+              className="relative p-1.5 rounded-lg text-warn hover:bg-warn-soft transition-all"
+              title={`${pendingReviews.length} pending`}
+            >
               <Bell size={15} />
-              <span className="absolute -top-0.5 -right-0.5 min-w-[14px] h-[14px] rounded-full bg-warn text-bg-card text-[9px] font-bold flex items-center justify-center px-0.5">
+              <span className="absolute -top-0.5 -right-0.5 min-w-[14px] h-[14px] rounded-full bg-warn
+                               text-bg-card text-[9px] font-bold flex items-center justify-center px-0.5">
                 {pendingReviews.length}
               </span>
             </button>
           )}
-          <button onClick={() => onNavigate('settings')} className="p-1.5 rounded-lg text-tx-3 hover:text-tx-1 hover:bg-bg-hover transition-all" title="Settings">
+          <button
+            onClick={() => onNavigate('settings')}
+            className="p-1.5 rounded-lg text-tx-3 hover:text-tx-1 hover:bg-bg-hover transition-all"
+            title="Settings"
+          >
             <Settings size={15} />
           </button>
-          <button onClick={() => onNavigate('logout')} className="p-1.5 rounded-lg text-tx-3 hover:text-err hover:bg-err-soft transition-all" title="Sign out">
+          <button
+            onClick={() => onNavigate('logout')}
+            className="p-1.5 rounded-lg text-tx-3 hover:text-err hover:bg-err-soft transition-all"
+            title="Sign out"
+          >
             <LogOut size={15} />
           </button>
         </div>
       </div>
 
-      {/* Goal input with skill autocomplete */}
-      <div className="px-3 pt-3 pb-1">
-        <div className="relative">
-          <input
-            value={goalInput}
-            onChange={e => setGoalInput(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Enter' && goalInput.trim()) { onNewConversation(goalInput.trim()); setGoalInput(''); } }}
-            placeholder="New goal..."
-            className="input-field text-xs pr-8"
-          />
-          <button
-            onClick={() => { if (goalInput.trim()) { onNewConversation(goalInput.trim()); setGoalInput(''); } }}
-            className="absolute right-2 top-1/2 -translate-y-1/2 text-tx-4 hover:text-accent transition-colors"
-          >
-            <Plus size={14} />
-          </button>
-          <SkillAutocomplete value={goalInput} skills={skills} onSelect={s => { setGoalInput(s); }} />
-        </div>
+      {/* New agent button */}
+      <div className="px-3 pt-3 pb-2">
+        <button
+          onClick={onNewAgent}
+          className="w-full flex items-center gap-2 rounded-lg px-3 py-2 text-xs font-medium
+                     bg-accent text-white hover:bg-accent-text transition-all active:scale-[0.98]"
+        >
+          <Plus size={13} />
+          New agent
+        </button>
       </div>
 
-      {/* Conversation list */}
+      {/* Agent list */}
       <div className="flex-1 overflow-y-auto px-2 py-1 space-y-0.5">
         {loading ? (
           <div className="flex items-center justify-center py-8">
             <Loader2 size={16} className="text-tx-4 animate-spin" />
           </div>
-        ) : Object.keys(grouped).length === 0 ? (
+        ) : agents.length === 0 ? (
           <div className="px-3 py-8 text-center">
-            <p className="text-xs text-tx-3">No conversations yet.</p>
-            <p className="text-[11px] text-tx-4 mt-1">Type a goal above to start.</p>
+            <div className="size-10 rounded-xl bg-accent-soft border border-accent/20 flex items-center justify-center mx-auto mb-3">
+              <Zap size={18} className="text-accent" />
+            </div>
+            <p className="text-xs font-medium text-tx-1 mb-1">No agents yet</p>
+            <p className="text-[11px] text-tx-4 leading-relaxed">
+              Create your first agent to automate a workflow.
+            </p>
           </div>
         ) : (
-          Object.entries(grouped).map(([label, convs]) => (
-            <div key={label}>
-              <p className="section-label px-2 pt-3 pb-1">{label}</p>
-              {convs.map(conv => (
-                <AgentListItem
-                  key={conv.id}
-                  conversation={conv}
-                  selected={conv.id === selectedId}
-                  latestStatus={convLatestStatus[conv.id] || 'completed'}
-                  onClick={() => onSelect(conv.id)}
-                  agents={convAgents[conv.id] || []}
-                  onAgentCancelled={handleAgentCancelled}
-                />
-              ))}
-            </div>
-          ))
-        )}
-      </div>
-
-      {/* Footer */}
-      <div className="p-2 border-t border-border space-y-1">
-        <button onClick={() => { onSelect(null); }}
-          className="w-full flex items-center gap-2 rounded-lg px-3 py-2 text-xs text-tx-3 hover:text-tx-1 hover:bg-bg-hover transition-all">
-          <Plus size={13} /> New conversation
-        </button>
-        {swarmDepth != null && swarmDepth > 0 && (
-          <div className="flex items-center gap-2 rounded-lg px-3 py-1.5 text-[11px] text-tx-4">
-            <GitBranch size={11} className="text-vio shrink-0" />
-            <span className="text-vio font-mono">{swarmDepth}</span>
-            <span>sub-agent{swarmDepth !== 1 ? 's' : ''} queued</span>
-          </div>
+          <>
+            <p className="section-label px-2 pt-2 pb-1">Your agents</p>
+            {agents.map(agent => (
+              <AgentItem
+                key={agent.id}
+                agent={agent}
+                selected={agent.id === selectedAgentId}
+                expanded={expandedIds.has(agent.id)}
+                onToggleExpand={() => toggleExpand(agent.id)}
+                onClick={() => onSelectAgent(agent.id)}
+              />
+            ))}
+          </>
         )}
       </div>
     </aside>

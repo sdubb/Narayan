@@ -176,14 +176,31 @@ pub enum AgentEvent {
     },
 
     // ── Plan approval ────────────────────────────────────────────────────
+    /// Emitted when the plan is ready and needs user sign-off before execution.
+    PlanApprovalNeeded {
+        agent_id: String,
+        step_count: usize,
+        rationale: String,
+        steps: Vec<serde_json::Value>,
+        job_type: Option<String>,
+        rejection_count: u32,
+        missing_credentials: Vec<String>,
+        /// Per-step confidence colour: "green" | "amber" | "red"
+        step_confidence: Vec<String>,
+    },
     /// Emitted when user approves the agent's plan.
     PlanApproved {
         agent_id: String,
     },
-    /// Emitted when user rejects the plan with feedback.
+    /// Emitted immediately when the user rejects the plan, before any replan starts.
     PlanRejected {
         agent_id: String,
+        rejection_count: u32,
+        max_rejections: u32,
         feedback: String,
+        /// true  → agent will replan with feedback
+        /// false → final rejection, agent stops
+        will_replan: bool,
     },
     /// Emitted when user edits plan steps before approving.
     PlanEdited {
@@ -233,6 +250,7 @@ impl AgentEvent {
             AgentEvent::ChildSpawned { agent_id, .. } => agent_id,
             AgentEvent::ChildrenComplete { agent_id, .. } => agent_id,
             AgentEvent::LlmCostUpdate { agent_id, .. } => agent_id,
+            AgentEvent::PlanApprovalNeeded { agent_id, .. } => agent_id,
             AgentEvent::PlanApproved { agent_id, .. } => agent_id,
             AgentEvent::PlanRejected { agent_id, .. } => agent_id,
             AgentEvent::PlanEdited { agent_id, .. } => agent_id,

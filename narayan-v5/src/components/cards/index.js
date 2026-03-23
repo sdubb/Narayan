@@ -1,4 +1,5 @@
 export { default as PlanCard } from './PlanCard';
+export { default as PlanApprovalCard } from './PlanApprovalCard';
 export { default as StepCard } from './StepCard';
 export { default as ToolPill } from './ToolPill';
 export { default as ClarificationCard } from './ClarificationCard';

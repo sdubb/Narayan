@@ -100,6 +100,46 @@ impl LlmPlanner {
             }
         }
     }
+
+    /// Load role context from AgentDefinition + AgentRole if the agent's metadata
+    /// carries a role_id.  Returns a formatted string injected into the planner
+    /// prompt so it knows the scoped connectors, guidelines, and output spec.
+    async fn load_role_context(&self, state: &AgentState) -> Option<String> {
+        let store = self.store.as_ref()?;
+        let role_id = state.metadata.get("role_id").and_then(|v| v.as_str())?;
+
+        let role = store.get_agent_role(&state.tenant_id, role_id).await.ok()??;
+
+        let mut parts: Vec<String> = Vec::new();
+
+        if !role.connectors.is_empty() {
+            parts.push(format!("Available connectors for this role: {}", role.connectors.join(", ")));
+        }
+        if !role.tools.is_empty() {
+            parts.push(format!("Specific tools for this role: {}", role.tools.join(", ")));
+        }
+        if !role.execution_guidelines.is_empty() {
+            parts.push(format!("Execution guidelines:\n{}", role.execution_guidelines.to_prompt()));
+        }
+        if !role.output_spec.description.is_empty() {
+            parts.push(format!("Expected output: {}", role.output_spec.description));
+        }
+        // Load agent constraints
+        if let Ok(Some(agent)) = store.get_agent_definition(&state.tenant_id, &role.agent_id).await {
+            if !agent.constraints.is_empty() {
+                parts.push(format!("Hard constraints (must follow):\n- {}", agent.constraints.join("\n- ")));
+            }
+            if !agent.persona.is_empty() {
+                parts.push(format!("Persona: {}", agent.persona));
+            }
+        }
+
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join("\n\n"))
+        }
+    }
 }
 
 #[async_trait]
@@ -131,7 +171,19 @@ impl Planner for LlmPlanner {
         let system = PlannerPrompt::system(&job_type);
         let manifest = crate::tools::selector::tool_manifest_from_names(available_tools);
         let conv_history = self.conversation_history(state).await;
-        let user = PlannerPrompt::user_create(state, context, &manifest, &conv_history);
+
+        // Build role context from AgentRole if this agent has one configured.
+        // This gives the planner the execution guidelines, output spec, and
+        // scoped connector list — so it doesn't have to guess.
+        let role_context = self.load_role_context(state).await;
+
+        let user = PlannerPrompt::user_create(
+            state,
+            context,
+            &manifest,
+            &conv_history,
+            role_context.as_deref(),
+        );
 
         tracing::debug!(
             agent_id = %state.id,

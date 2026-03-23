@@ -12,6 +12,8 @@ pub enum AgentStatus {
     Preflight,
     /// Waiting for user to answer clarification questions.
     Clarifying,
+    /// Plan created — waiting for user to approve before execution begins.
+    PlanApprovalNeeded,
     /// Actively executing a step.
     Running,
     /// Step complete — waiting for scheduler to wake for next step.
@@ -57,6 +59,11 @@ pub struct AgentState {
     /// Conversation thread this agent belongs to.
     #[serde(default)]
     pub conversation_id: Option<String>,
+    /// Number of times the user has rejected this agent's plan.
+    /// Persisted via metadata so it survives server restarts.
+    /// Agent fails gracefully after 3 rejections.
+    #[serde(default)]
+    pub plan_rejection_count: u32,
 }
 
 impl AgentState {
@@ -81,6 +88,7 @@ impl AgentState {
             parent_agent_id: None,
             pending_children: Vec::new(),
             conversation_id: None,
+            plan_rejection_count: 0,
         }
     }
 
@@ -103,6 +111,11 @@ impl AgentState {
         self.updated_at = Utc::now();
     }
 
+    pub fn mark_plan_approval_needed(&mut self) {
+        self.status = AgentStatus::PlanApprovalNeeded;
+        self.updated_at = Utc::now();
+    }
+
     pub fn mark_running(&mut self) {
         self.status = AgentStatus::Running;
         self.updated_at = Utc::now();
@@ -122,6 +135,13 @@ impl AgentState {
 
     pub fn mark_completed(&mut self) {
         self.status = AgentStatus::Completed;
+        self.updated_at = Utc::now();
+    }
+
+    pub fn mark_partially_complete(&mut self, note: String, result: serde_json::Value) {
+        self.status = AgentStatus::Completed;
+        self.metadata["partial_completion_note"] = serde_json::json!(note);
+        self.metadata["partial_completion_result"] = result;
         self.updated_at = Utc::now();
     }
 

@@ -173,6 +173,7 @@ fn event_type_name(event: &AgentEvent) -> String {
         AgentEvent::PlanApproved { .. } => "plan_approved",
         AgentEvent::PlanRejected { .. } => "plan_rejected",
         AgentEvent::PlanEdited { .. } => "plan_edited",
+        AgentEvent::PlanApprovalNeeded { .. } => "plan_approval_needed",
     }
     .to_string()
 }

@@ -6,7 +6,7 @@ use tokio::sync::{Mutex, RwLock};
 use crate::{
     agent::{
         clarifier::{ClarificationResult, Clarifier},
-        evaluator::{EvalVerdict, Evaluator},
+        evaluator::{check_completion_criteria, EvalVerdict, Evaluator},
         executor::Executor,
         planner::{Plan, Planner},
         preflight::{Preflight, PreflightResult},
@@ -22,7 +22,7 @@ use crate::{
     skill_evolution::evolution::evolve_skill,
     skills::registry::SkillRegistry,
     state::{AgentState, AgentStatus},
-    tools::ToolRegistry,
+    tools::{credential_requirements, ToolRegistry},
     util::next_run_after,
 };
 
@@ -212,8 +212,12 @@ fn plan_step_event(step: &crate::agent::planner::PlannedStep) -> crate::events::
 pub enum StepOutcome {
     Continue { delay_secs: i64 },
     NeedsClarification { questions: Vec<crate::agent::clarifier::ClarificationQuestion> },
+    /// Plan created and stored; waiting for user to approve before execution.
+    PlanApprovalNeeded,
     Infeasible { reason: String },
     Complete,
+    /// Run ended but not all CompletionCriteria were satisfied.
+    PartiallyComplete { note: String },
     Failed(String),
     Delegating { child_ids: Vec<String> },
 }
@@ -259,6 +263,7 @@ pub struct AgentLoop {
     vector_store: Arc<crate::memory::PgVectorStore>,
     embedder: Arc<dyn crate::memory::EmbeddingModel>,
     services: Arc<AgentServices>,
+    store: Option<Arc<crate::storage::PostgresStore>>,
     max_steps: usize,
     timeout_secs: u64,
 }
@@ -294,9 +299,15 @@ impl AgentLoop {
             vector_store,
             embedder,
             services,
+            store: None,
             max_steps: 50,
             timeout_secs: 300,
         }
+    }
+
+    pub fn with_store(mut self, store: Arc<crate::storage::PostgresStore>) -> Self {
+        self.store = Some(store);
+        self
     }
 
     pub fn with_limits(mut self, max_steps: usize, timeout_secs: u64) -> Self {
@@ -350,6 +361,11 @@ impl AgentLoop {
                     .map(crate::agent::clarifier::parse_clarification_questions)
                     .unwrap_or_default(),
             });
+        }
+
+        // ── 3b. Plan approval — wait for user sign-off ──────────────────────
+        if state.status == AgentStatus::PlanApprovalNeeded {
+            return Ok(StepOutcome::PlanApprovalNeeded);
         }
 
         // ── 4. Planning ─────────────────────────────────────────────────────
@@ -444,7 +460,65 @@ impl AgentLoop {
                 job_type: new_plan.job_type.clone(),
                 steps: new_plan.steps.iter().map(plan_step_event).collect(),
             });
+
+            // ── Plan approval gate ──────────────────────────────────────────
+            // Collect tool names and descriptions from the new plan for the
+            // credential scan.
+            let planned_tools: Vec<Option<String>> =
+                new_plan.steps.iter().map(|s| s.tool.clone()).collect();
+            let step_descriptions: Vec<String> =
+                new_plan.steps.iter().map(|s| s.description.clone()).collect();
+
+            // The AgentLoop doesn't have direct access to the tenant store, so
+            // we pass empty credentials here.  The server-side recheck in the
+            // POST /agents/:id/approve-plan handler uses the real installed
+            // credentials before allowing execution to start.
+            let tenant_credentials: Vec<String> = Vec::new();
+
+            // Collect skill registry names for per-step confidence colouring.
+            let skill_names: Vec<String> = {
+                let reg = self.skill_registry.read().await;
+                reg.list().iter().map(|s| s.name.clone()).collect()
+            };
+
+            let (missing_credentials, step_confidence) = credential_requirements::scan_plan_credentials(
+                &planned_tools,
+                &tenant_credentials,
+                &skill_names,
+                &step_descriptions,
+            );
+
+            // Build a JSON representation of each step for the SSE event.
+            let steps_json: Vec<serde_json::Value> = new_plan
+                .steps
+                .iter()
+                .map(|s| {
+                    serde_json::json!({
+                        "index": s.index,
+                        "description": s.description,
+                        "tool": s.tool,
+                        "success_criteria": s.success_criteria,
+                    })
+                })
+                .collect();
+
+            // Store the plan and set status to PlanApprovalNeeded so the
+            // scheduler will not pick this agent up until it's approved.
             *plan = Some(new_plan);
+            state.mark_plan_approval_needed();
+
+            self.event_bus.publish(AgentEvent::PlanApprovalNeeded {
+                agent_id: state.id.clone(),
+                step_count: plan.as_ref().map(|p| p.steps.len()).unwrap_or(0),
+                rationale: plan.as_ref().map(|p| p.rationale.clone()).unwrap_or_default(),
+                steps: steps_json,
+                job_type: plan.as_ref().and_then(|p| p.job_type.clone()),
+                rejection_count: state.plan_rejection_count,
+                missing_credentials,
+                step_confidence,
+            });
+
+            return Ok(StepOutcome::PlanApprovalNeeded);
         }
 
         let current_plan = plan.as_ref().unwrap();
@@ -650,6 +724,41 @@ impl AgentLoop {
         state.metadata["last_reflection"] = serde_json::Value::String(eval.summary.clone());
         state.metadata["key_findings"] = serde_json::json!(eval.key_findings);
 
+        // ── Write step_outputs for CompletionCriteria and savings estimator ──
+        if result.items_processed > 0 || !result.connector_writes.is_empty() {
+            let entry = serde_json::json!({
+                "step":      step.index,
+                "success":   result.success,
+                "processed": result.items_processed,
+                "connectors": result.connector_writes,
+            });
+            let mut outputs = state.metadata
+                .get("step_outputs")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            outputs.push(entry);
+            state.metadata["step_outputs"] = serde_json::Value::Array(outputs);
+        }
+
+        // ── Apply FailureAction overrides from role guidelines ────────────
+        // If a FailureRule matches the current step failure, override the
+        // evaluator verdict before the match arm below.
+        let eval_verdict = if !result.success {
+            let role_id = state.metadata.get("role_id").and_then(|v| v.as_str()).map(String::from);
+            if let (Some(ref store), Some(ref rid)) = (&self.store, role_id.as_ref()) {
+                if let Ok(Some(role)) = store.get_agent_role(&state.tenant_id, rid).await {
+                    apply_failure_action_override(eval.verdict, &result, &role, state, &self.services)
+                } else {
+                    eval.verdict
+                }
+            } else {
+                eval.verdict
+            }
+        } else {
+            eval.verdict
+        };
+
         // Update step history for next executor call
         let history_summary = step_history_summary(&result, &eval.summary);
         history.push(step.index, step.description.clone(), result.success, &history_summary);
@@ -836,7 +945,7 @@ impl AgentLoop {
         }
 
         // ── 13. Advance state ───────────────────────────────────────────────
-        match eval.verdict {
+        match eval_verdict {
             EvalVerdict::Continue => {
                 // Reset retry counter and clear error for the new step
                 state.metadata["retry_count"] = serde_json::json!(0);
@@ -857,10 +966,64 @@ impl AgentLoop {
                     state.set_final_answer(eval.summary.clone());
                 }
                 let summary = completion_summary(state);
-                state.mark_completed();
-                self.event_bus.publish(AgentEvent::GoalComplete { agent_id: state.id.clone(), summary });
-                self.event_bus.close(&state.id);
-                Ok(StepOutcome::Complete)
+                // ── CompletionCriteria check ─────────────────────────────────
+                let (all_satisfied, criterion_results) = if let Some(ref store) = self.store {
+                    if let Some(role_id) = state.metadata.get("role_id").and_then(|v| v.as_str()) {
+                        match store.get_agent_role(&state.tenant_id, role_id).await {
+                            Ok(Some(role)) => check_completion_criteria(&role, state),
+                            _ => (true, vec![]),
+                        }
+                    } else {
+                        (true, vec![])
+                    }
+                } else {
+                    (true, vec![])
+                };
+
+                // Write per-criterion results into goal_instance.result for the UI
+                let criteria_json = serde_json::to_value(&criterion_results).unwrap_or_default();
+                let base_result = state.metadata.get("step_outputs").cloned()
+                    .unwrap_or(serde_json::json!({}));
+                let enriched_result = serde_json::json!({
+                    "step_outputs":   base_result,
+                    "criteria_checks": criteria_json,
+                    "all_criteria_satisfied": all_satisfied,
+                });
+
+                if all_satisfied {
+                    state.mark_completed();
+                    // Write criteria results before persisting
+                    if let Some(ref store) = self.store {
+                        if let Some(gi_id) = state.metadata.get("goal_instance_id").and_then(|v| v.as_str()) {
+                            let _ = store.update_goal_instance_result(&state.tenant_id, gi_id, enriched_result).await;
+                        }
+                    }
+                    self.event_bus.publish(AgentEvent::GoalComplete { agent_id: state.id.clone(), summary });
+                    self.event_bus.close(&state.id);
+                    Ok(StepOutcome::Complete)
+                } else {
+                    let failed: Vec<&str> = criterion_results.iter()
+                        .filter(|r| !r.satisfied)
+                        .map(|r| r.description.as_str())
+                        .collect();
+                    let note = format!("{} criteria not met: {}", failed.len(), failed.join("; "));
+                    tracing::warn!(agent_id = %state.id, note = %note, "goal partially complete");
+                    state.mark_partially_complete(
+                        note.clone(),
+                        enriched_result.clone(),
+                    );
+                    if let Some(ref store) = self.store {
+                        if let Some(gi_id) = state.metadata.get("goal_instance_id").and_then(|v| v.as_str()) {
+                            let _ = store.update_goal_instance_result(&state.tenant_id, gi_id, enriched_result).await;
+                        }
+                    }
+                    self.event_bus.publish(AgentEvent::GoalComplete {
+                        agent_id: state.id.clone(),
+                        summary: format!("{} [PARTIAL: {}]", summary, note),
+                    });
+                    self.event_bus.close(&state.id);
+                    Ok(StepOutcome::PartiallyComplete { note })
+                }
             }
             EvalVerdict::Retry => {
                 // Increment retry counter so evaluator's 3-retry limit works
@@ -1107,6 +1270,152 @@ fn extract_entities(text: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+// ── FailureAction override ────────────────────────────────────────────────
+
+/// Check the role's failure_handling rules against the current step failure.
+/// If a matching rule overrides the evaluator verdict, return the override.
+/// This implements FailureAction::RetryOnce and EscalateToHuman.
+fn apply_failure_action_override(
+    original:  EvalVerdict,
+    result:    &crate::agent::executor::StepResult,
+    role:      &crate::agent::definition::AgentRole,
+    state:     &mut crate::state::AgentState,
+    services:  &crate::segments::AgentServices,
+) -> EvalVerdict {
+    use crate::agent::definition::{FailureAction, RulePhase};
+
+    // Collect error text from failed tool results
+    let error_text: String = result.tool_results.iter()
+        .filter(|r| !r.success)
+        .filter_map(|r| r.error.as_deref())
+        .collect::<Vec<_>>()
+        .join(" | ")
+        .to_lowercase();
+
+    for rule in &role.execution_guidelines.failure_handling {
+        // Match by tool_scope if specified, otherwise applies to any failure
+        let scope_matches = match &rule.tool_scope {
+            Some(scope) => result.tools_called.iter().any(|t| t.contains(scope.as_str())),
+            None        => true,
+        };
+        if !scope_matches { continue; }
+
+        // Check if the rule's text matches the current failure context
+        let rule_lower = rule.text.to_lowercase();
+        let text_matches = error_text.is_empty()           // any failure
+            || error_text.contains(&rule_lower)
+            || rule_lower.contains("any")
+            || rule_lower.contains("all");
+
+        if !text_matches { continue; }
+
+        match &rule.action {
+            FailureAction::RetryOnce => {
+                // Only override to Retry if we haven't already retried this step
+                let retry_count = state.metadata
+                    .get("retry_count").and_then(|v| v.as_u64()).unwrap_or(0);
+                if retry_count == 0 {
+                    tracing::info!(
+                        agent_id = %state.id,
+                        rule     = %rule.text,
+                        "FailureAction::RetryOnce — forcing Retry"
+                    );
+                    return EvalVerdict::Retry;
+                }
+                // Already retried once — fall through to original verdict
+            }
+
+            FailureAction::EscalateToHuman { notify_channel } => {
+                // Submit a human review request and abort the run
+                if let Some(ref rq) = services.reviews {
+                    let reason = format!("FailureAction escalation: {} | error: {}", rule.text, error_text);
+                    let channel = notify_channel.as_deref().unwrap_or("unspecified");
+                    tracing::warn!(
+                        agent_id = %state.id,
+                        channel  = %channel,
+                        reason   = %reason,
+                        "FailureAction::EscalateToHuman — submitting review"
+                    );
+                    // Fire-and-forget — escalation failure is non-fatal
+                    let rq_clone = rq.clone();
+                    let tenant   = state.tenant_id.clone();
+                    let aid      = state.id.clone();
+                    let step_idx = result.step_index;
+                    let r        = reason.clone();
+                    tokio::spawn(async move {
+                        let _ = rq_clone.submit(&tenant, &aid, step_idx, &r, "failure_rule").await;
+                    });
+                }
+                return EvalVerdict::Abort;
+            }
+
+            FailureAction::Abort => {
+                return EvalVerdict::Abort;
+            }
+
+            FailureAction::SkipSilently => {
+                // Advance silently — no log written
+                return EvalVerdict::Continue;
+            }
+
+            FailureAction::SkipAndLog { log_path } => {
+                // Write the skip record to the log file so:
+                //   1. CompletionCriteria::ErrorsLogged check passes
+                //   2. Users can inspect what was skipped after the run
+                let ws = state.workspace_path.trim_end_matches('/');
+                let abs_path = if log_path.starts_with('/') {
+                    log_path.clone()
+                } else {
+                    format!("{}/{}", ws, log_path)
+                };
+
+                let error_text = result.tool_results.iter()
+                    .filter(|r| !r.success)
+                    .filter_map(|r| r.error.as_deref())
+                    .collect::<Vec<_>>()
+                    .join(" | ");
+                let skip_reason = if !error_text.is_empty() { error_text }
+                    else { rule.text.clone() };
+
+                let entry = format!(
+                    "[{}] step={} tool={} reason={}\n",
+                    chrono::Utc::now().to_rfc3339(),
+                    result.step_index,
+                    result.tools_called.first().map(String::as_str).unwrap_or("unknown"),
+                    skip_reason,
+                );
+
+                // Ensure directory exists and append atomically
+                if let Some(parent) = std::path::Path::new(&abs_path).parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                use std::io::Write;
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true).append(true).open(&abs_path)
+                {
+                    let _ = f.write_all(entry.as_bytes());
+                }
+
+                // Set metadata flag so CompletionCriteria::ErrorsLogged check passes
+                // even if no other step explicitly sets it
+                state.metadata["errors_logged"] = serde_json::json!(true);
+
+                tracing::info!(
+                    agent_id   = %state.id,
+                    step       = result.step_index,
+                    log_path   = %abs_path,
+                    reason     = %rule.text,
+                    "SkipAndLog — skip recorded"
+                );
+
+                return EvalVerdict::Continue;
+            }
+        }
+    }
+
+    original
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 #[cfg(test)]
 mod tests {
@@ -1336,7 +1645,9 @@ mod tests {
                     "child_agent_ids": ["child-1", "child-2"]
                 }))],
                 tools_called: vec!["delegate".into()],
-            }])),
+                        items_processed: 0,
+            connector_writes: vec![],
+        }])),
             Arc::new(MockEvaluator::new()),
             Arc::new(MockReflector::new()),
             Arc::new(MockPreflight::new()),
@@ -1372,7 +1683,9 @@ mod tests {
                 final_answer_candidate: Some("STEP COMPLETE".into()),
                 tool_results: vec![],
                 tools_called: vec![],
-            }])),
+            items_processed: 0,
+            connector_writes: vec![],
+        }])),
             Arc::new(MockEvaluator::from_responses(vec![EvalVerdict::Continue])),
             Arc::new(MockReflector::from_responses(vec![Reflection {
                 summary: String::new(),
@@ -1532,7 +1845,9 @@ mod tests {
                 final_answer_candidate: Some("STEP COMPLETE".into()),
                 tool_results: vec![],
                 tools_called: vec![],
-            }])),
+            items_processed: 0,
+            connector_writes: vec![],
+        }])),
             Arc::new(MockEvaluator::from_responses(vec![EvalVerdict::Continue])),
             Arc::new(MockReflector::from_responses(vec![Reflection {
                 summary: String::new(),
@@ -1549,16 +1864,27 @@ mod tests {
         let mut plan = None;
         let mut history = StepHistory::new();
 
+        // First call creates the plan and returns PlanApprovalNeeded.
         let outcome =
             loop_runtime.run_step(&mut state, &mut plan, &mut history).await.expect("skill plan path should succeed");
 
         match outcome {
-            StepOutcome::Continue { delay_secs } => assert_eq!(delay_secs, 0),
-            other => panic!("expected continue outcome, got {other:?}"),
+            StepOutcome::PlanApprovalNeeded => {}
+            other => panic!("expected PlanApprovalNeeded outcome, got {other:?}"),
         }
-        let plan = plan.expect("skill plan should be created");
-        assert_eq!(plan.steps.len(), 2);
-        assert_eq!(plan.rationale, "using pre-built skill: ci");
+        let p = plan.as_ref().expect("skill plan should be created");
+        assert_eq!(p.steps.len(), 2);
+        assert_eq!(p.rationale, "using pre-built skill: ci");
+
+        // Simulate plan approval — set status to Running and run again.
+        state.mark_running();
+        let outcome =
+            loop_runtime.run_step(&mut state, &mut plan, &mut history).await.expect("execution after approval should succeed");
+
+        match outcome {
+            StepOutcome::Continue { delay_secs } => assert_eq!(delay_secs, 0),
+            other => panic!("expected continue outcome after approval, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -1596,7 +1922,9 @@ mod tests {
                 final_answer_candidate: Some("temporary failure".into()),
                 tool_results: vec![ToolResult::err("timeout")],
                 tools_called: vec!["shell".into()],
-            }])),
+            items_processed: 0,
+            connector_writes: vec![],
+        }])),
             Arc::new(MockEvaluator::from_responses(vec![EvalVerdict::Retry])),
             Arc::new(MockReflector::from_responses(vec![Reflection {
                 summary: "retry after timeout".into(),
@@ -1634,7 +1962,9 @@ mod tests {
                 final_answer_candidate: None,
                 tool_results: vec![ToolResult::err("permission denied")],
                 tools_called: vec!["file_write".into()],
-            }])),
+            items_processed: 0,
+            connector_writes: vec![],
+        }])),
             Arc::new(MockEvaluator::from_responses(vec![EvalVerdict::Abort])),
             Arc::new(MockReflector::from_responses(vec![Reflection {
                 summary: "permission denied".into(),
@@ -1670,7 +2000,9 @@ mod tests {
                 final_answer_candidate: Some("done".into()),
                 tool_results: vec![],
                 tools_called: vec![],
-            }])),
+            items_processed: 0,
+            connector_writes: vec![],
+        }])),
             Arc::new(MockEvaluator::from_responses(vec![EvalVerdict::GoalComplete])),
             Arc::new(MockReflector::from_responses(vec![Reflection {
                 summary: "goal finished".into(),

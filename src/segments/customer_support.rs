@@ -1,9 +1,14 @@
 //! Customer Support segment plugin.
 //! Covers: ticket handling, escalation, SLA enforcement, response drafting.
+//! Connectors: Zendesk, Intercom, Freshdesk
 
 use crate::{
     compliance::sla::{EscalationAction, EscalationRule, SlaPolicy, SlaPriority},
-    connectors::zendesk::ZendeskConnector,
+    connectors::{
+        freshdesk::FreshdeskConnector,
+        intercom::IntercomConnector,
+        zendesk::ZendeskConnector,
+    },
     policy::rules::{PolicyAction, PolicyCondition, PolicyRule, PolicyRuleSet},
     segments::registry::{SegmentPlugin, SegmentServices, SharedDeps},
 };
@@ -35,7 +40,11 @@ pub fn plugin(deps: &SharedDeps, tenant_id: &str) -> SegmentPlugin {
     SegmentPlugin {
         id: "customer_support",
         name: "Customer Support",
-        connectors: vec![Arc::new(ZendeskConnector::new())],
+        connectors: vec![
+            Arc::new(ZendeskConnector::new()),
+            Arc::new(IntercomConnector::new()),
+            Arc::new(FreshdeskConnector::new()),
+        ],
         services: SegmentServices {
             policy: Some(deps.policy_engine.clone()),
             citations: Some(deps.citation_tracker.clone()),

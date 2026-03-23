@@ -5,6 +5,7 @@ use anyhow::Result;
 use crate::{
     agent::prompts::JobType,
     compliance::sla::SlaPriority,
+    gateway::LlmGateway,
     segments::AgentServices,
     state::{AgentState, GoalState},
     storage::PostgresStore,
@@ -16,6 +17,7 @@ pub struct AgentManager {
     store: Arc<PostgresStore>,
     workspace_manager: Arc<WorkspaceManager>,
     services: Arc<AgentServices>,
+    gateway: Arc<dyn LlmGateway>,
 }
 
 fn build_goal_and_agent(
@@ -51,8 +53,14 @@ impl AgentManager {
         store: Arc<PostgresStore>,
         workspace_manager: Arc<WorkspaceManager>,
         services: Arc<AgentServices>,
+        gateway: Arc<dyn LlmGateway>,
     ) -> Self {
-        Self { store, workspace_manager, services }
+        Self { store, workspace_manager, services, gateway }
+    }
+
+    /// Expose the LLM gateway for plan mode and other components that need it.
+    pub fn gateway(&self) -> Arc<dyn LlmGateway> {
+        Arc::clone(&self.gateway)
     }
 
     /// Create a new goal and root agent, scoped to `tenant_id`.

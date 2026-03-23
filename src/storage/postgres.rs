@@ -5,7 +5,12 @@ use sqlx::{postgres::PgRow, PgPool, Row};
 use serde::Serialize;
 
 use crate::{
-    state::{AgentState, AgentStatus, GoalState, GoalStatus},
+    agent::definition::{
+        AgentDefinition, AgentDefinitionStatus, AgentRole, ConnectorAuthType, ConnectorSource,
+        EndpointDef, ExecutionLimits, MemoryScope, OutputDestination, OutputFormat, OutputSpec,
+        RoleStatus, TenantConnector, TriggerDef, TriggerType, WorkforceEventSubscription,
+    },
+    state::{AgentState, AgentStatus, GoalInstance, GoalInstanceStatus, GoalState, GoalStatus, TriggerSource},
     workspace::{manager::WorkspaceInfo, resolver::WorkspaceMode},
 };
 
@@ -163,6 +168,204 @@ impl PostgresStore {
         .execute(&self.pool)
         .await?;
 
+        // Add plan_rejection_count — survives server restarts so the 3-rejection cap always works.
+        sqlx::query(
+            "ALTER TABLE agents ADD COLUMN IF NOT EXISTS plan_rejection_count INTEGER NOT NULL DEFAULT 0",
+        )
+        .execute(&self.pool)
+        .await?;
+
+        // ── AgentDefinitions ─────────────────────────────────────────────
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS agent_definitions (
+                id          TEXT PRIMARY KEY,
+                tenant_id   TEXT NOT NULL,
+                name        TEXT NOT NULL,
+                persona     TEXT NOT NULL DEFAULT '',
+                connectors  JSONB NOT NULL DEFAULT '[]',
+                constraints JSONB NOT NULL DEFAULT '[]',
+                memory_ref  TEXT NOT NULL DEFAULT '',
+                status      TEXT NOT NULL DEFAULT 'draft',
+                created_at  TIMESTAMPTZ NOT NULL,
+                updated_at  TIMESTAMPTZ NOT NULL
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS agent_defs_tenant ON agent_definitions (tenant_id, status)")
+            .execute(&self.pool)
+            .await?;
+
+        // ── AgentRoles ───────────────────────────────────────────────────
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS agent_roles (
+                id                   TEXT PRIMARY KEY,
+                agent_id             TEXT NOT NULL REFERENCES agent_definitions(id) ON DELETE CASCADE,
+                tenant_id            TEXT NOT NULL,
+                version              INTEGER NOT NULL DEFAULT 1,
+                status               TEXT NOT NULL DEFAULT 'draft',
+                name                 TEXT NOT NULL,
+                trigger              JSONB NOT NULL DEFAULT '{}',
+                purpose              TEXT NOT NULL DEFAULT '',
+                execution_guidelines TEXT,
+                connectors           JSONB NOT NULL DEFAULT '[]',
+                tools                JSONB NOT NULL DEFAULT '[]',
+                output_spec          JSONB NOT NULL DEFAULT '{}',
+                memory_scope         TEXT NOT NULL DEFAULT 'agent',
+                execution_limits     JSONB NOT NULL DEFAULT '{}',
+                created_at           TIMESTAMPTZ NOT NULL,
+                updated_at           TIMESTAMPTZ NOT NULL
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS agent_roles_agent ON agent_roles (agent_id)")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS agent_roles_tenant ON agent_roles (tenant_id, status)")
+            .execute(&self.pool)
+            .await?;
+
+        // ── GoalInstances ────────────────────────────────────────────────
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS goal_instances (
+                id                              TEXT PRIMARY KEY,
+                tenant_id                       TEXT NOT NULL,
+                agent_id                        TEXT NOT NULL,
+                role_id                         TEXT NOT NULL,
+                role_version                    INTEGER NOT NULL,
+                input_data                      JSONB NOT NULL DEFAULT '{}',
+                status                          TEXT NOT NULL DEFAULT 'pending',
+                result                          JSONB,
+                failure_reason                  TEXT,
+                trigger_source                  JSONB NOT NULL DEFAULT '{}',
+                is_test                         BOOLEAN NOT NULL DEFAULT FALSE,
+                cost_usd                        DOUBLE PRECISION NOT NULL DEFAULT 0,
+                human_hours_saved               DOUBLE PRECISION NOT NULL DEFAULT 0,
+                human_cost_saved_usd            DOUBLE PRECISION NOT NULL DEFAULT 0,
+                agent_state_id                  TEXT,
+                triggered_by_goal_instance_id   TEXT,
+                created_at                      TIMESTAMPTZ NOT NULL,
+                updated_at                      TIMESTAMPTZ NOT NULL,
+                completed_at                    TIMESTAMPTZ
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS goal_inst_tenant ON goal_instances (tenant_id, status)")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS goal_inst_agent ON goal_instances (agent_id)")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS goal_inst_role ON goal_instances (role_id)")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS goal_inst_pending ON goal_instances (created_at)
+             WHERE status = 'pending'",
+        )
+        .execute(&self.pool)
+        .await?;
+
+        // ── TenantConnectors ─────────────────────────────────────────────
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS tenant_connectors (
+                id                   TEXT PRIMARY KEY,
+                tenant_id            TEXT NOT NULL,
+                name                 TEXT NOT NULL,
+                category             TEXT NOT NULL,
+                base_url             TEXT NOT NULL,
+                auth_type            JSONB NOT NULL DEFAULT '{}',
+                auth_credential_key  TEXT,
+                source               JSONB NOT NULL DEFAULT '{}',
+                source_docs          TEXT,
+                endpoints            JSONB NOT NULL DEFAULT '[]',
+                summary              TEXT NOT NULL DEFAULT '',
+                created_at           TIMESTAMPTZ NOT NULL,
+                updated_at           TIMESTAMPTZ NOT NULL,
+                UNIQUE (tenant_id, name)
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS tenant_conn_tenant ON tenant_connectors (tenant_id)")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS tenant_conn_category ON tenant_connectors (tenant_id, category)")
+            .execute(&self.pool)
+            .await?;
+
+        // ── WorkforceEventSubscriptions ──────────────────────────────────
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS workforce_event_subscriptions (
+                id                   TEXT PRIMARY KEY,
+                tenant_id            TEXT NOT NULL,
+                subscriber_role_id   TEXT NOT NULL,
+                subscriber_agent_id  TEXT NOT NULL,
+                event_filter         TEXT NOT NULL,
+                input_mapping        JSONB NOT NULL DEFAULT '{}',
+                active               BOOLEAN NOT NULL DEFAULT TRUE,
+                created_at           TIMESTAMPTZ NOT NULL
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS wf_subs_tenant ON workforce_event_subscriptions (tenant_id) WHERE active = TRUE",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS wf_subs_role ON workforce_event_subscriptions (subscriber_role_id)",
+        )
+        .execute(&self.pool)
+        .await?;
+
+        // ── PlanModeSessions ─────────────────────────────────────────────
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS plan_mode_sessions (
+                id             TEXT PRIMARY KEY,
+                tenant_id      TEXT NOT NULL,
+                agent_id       TEXT NOT NULL,
+                phase          TEXT NOT NULL,
+                conversation   JSONB NOT NULL DEFAULT '[]',
+                draft_role     JSONB,
+                intent_cache   JSONB,
+                pending_steps  JSONB NOT NULL DEFAULT '[]',
+                created_at     TIMESTAMPTZ NOT NULL,
+                updated_at     TIMESTAMPTZ NOT NULL
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS plan_mode_sessions_tenant ON plan_mode_sessions (tenant_id)",
+        )
+        .execute(&self.pool)
+        .await?;
+
+        // ── RoleChatSessions ─────────────────────────────────────────────
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS role_chat_sessions (
+                id              TEXT PRIMARY KEY,
+                tenant_id       TEXT NOT NULL,
+                role_id         TEXT NOT NULL,
+                agent_id        TEXT NOT NULL,
+                conversation    JSONB NOT NULL DEFAULT '[]',
+                pending_change  JSONB,
+                created_at      TIMESTAMPTZ NOT NULL,
+                updated_at      TIMESTAMPTZ NOT NULL
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS role_chat_sessions_role ON role_chat_sessions (tenant_id, role_id)",
+        )
+        .execute(&self.pool)
+        .await?;
+
         Ok(())
     }
 
@@ -175,23 +378,24 @@ impl PostgresStore {
                 id, tenant_id, goal, status, current_task, current_step,
                 workspace_path, memory_ref, next_run, created_at, updated_at,
                 started_at, plan, final_answer, metadata, parent_agent_id, pending_children,
-                conversation_id
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+                conversation_id, plan_rejection_count
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
             ON CONFLICT (id) DO UPDATE SET
-                goal             = EXCLUDED.goal,
-                status           = EXCLUDED.status,
-                current_task     = EXCLUDED.current_task,
-                current_step     = EXCLUDED.current_step,
-                workspace_path   = EXCLUDED.workspace_path,
-                memory_ref       = EXCLUDED.memory_ref,
-                next_run         = EXCLUDED.next_run,
-                updated_at       = EXCLUDED.updated_at,
-                started_at       = COALESCE(agents.started_at, EXCLUDED.started_at),
-                plan             = EXCLUDED.plan,
-                final_answer     = EXCLUDED.final_answer,
-                metadata         = EXCLUDED.metadata,
-                pending_children = EXCLUDED.pending_children,
-                conversation_id  = EXCLUDED.conversation_id
+                goal                 = EXCLUDED.goal,
+                status               = EXCLUDED.status,
+                current_task         = EXCLUDED.current_task,
+                current_step         = EXCLUDED.current_step,
+                workspace_path       = EXCLUDED.workspace_path,
+                memory_ref           = EXCLUDED.memory_ref,
+                next_run             = EXCLUDED.next_run,
+                updated_at           = EXCLUDED.updated_at,
+                started_at           = COALESCE(agents.started_at, EXCLUDED.started_at),
+                plan                 = EXCLUDED.plan,
+                final_answer         = EXCLUDED.final_answer,
+                metadata             = EXCLUDED.metadata,
+                pending_children     = EXCLUDED.pending_children,
+                conversation_id      = EXCLUDED.conversation_id,
+                plan_rejection_count = EXCLUDED.plan_rejection_count
         "#,
         )
         .bind(&state.id)
@@ -212,6 +416,7 @@ impl PostgresStore {
         .bind(&state.parent_agent_id)
         .bind(serde_json::json!(state.pending_children))
         .bind(&state.conversation_id)
+        .bind(state.plan_rejection_count as i32)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -248,6 +453,10 @@ impl PostgresStore {
             WHERE  id IN (
                 SELECT id FROM agents
                 WHERE  next_run <= NOW()
+                  -- NOTE: plan_approval_needed, clarifying, paused, and delegating
+                  -- are intentionally excluded from scheduling.  These statuses
+                  -- require human input or external completion before the agent
+                  -- can proceed.  Do NOT add them to this IN clause.
                   AND  status   IN ('pending', 'waiting')
                 ORDER  BY next_run ASC
                 LIMIT  $1
@@ -433,6 +642,699 @@ impl PostgresStore {
         .bind(goal.updated_at)
         .execute(&self.pool)
         .await?;
+
+        Ok(())
+    }
+
+    // ── RoleChatSession CRUD ────────────────────────────────────────────────
+
+    pub async fn upsert_role_chat_session(
+        &self,
+        session: &crate::agent::role_chat::RoleChatSession,
+    ) -> Result<()> {
+        let conversation = serde_json::to_value(&session.conversation)
+            .unwrap_or(serde_json::json!([]));
+        let pending_change = session.pending_change.as_ref()
+            .and_then(|c| serde_json::to_value(c).ok());
+
+        sqlx::query(
+            r#"INSERT INTO role_chat_sessions
+                (id, tenant_id, role_id, agent_id, conversation, pending_change, created_at, updated_at)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+               ON CONFLICT (id) DO UPDATE SET
+                conversation   = EXCLUDED.conversation,
+                pending_change = EXCLUDED.pending_change,
+                updated_at     = EXCLUDED.updated_at"#,
+        )
+        .bind(&session.id).bind(&session.tenant_id).bind(&session.role_id)
+        .bind(&session.agent_id).bind(&conversation).bind(&pending_change)
+        .bind(session.created_at).bind(session.updated_at)
+        .execute(&self.pool).await?;
+        Ok(())
+    }
+
+    pub async fn get_role_chat_session(
+        &self,
+        tenant_id:  &str,
+        session_id: &str,
+    ) -> Result<Option<crate::agent::role_chat::RoleChatSession>> {
+        let row = sqlx::query(
+            "SELECT * FROM role_chat_sessions WHERE id=$1 AND tenant_id=$2",
+        )
+        .bind(session_id).bind(tenant_id)
+        .fetch_optional(&self.pool).await?;
+
+        match row {
+            None => Ok(None),
+            Some(r) => {
+                let conversation: Vec<crate::agent::role_chat::RoleChatMessage> = {
+                    let v: serde_json::Value = r.get("conversation");
+                    serde_json::from_value(v).unwrap_or_default()
+                };
+                let pending_change = r
+                    .try_get::<Option<serde_json::Value>, _>("pending_change")
+                    .ok().flatten()
+                    .and_then(|v| serde_json::from_value(v).ok());
+                Ok(Some(crate::agent::role_chat::RoleChatSession {
+                    id:             r.get("id"),
+                    tenant_id:      r.get("tenant_id"),
+                    role_id:        r.get("role_id"),
+                    agent_id:       r.get("agent_id"),
+                    conversation,
+                    pending_change,
+                    created_at:     r.get("created_at"),
+                    updated_at:     r.get("updated_at"),
+                }))
+            }
+        }
+    }
+
+    pub async fn delete_role_chat_session(&self, tenant_id: &str, session_id: &str) -> Result<()> {
+        sqlx::query("DELETE FROM role_chat_sessions WHERE id=$1 AND tenant_id=$2")
+            .bind(session_id).bind(tenant_id).execute(&self.pool).await?;
+        Ok(())
+    }
+
+    pub async fn upsert_plan_mode_session(
+        &self,
+        session: &crate::agent::definition::PlanModeSession,
+    ) -> Result<()> {
+        let phase = serde_json::to_value(&session.phase)
+            .unwrap_or(serde_json::json!("capturing_intent"));
+        let conversation = serde_json::to_value(&session.conversation)
+            .unwrap_or(serde_json::json!([]));
+        let draft_role = session.draft_role.as_ref()
+            .and_then(|r| serde_json::to_value(r).ok());
+        let intent_cache = session.intent_cache.as_ref()
+            .and_then(|v| serde_json::to_value(v).ok());
+
+        sqlx::query(
+            r#"
+            INSERT INTO plan_mode_sessions
+                (id, tenant_id, agent_id, phase, conversation, draft_role, intent_cache, pending_steps, created_at, updated_at)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+            ON CONFLICT (id) DO UPDATE SET
+                phase         = EXCLUDED.phase,
+                conversation  = EXCLUDED.conversation,
+                draft_role    = EXCLUDED.draft_role,
+                intent_cache  = EXCLUDED.intent_cache,
+                pending_steps = EXCLUDED.pending_steps,
+                updated_at    = EXCLUDED.updated_at
+            "#,
+        )
+        .bind(&session.id)
+        .bind(&session.tenant_id)
+        .bind(&session.draft_agent.id)
+        .bind(phase.as_str().unwrap_or("capturing_intent"))
+        .bind(&conversation)
+        .bind(&draft_role)
+        .bind(&intent_cache)
+        .bind(serde_json::to_value(&session.pending_steps).unwrap_or(serde_json::json!([])))
+        .bind(session.created_at)
+        .bind(session.updated_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn get_plan_mode_session(
+        &self,
+        tenant_id: &str,
+        session_id: &str,
+    ) -> Result<Option<crate::agent::definition::PlanModeSession>> {
+        let row = sqlx::query(
+            "SELECT id, tenant_id, agent_id, phase, conversation, draft_role, intent_cache, pending_steps, created_at, updated_at
+             FROM plan_mode_sessions WHERE id = $1 AND tenant_id = $2",
+        )
+        .bind(session_id)
+        .bind(tenant_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        match row {
+            None => Ok(None),
+            Some(r) => {
+                let agent_id: String = r.get("agent_id");
+                let draft_agent = self.get_agent_definition(tenant_id, &agent_id)
+                    .await?
+                    .unwrap_or_else(|| crate::agent::definition::AgentDefinition::new(
+                        agent_id.clone(), tenant_id.to_string(), "Agent".into(),
+                    ));
+
+                let phase: crate::agent::definition::PlanModePhase = {
+                    let s: String = r.get("phase");
+                    serde_json::from_value(serde_json::json!(s))
+                        .unwrap_or(crate::agent::definition::PlanModePhase::CapturingIntent)
+                };
+                let conversation: Vec<crate::agent::definition::PlanModeMessage> = {
+                    let v: serde_json::Value = r.get("conversation");
+                    serde_json::from_value(v).unwrap_or_default()
+                };
+                let draft_role: Option<crate::agent::definition::AgentRole> = r
+                    .try_get::<Option<serde_json::Value>, _>("draft_role")
+                    .ok().flatten()
+                    .and_then(|v| serde_json::from_value(v).ok());
+                let intent_cache: Option<serde_json::Value> = r
+                    .try_get::<Option<serde_json::Value>, _>("intent_cache")
+                    .ok().flatten();
+                let pending_steps: Vec<serde_json::Value> = r
+                    .try_get::<serde_json::Value, _>("pending_steps")
+                    .ok()
+                    .and_then(|v| serde_json::from_value(v).ok())
+                    .unwrap_or_default();
+
+                Ok(Some(crate::agent::definition::PlanModeSession {
+                    id:            r.get("id"),
+                    tenant_id:     r.get("tenant_id"),
+                    draft_agent,
+                    draft_role,
+                    conversation,
+                    phase,
+                    intent_cache,
+                    pending_steps,
+                    created_at:    r.get("created_at"),
+                    updated_at:    r.get("updated_at"),
+                }))
+            }
+        }
+    }
+
+    pub async fn delete_plan_mode_session(
+        &self,
+        tenant_id: &str,
+        session_id: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            "DELETE FROM plan_mode_sessions WHERE id = $1 AND tenant_id = $2",
+        )
+        .bind(session_id)
+        .bind(tenant_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    // ── AgentDefinition CRUD ────────────────────────────────────────────────
+
+    pub async fn upsert_agent_definition(&self, def: &AgentDefinition) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO agent_definitions
+                (id, tenant_id, name, persona, connectors, constraints, memory_ref, status, created_at, updated_at)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+            ON CONFLICT (id) DO UPDATE SET
+                name        = EXCLUDED.name,
+                persona     = EXCLUDED.persona,
+                connectors  = EXCLUDED.connectors,
+                constraints = EXCLUDED.constraints,
+                memory_ref  = EXCLUDED.memory_ref,
+                status      = EXCLUDED.status,
+                updated_at  = EXCLUDED.updated_at
+            "#,
+        )
+        .bind(&def.id)
+        .bind(&def.tenant_id)
+        .bind(&def.name)
+        .bind(&def.persona)
+        .bind(serde_json::json!(def.connectors))
+        .bind(serde_json::json!(def.constraints))
+        .bind(&def.memory_ref)
+        .bind(agent_def_status_to_str(&def.status))
+        .bind(def.created_at)
+        .bind(def.updated_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn get_agent_definition(&self, tenant_id: &str, id: &str) -> Result<Option<AgentDefinition>> {
+        let row = sqlx::query(
+            "SELECT * FROM agent_definitions WHERE id = $1 AND tenant_id = $2",
+        )
+        .bind(id)
+        .bind(tenant_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.as_ref().map(row_to_agent_definition))
+    }
+
+    pub async fn list_agent_definitions(&self, tenant_id: &str) -> Result<Vec<AgentDefinition>> {
+        let rows = sqlx::query(
+            "SELECT * FROM agent_definitions WHERE tenant_id = $1 ORDER BY created_at DESC",
+        )
+        .bind(tenant_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(row_to_agent_definition).collect())
+    }
+
+    pub async fn delete_agent_definition(&self, tenant_id: &str, id: &str) -> Result<()> {
+        sqlx::query("DELETE FROM agent_definitions WHERE id = $1 AND tenant_id = $2")
+            .bind(id)
+            .bind(tenant_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    // ── AgentRole CRUD ──────────────────────────────────────────────────────
+
+    pub async fn upsert_agent_role(&self, role: &AgentRole) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO agent_roles
+                (id, agent_id, tenant_id, version, status, name, trigger, purpose,
+                 execution_guidelines, connectors, tools, output_spec, memory_scope,
+                 execution_limits, created_at, updated_at)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+            ON CONFLICT (id) DO UPDATE SET
+                version              = EXCLUDED.version,
+                status               = EXCLUDED.status,
+                name                 = EXCLUDED.name,
+                trigger              = EXCLUDED.trigger,
+                purpose              = EXCLUDED.purpose,
+                execution_guidelines = EXCLUDED.execution_guidelines,
+                connectors           = EXCLUDED.connectors,
+                tools                = EXCLUDED.tools,
+                output_spec          = EXCLUDED.output_spec,
+                memory_scope         = EXCLUDED.memory_scope,
+                execution_limits     = EXCLUDED.execution_limits,
+                updated_at           = EXCLUDED.updated_at
+            "#,
+        )
+        .bind(&role.id)
+        .bind(&role.agent_id)
+        .bind(&role.tenant_id)
+        .bind(role.version as i32)
+        .bind(role_status_to_str(&role.status))
+        .bind(&role.name)
+        .bind(serde_json::to_value(&role.trigger).unwrap_or_default())
+        .bind(&role.purpose)
+        .bind(serde_json::to_value(&role.execution_guidelines).unwrap_or_default())
+        .bind(serde_json::json!(role.connectors))
+        .bind(serde_json::json!(role.tools))
+        .bind(serde_json::to_value(&role.output_spec).unwrap_or_default())
+        .bind(memory_scope_to_str(&role.memory_scope))
+        .bind(serde_json::to_value(&role.execution_limits).unwrap_or_default())
+        .bind(role.created_at)
+        .bind(role.updated_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn get_agent_role(&self, tenant_id: &str, id: &str) -> Result<Option<AgentRole>> {
+        let row = sqlx::query("SELECT * FROM agent_roles WHERE id = $1 AND tenant_id = $2")
+            .bind(id)
+            .bind(tenant_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.as_ref().map(row_to_agent_role))
+    }
+
+    pub async fn list_roles_for_agent(&self, tenant_id: &str, agent_id: &str) -> Result<Vec<AgentRole>> {
+        let rows = sqlx::query(
+            "SELECT * FROM agent_roles WHERE agent_id = $1 AND tenant_id = $2 ORDER BY created_at ASC",
+        )
+        .bind(agent_id)
+        .bind(tenant_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(row_to_agent_role).collect())
+    }
+
+    /// Returns all active roles with webhook or workforce_event triggers for a tenant.
+    /// Used by the scheduler and connector poller to match incoming events.
+    pub async fn list_active_trigger_roles(&self, tenant_id: &str) -> Result<Vec<AgentRole>> {
+        let rows = sqlx::query(
+            "SELECT * FROM agent_roles
+             WHERE tenant_id = $1
+               AND status = 'active'
+               AND (trigger->>'trigger_type' IN ('webhook', 'workforce_event', 'schedule'))",
+        )
+        .bind(tenant_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(row_to_agent_role).collect())
+    }
+
+    pub async fn delete_agent_role(&self, tenant_id: &str, id: &str) -> Result<()> {
+        sqlx::query("DELETE FROM agent_roles WHERE id = $1 AND tenant_id = $2")
+            .bind(id)
+            .bind(tenant_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    // ── GoalInstance CRUD ───────────────────────────────────────────────────
+
+    pub async fn upsert_goal_instance(&self, gi: &GoalInstance) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO goal_instances
+                (id, tenant_id, agent_id, role_id, role_version, input_data, status,
+                 result, failure_reason, trigger_source, is_test, cost_usd,
+                 agent_state_id, triggered_by_goal_instance_id,
+                 created_at, updated_at, completed_at)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+            ON CONFLICT (id) DO UPDATE SET
+                status                          = EXCLUDED.status,
+                result                          = EXCLUDED.result,
+                failure_reason                  = EXCLUDED.failure_reason,
+                cost_usd                        = EXCLUDED.cost_usd,
+                agent_state_id                  = EXCLUDED.agent_state_id,
+                updated_at                      = EXCLUDED.updated_at,
+                completed_at                    = EXCLUDED.completed_at
+            "#,
+        )
+        .bind(&gi.id)
+        .bind(&gi.tenant_id)
+        .bind(&gi.agent_id)
+        .bind(&gi.role_id)
+        .bind(gi.role_version as i32)
+        .bind(&gi.input_data)
+        .bind(goal_instance_status_to_str(&gi.status))
+        .bind(&gi.result)
+        .bind(&gi.failure_reason)
+        .bind(serde_json::to_value(&gi.trigger_source).unwrap_or_default())
+        .bind(gi.is_test)
+        .bind(gi.cost_usd)
+        .bind(&gi.agent_state_id)
+        .bind(&gi.triggered_by_goal_instance_id)
+        .bind(gi.created_at)
+        .bind(gi.updated_at)
+        .bind(gi.completed_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn get_goal_instance(&self, tenant_id: &str, id: &str) -> Result<Option<GoalInstance>> {
+        let row = sqlx::query("SELECT * FROM goal_instances WHERE id = $1 AND tenant_id = $2")
+            .bind(id)
+            .bind(tenant_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.as_ref().map(row_to_goal_instance))
+    }
+
+    pub async fn list_goal_instances_for_role(
+        &self,
+        tenant_id: &str,
+        role_id: &str,
+        limit: i64,
+    ) -> Result<Vec<GoalInstance>> {
+        let rows = sqlx::query(
+            "SELECT * FROM goal_instances
+             WHERE role_id = $1 AND tenant_id = $2
+             ORDER BY created_at DESC LIMIT $3",
+        )
+        .bind(role_id)
+        .bind(tenant_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(row_to_goal_instance).collect())
+    }
+
+    pub async fn list_goal_instances_for_agent(
+        &self,
+        tenant_id: &str,
+        agent_id: &str,
+        limit: i64,
+    ) -> Result<Vec<GoalInstance>> {
+        let rows = sqlx::query(
+            "SELECT * FROM goal_instances
+             WHERE agent_id = $1 AND tenant_id = $2
+             ORDER BY created_at DESC LIMIT $3",
+        )
+        .bind(agent_id)
+        .bind(tenant_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(row_to_goal_instance).collect())
+    }
+
+    /// Update the result JSON on a goal instance (writes criteria_checks, step_outputs).
+    pub async fn update_goal_instance_result(
+        &self,
+        tenant_id:        &str,
+        goal_instance_id: &str,
+        result:           serde_json::Value,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE goal_instances SET result = $1, updated_at = NOW()
+             WHERE id = $2 AND tenant_id = $3",
+        )
+        .bind(&result)
+        .bind(goal_instance_id)
+        .bind(tenant_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Write savings estimates back to a completed GoalInstance.
+    pub async fn update_goal_instance_savings(
+        &self,
+        tenant_id:            &str,
+        goal_instance_id:     &str,
+        human_hours_saved:    f64,
+        human_cost_saved_usd: f64,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE goal_instances SET
+                human_hours_saved    = $1,
+                human_cost_saved_usd = $2,
+                updated_at           = NOW()
+             WHERE id = $3 AND tenant_id = $4",
+        )
+        .bind(human_hours_saved)
+        .bind(human_cost_saved_usd)
+        .bind(goal_instance_id)
+        .bind(tenant_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Aggregate savings summary across all completed runs for a tenant.
+    pub async fn get_tenant_savings_summary(
+        &self,
+        tenant_id: &str,
+    ) -> Result<crate::agent::savings::TenantSavingsSummary> {
+        // Total row
+        let total_row = sqlx::query(
+            "SELECT
+                COUNT(*)                     AS runs,
+                COALESCE(SUM(human_hours_saved),    0) AS total_hours,
+                COALESCE(SUM(human_cost_saved_usd), 0) AS total_human_cost,
+                COALESCE(SUM(cost_usd),             0) AS total_ai_cost
+             FROM goal_instances
+             WHERE tenant_id = $1 AND status = 'completed'",
+        )
+        .bind(tenant_id)
+        .fetch_one(&self.pool)
+        .await?;
+
+        let total_runs:           u64 = total_row.get::<i64, _>("runs") as u64;
+        let total_human_hours:    f64 = total_row.get("total_hours");
+        let total_human_cost:     f64 = total_row.get("total_human_cost");
+        let total_ai_cost:        f64 = total_row.get("total_ai_cost");
+
+        // Per-role breakdown
+        let role_rows = sqlx::query(
+            "SELECT
+                gi.role_id,
+                ar.name                                AS role_name,
+                COUNT(*)                               AS runs,
+                COALESCE(SUM(gi.human_hours_saved),    0) AS hours,
+                COALESCE(SUM(gi.human_cost_saved_usd), 0) AS human_cost,
+                COALESCE(SUM(gi.cost_usd),             0) AS ai_cost
+             FROM goal_instances gi
+             LEFT JOIN agent_roles ar ON ar.id = gi.role_id AND ar.tenant_id = gi.tenant_id
+             WHERE gi.tenant_id = $1 AND gi.status = 'completed'
+             GROUP BY gi.role_id, ar.name
+             ORDER BY hours DESC
+             LIMIT 20",
+        )
+        .bind(tenant_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let by_role: Vec<crate::agent::savings::RoleSavings> = role_rows.iter().map(|r| {
+            crate::agent::savings::RoleSavings {
+                role_id:              r.get("role_id"),
+                role_name:            r.try_get("role_name").unwrap_or_else(|_| "Unknown Role".into()),
+                runs:                 r.get::<i64, _>("runs") as u64,
+                human_hours_saved:    r.get("hours"),
+                human_cost_saved_usd: r.get("human_cost"),
+                ai_cost_usd:          r.get("ai_cost"),
+            }
+        }).collect();
+
+        let roi = crate::agent::savings::TenantSavingsSummary::roi_multiple(total_human_cost, total_ai_cost);
+
+        Ok(crate::agent::savings::TenantSavingsSummary {
+            total_runs,
+            total_human_hours:    (total_human_hours * 100.0).round() / 100.0,
+            total_human_cost_usd: (total_human_cost  * 100.0).round() / 100.0,
+            total_ai_cost_usd:    (total_ai_cost     * 10000.0).round() / 10000.0,
+            roi_multiple:         roi,
+            by_role,
+        })
+    }
+
+    // ── TenantConnector CRUD ────────────────────────────────────────────────
+
+    pub async fn upsert_tenant_connector(&self, tc: &TenantConnector) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO tenant_connectors
+                (id, tenant_id, name, category, base_url, auth_type, auth_credential_key,
+                 source, source_docs, endpoints, summary, created_at, updated_at)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+            ON CONFLICT (tenant_id, name) DO UPDATE SET
+                category            = EXCLUDED.category,
+                base_url            = EXCLUDED.base_url,
+                auth_type           = EXCLUDED.auth_type,
+                auth_credential_key = EXCLUDED.auth_credential_key,
+                source              = EXCLUDED.source,
+                source_docs         = EXCLUDED.source_docs,
+                endpoints           = EXCLUDED.endpoints,
+                summary             = EXCLUDED.summary,
+                updated_at          = EXCLUDED.updated_at
+            "#,
+        )
+        .bind(&tc.id)
+        .bind(&tc.tenant_id)
+        .bind(&tc.name)
+        .bind(&tc.category)
+        .bind(&tc.base_url)
+        .bind(serde_json::to_value(&tc.auth_type).unwrap_or_default())
+        .bind(&tc.auth_credential_key)
+        .bind(serde_json::to_value(&tc.source).unwrap_or_default())
+        .bind(&tc.source_docs)
+        .bind(serde_json::to_value(&tc.endpoints).unwrap_or_default())
+        .bind(&tc.summary)
+        .bind(tc.created_at)
+        .bind(tc.updated_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn get_tenant_connector(
+        &self,
+        tenant_id: &str,
+        name: &str,
+    ) -> Result<Option<TenantConnector>> {
+        let row = sqlx::query(
+            "SELECT * FROM tenant_connectors WHERE tenant_id = $1 AND name = $2",
+        )
+        .bind(tenant_id)
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.as_ref().map(row_to_tenant_connector))
+    }
+
+    pub async fn list_tenant_connectors(&self, tenant_id: &str) -> Result<Vec<TenantConnector>> {
+        let rows = sqlx::query(
+            "SELECT * FROM tenant_connectors WHERE tenant_id = $1 ORDER BY category, name",
+        )
+        .bind(tenant_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(row_to_tenant_connector).collect())
+    }
+
+    pub async fn list_tenant_connectors_by_category(
+        &self,
+        tenant_id: &str,
+        category: &str,
+    ) -> Result<Vec<TenantConnector>> {
+        let rows = sqlx::query(
+            "SELECT * FROM tenant_connectors WHERE tenant_id = $1 AND category = $2 ORDER BY name",
+        )
+        .bind(tenant_id)
+        .bind(category)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(row_to_tenant_connector).collect())
+    }
+
+    pub async fn delete_tenant_connector(&self, tenant_id: &str, name: &str) -> Result<()> {
+        sqlx::query("DELETE FROM tenant_connectors WHERE tenant_id = $1 AND name = $2")
+            .bind(tenant_id)
+            .bind(name)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    // ── WorkforceEventSubscription CRUD ─────────────────────────────────────
+
+    pub async fn upsert_workforce_subscription(
+        &self,
+        sub: &WorkforceEventSubscription,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO workforce_event_subscriptions
+                (id, tenant_id, subscriber_role_id, subscriber_agent_id,
+                 event_filter, input_mapping, active, created_at)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+            ON CONFLICT (id) DO UPDATE SET
+                event_filter  = EXCLUDED.event_filter,
+                input_mapping = EXCLUDED.input_mapping,
+                active        = EXCLUDED.active
+            "#,
+        )
+        .bind(&sub.id)
+        .bind(&sub.tenant_id)
+        .bind(&sub.subscriber_role_id)
+        .bind(&sub.subscriber_agent_id)
+        .bind(&sub.event_filter)
+        .bind(&sub.input_mapping)
+        .bind(sub.active)
+        .bind(sub.created_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Returns all active subscriptions for a tenant.
+    /// Called by the workforce event dispatcher after every GoalInstance completion.
+    pub async fn list_active_workforce_subscriptions(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<WorkforceEventSubscription>> {
+        let rows = sqlx::query(
+            "SELECT * FROM workforce_event_subscriptions
+             WHERE tenant_id = $1 AND active = TRUE",
+        )
+        .bind(tenant_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(row_to_workforce_subscription).collect())
+    }
+
+    pub async fn deactivate_workforce_subscription(
+        &self,
+        tenant_id: &str,
+        id: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE workforce_event_subscriptions
+             SET active = FALSE WHERE id = $1 AND tenant_id = $2",
+        )
+        .bind(id)
+        .bind(tenant_id)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -503,6 +1405,7 @@ fn status_to_str(s: &AgentStatus) -> &'static str {
         AgentStatus::Pending => "pending",
         AgentStatus::Preflight => "preflight",
         AgentStatus::Clarifying => "clarifying",
+        AgentStatus::PlanApprovalNeeded => "plan_approval_needed",
         AgentStatus::Running => "running",
         AgentStatus::Waiting => "waiting",
         AgentStatus::Delegating => "delegating",
@@ -516,6 +1419,7 @@ fn str_to_status(s: &str) -> AgentStatus {
     match s {
         "preflight" => AgentStatus::Preflight,
         "clarifying" => AgentStatus::Clarifying,
+        "plan_approval_needed" => AgentStatus::PlanApprovalNeeded,
         "running" => AgentStatus::Running,
         "waiting" => AgentStatus::Waiting,
         "delegating" => AgentStatus::Delegating,
@@ -570,6 +1474,11 @@ fn row_to_agent_state(row: &PgRow) -> AgentState {
         parent_agent_id: row.get("parent_agent_id"),
         pending_children,
         conversation_id: row.try_get("conversation_id").ok().flatten(),
+        plan_rejection_count: row
+            .try_get::<i32, _>("plan_rejection_count")
+            .ok()
+            .map(|v| v as u32)
+            .unwrap_or(0),
     }
 }
 
@@ -584,7 +1493,244 @@ fn mode_to_str(m: &WorkspaceMode) -> &'static str {
 fn str_to_workspace_mode(s: &str) -> WorkspaceMode {
     match s {
         "remote" => WorkspaceMode::Remote,
-        "local" => WorkspaceMode::Local,
-        _ => WorkspaceMode::Hybrid,
+        "local"  => WorkspaceMode::Local,
+        _        => WorkspaceMode::Hybrid,
+    }
+}
+
+// ── AgentDefinition helpers ────────────────────────────────────────────────
+
+fn agent_def_status_to_str(s: &AgentDefinitionStatus) -> &'static str {
+    match s {
+        AgentDefinitionStatus::Draft    => "draft",
+        AgentDefinitionStatus::Active   => "active",
+        AgentDefinitionStatus::Paused   => "paused",
+        AgentDefinitionStatus::Archived => "archived",
+    }
+}
+
+fn str_to_agent_def_status(s: &str) -> AgentDefinitionStatus {
+    match s {
+        "active"   => AgentDefinitionStatus::Active,
+        "paused"   => AgentDefinitionStatus::Paused,
+        "archived" => AgentDefinitionStatus::Archived,
+        _          => AgentDefinitionStatus::Draft,
+    }
+}
+
+fn row_to_agent_definition(row: &PgRow) -> AgentDefinition {
+    let connectors: Vec<String> = row
+        .try_get::<serde_json::Value, _>("connectors")
+        .ok()
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+    let constraints: Vec<String> = row
+        .try_get::<serde_json::Value, _>("constraints")
+        .ok()
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+    AgentDefinition {
+        id:          row.get("id"),
+        tenant_id:   row.get("tenant_id"),
+        name:        row.get("name"),
+        persona:     row.get("persona"),
+        connectors,
+        constraints,
+        memory_ref:  row.try_get("memory_ref").unwrap_or_default(),
+        status:      str_to_agent_def_status(&row.get::<String, _>("status")),
+        created_at:  row.get("created_at"),
+        updated_at:  row.get("updated_at"),
+    }
+}
+
+// ── AgentRole helpers ──────────────────────────────────────────────────────
+
+fn role_status_to_str(s: &RoleStatus) -> &'static str {
+    match s {
+        RoleStatus::Draft    => "draft",
+        RoleStatus::Testing  => "testing",
+        RoleStatus::Active   => "active",
+        RoleStatus::Paused   => "paused",
+        RoleStatus::Archived => "archived",
+    }
+}
+
+fn str_to_role_status(s: &str) -> RoleStatus {
+    match s {
+        "testing"  => RoleStatus::Testing,
+        "active"   => RoleStatus::Active,
+        "paused"   => RoleStatus::Paused,
+        "archived" => RoleStatus::Archived,
+        _          => RoleStatus::Draft,
+    }
+}
+
+fn memory_scope_to_str(s: &MemoryScope) -> &'static str {
+    match s {
+        MemoryScope::Global => "global",
+        MemoryScope::Agent  => "agent",
+        MemoryScope::Role   => "role",
+    }
+}
+
+fn str_to_memory_scope(s: &str) -> MemoryScope {
+    match s {
+        "global" => MemoryScope::Global,
+        "role"   => MemoryScope::Role,
+        _        => MemoryScope::Agent,
+    }
+}
+
+fn row_to_agent_role(row: &PgRow) -> AgentRole {
+    let connectors: Vec<String> = row
+        .try_get::<serde_json::Value, _>("connectors")
+        .ok()
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+    let tools: Vec<String> = row
+        .try_get::<serde_json::Value, _>("tools")
+        .ok()
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+    let trigger: TriggerDef = row
+        .try_get::<serde_json::Value, _>("trigger")
+        .ok()
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+    let output_spec: OutputSpec = row
+        .try_get::<serde_json::Value, _>("output_spec")
+        .ok()
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+    let execution_limits: ExecutionLimits = row
+        .try_get::<serde_json::Value, _>("execution_limits")
+        .ok()
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+    AgentRole {
+        id:                  row.get("id"),
+        agent_id:            row.get("agent_id"),
+        tenant_id:           row.get("tenant_id"),
+        version:             row.get::<i32, _>("version") as u32,
+        status:              str_to_role_status(&row.get::<String, _>("status")),
+        name:                row.get("name"),
+        trigger,
+        purpose:             row.get("purpose"),
+        execution_guidelines: row
+            .try_get::<Option<serde_json::Value>, _>("execution_guidelines")
+            .ok()
+            .flatten()
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default(),
+        connectors,
+        tools,
+        output_spec,
+        memory_scope:        str_to_memory_scope(&row.try_get::<String, _>("memory_scope").unwrap_or_default()),
+        execution_limits,
+        created_at:          row.get("created_at"),
+        updated_at:          row.get("updated_at"),
+    }
+}
+
+// ── GoalInstance helpers ───────────────────────────────────────────────────
+
+fn goal_instance_status_to_str(s: &GoalInstanceStatus) -> &'static str {
+    match s {
+        GoalInstanceStatus::Pending           => "pending",
+        GoalInstanceStatus::Running           => "running",
+        GoalInstanceStatus::Completed         => "completed",
+        GoalInstanceStatus::PartiallyComplete => "partially_complete",
+        GoalInstanceStatus::Failed            => "failed",
+        GoalInstanceStatus::Cancelled         => "cancelled",
+    }
+}
+
+fn str_to_goal_instance_status(s: &str) -> GoalInstanceStatus {
+    match s {
+        "running"            => GoalInstanceStatus::Running,
+        "completed"          => GoalInstanceStatus::Completed,
+        "partially_complete" => GoalInstanceStatus::PartiallyComplete,
+        "failed"             => GoalInstanceStatus::Failed,
+        "cancelled"          => GoalInstanceStatus::Cancelled,
+        _                    => GoalInstanceStatus::Pending,
+    }
+}
+
+fn row_to_goal_instance(row: &PgRow) -> GoalInstance {
+    let trigger_source: TriggerSource = row
+        .try_get::<serde_json::Value, _>("trigger_source")
+        .ok()
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or(TriggerSource::Manual { created_by: "unknown".into() });
+    GoalInstance {
+        id:                            row.get("id"),
+        tenant_id:                     row.get("tenant_id"),
+        agent_id:                      row.get("agent_id"),
+        role_id:                       row.get("role_id"),
+        role_version:                  row.get::<i32, _>("role_version") as u32,
+        input_data:                    row.try_get("input_data").unwrap_or(serde_json::Value::Null),
+        status:                        str_to_goal_instance_status(&row.get::<String, _>("status")),
+        result:                        row.try_get("result").ok().flatten(),
+        failure_reason:                row.try_get("failure_reason").ok().flatten(),
+        trigger_source,
+        is_test:                       row.try_get("is_test").unwrap_or(false),
+        cost_usd:                      row.try_get("cost_usd").unwrap_or(0.0),
+        human_hours_saved:             row.try_get("human_hours_saved").unwrap_or(0.0),
+        human_cost_saved_usd:          row.try_get("human_cost_saved_usd").unwrap_or(0.0),
+        agent_state_id:                row.try_get("agent_state_id").ok().flatten(),
+        triggered_by_goal_instance_id: row.try_get("triggered_by_goal_instance_id").ok().flatten(),
+        created_at:                    row.get("created_at"),
+        updated_at:                    row.get("updated_at"),
+        completed_at:                  row.try_get("completed_at").ok().flatten(),
+    }
+}
+
+// ── TenantConnector helpers ────────────────────────────────────────────────
+
+fn row_to_tenant_connector(row: &PgRow) -> TenantConnector {
+    let auth_type: ConnectorAuthType = row
+        .try_get::<serde_json::Value, _>("auth_type")
+        .ok()
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or(ConnectorAuthType::Bearer);
+    let source: ConnectorSource = row
+        .try_get::<serde_json::Value, _>("source")
+        .ok()
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or(ConnectorSource::Manual);
+    let endpoints: Vec<EndpointDef> = row
+        .try_get::<serde_json::Value, _>("endpoints")
+        .ok()
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+    TenantConnector {
+        id:                  row.get("id"),
+        tenant_id:           row.get("tenant_id"),
+        name:                row.get("name"),
+        category:            row.get("category"),
+        base_url:            row.get("base_url"),
+        auth_type,
+        auth_credential_key: row.try_get("auth_credential_key").ok().flatten(),
+        source,
+        source_docs:         row.try_get("source_docs").ok().flatten(),
+        endpoints,
+        summary:             row.try_get("summary").unwrap_or_default(),
+        created_at:          row.get("created_at"),
+        updated_at:          row.get("updated_at"),
+    }
+}
+
+// ── WorkforceEventSubscription helpers ────────────────────────────────────
+
+fn row_to_workforce_subscription(row: &PgRow) -> WorkforceEventSubscription {
+    WorkforceEventSubscription {
+        id:                  row.get("id"),
+        tenant_id:           row.get("tenant_id"),
+        subscriber_role_id:  row.get("subscriber_role_id"),
+        subscriber_agent_id: row.get("subscriber_agent_id"),
+        event_filter:        row.get("event_filter"),
+        input_mapping:       row.try_get("input_mapping").unwrap_or(serde_json::Value::Object(Default::default())),
+        active:              row.try_get("active").unwrap_or(true),
+        created_at:          row.get("created_at"),
     }
 }

@@ -261,6 +261,14 @@ fn mcp_url_to_connector(server_url: &str) -> Option<&'static str> {
     if url.contains("mcp.shopify.com") {
         return Some("shopify");
     }
+    // Intercom
+    if url.contains("intercom.io") || url.contains("intercom.mcp") {
+        return Some("intercom");
+    }
+    // Freshdesk
+    if url.contains("freshdesk.com") || url.contains("freshdesk.mcp") {
+        return Some("freshdesk");
+    }
     None
 }
 

@@ -179,6 +179,8 @@ mod tests {
             final_answer_candidate: Some(output.into()),
             tool_results: vec![],
             tools_called: vec![],
+            items_processed: 0,
+            connector_writes: vec![],
         }
     }
 

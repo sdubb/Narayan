@@ -1,9 +1,10 @@
 //! Finance & Accounting segment plugin.
 //! Covers: invoice processing, reconciliation, expense categorisation, month-end close.
+//! Connectors: QuickBooks, Stripe
 
 use crate::{
     compliance::sla::{EscalationAction, EscalationRule, SlaPolicy, SlaPriority},
-    connectors::quickbooks::QuickBooksConnector,
+    connectors::{quickbooks::QuickBooksConnector, stripe::StripeConnector},
     policy::rules::{PolicyAction, PolicyCondition, PolicyRule, PolicyRuleSet},
     segments::registry::{SegmentPlugin, SegmentServices, SharedDeps},
 };
@@ -49,7 +50,7 @@ pub fn plugin(deps: &SharedDeps, tenant_id: &str) -> SegmentPlugin {
     SegmentPlugin {
         id: "finance_accounting",
         name: "Finance & Accounting",
-        connectors: vec![Arc::new(QuickBooksConnector::new())],
+        connectors: vec![Arc::new(QuickBooksConnector::new()), Arc::new(StripeConnector::new())],
         services: SegmentServices {
             policy: Some(deps.policy_engine.clone()),
             citations: Some(deps.citation_tracker.clone()),

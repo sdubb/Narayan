@@ -129,6 +129,26 @@ impl OAuthConfig {
                 vec!["signature", "extended", "impersonation"],
                 "docusign",
             ),
+            "stripe" => (
+                "https://connect.stripe.com/oauth/authorize".into(),
+                "https://connect.stripe.com/oauth/token".into(),
+                vec!["read_write"],
+                "stripe",
+            ),
+            "intercom" => (
+                "https://app.intercom.com/oauth".into(),
+                "https://api.intercom.io/auth/eagle/token".into(),
+                vec![], // Intercom doesn't use scope params in the URL
+                "intercom",
+            ),
+            "zendesk" => (
+                // Zendesk uses subdomain-specific OAuth — placeholder for the generic flow
+                // In practice, users install Zendesk with API key + subdomain
+                "https://YOUR_SUBDOMAIN.zendesk.com/oauth/authorizations/new".into(),
+                "https://YOUR_SUBDOMAIN.zendesk.com/oauth/tokens".into(),
+                vec!["read", "write"],
+                "zendesk",
+            ),
             _ => return None,
         };
 

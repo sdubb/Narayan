@@ -13,7 +13,7 @@ export default {
           DEFAULT: '#f5f2ee',
           card:    '#ffffff',
           hover:   '#faf8f5',
-          active:  '#f0ece6',
+          active:  '#f0ece6',  // pressed state, progress track backgrounds
           raised:  '#fffdfb',
         },
         border: {
@@ -26,6 +26,7 @@ export default {
           2: '#4a4540',
           3: '#8a8278',
           4: '#b0a89e',
+          5: '#d0c8be',  // ultra-muted — table headers, secondary labels
         },
         accent: {
           DEFAULT: '#c96a2e',

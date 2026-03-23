@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use uuid::Uuid;
 
 use crate::{
     agent::{
@@ -54,6 +55,11 @@ pub struct StepResult {
     pub final_answer_candidate: Option<String>,
     pub tool_results: Vec<ToolResult>,
     pub tools_called: Vec<String>,
+    /// Sum of item counts from successful tool outputs (records processed, rows returned, etc.)
+    /// Written to state.metadata["step_outputs"] by loop.rs.
+    pub items_processed: u64,
+    /// Connectors that wrote data successfully this step (for RecordUpdated criterion check).
+    pub connector_writes: Vec<String>,
 }
 
 fn sanitize_final_answer_candidate(output: &str) -> Option<String> {
@@ -658,6 +664,87 @@ fn is_answer_only_step(step: &PlannedStep) -> bool {
     answer_markers.iter().any(|marker| description.contains(marker))
 }
 
+/// Extract prompt tuple from step context — used by both the initial call
+/// and subsequent calls in the connector expansion loop.
+fn build_executor_prompts(
+    state: &AgentState,
+    step: &PlannedStep,
+    plan: &Plan,
+    history_text: &str,
+    conv_history: &str,
+    direct_response_mode: bool,
+    answer_only_step: bool,
+) -> (String, String, TaskComplexity) {
+    if direct_response_mode {
+        (
+            ExecutorPrompt::direct_response_system().to_string(),
+            ExecutorPrompt::direct_response_user(state, history_text, conv_history),
+            TaskComplexity::Simple,
+        )
+    } else if answer_only_step {
+        (
+            ExecutorPrompt::synthesis_system().to_string(),
+            ExecutorPrompt::synthesis_user(state, step, history_text, &[]),
+            TaskComplexity::Simple,
+        )
+    } else {
+        (
+            ExecutorPrompt::system(state, plan),
+            ExecutorPrompt::user_step(state, step, history_text, &[], conv_history),
+            TaskComplexity::infer(&step.description),
+        )
+    }
+}
+
+/// Returns the built-in connector catalogue as an iterator of (category_suffix, name, summary).
+/// Delegates to connector_tool::ALL_CONNECTORS so there is a single source of truth.
+fn builtin_connector_catalogue() -> impl Iterator<Item = (&'static str, &'static str, &'static str)> {
+    crate::tools::connector_tool::catalogue_entries()
+}
+
+/// Build a ToolSpec for a TenantConnector so it can be injected into the executor's
+/// live toolset during the connector expansion loop.
+fn build_tenant_connector_spec(tc: &crate::agent::definition::TenantConnector) -> crate::providers::ToolSpec {
+    let ops: Vec<String> = tc.endpoints.iter()
+        .map(|e| format!("{} {} — {}", e.method, e.path, e.description))
+        .collect();
+
+    let ops_hint = if ops.is_empty() {
+        format!("Custom connector at {}", tc.base_url)
+    } else {
+        ops.join("; ")
+    };
+
+    let description = format!(
+        "{}. Operations: {}",
+        tc.summary,
+        &ops_hint[..ops_hint.len().min(500)],
+    );
+
+    crate::providers::ToolSpec {
+        name: tc.name.clone(),
+        description,
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "operation": {
+                    "type": "string",
+                    "description": "The operation/endpoint to call."
+                },
+                "params": {
+                    "type": "object",
+                    "description": "Operation parameters as a JSON object."
+                },
+                "auth_token": {
+                    "type": "string",
+                    "description": "Optional override bearer token."
+                }
+            },
+            "required": ["operation"]
+        }),
+    }
+}
+
 #[async_trait]
 pub trait Executor: Send + Sync {
     async fn execute_step(
@@ -725,6 +812,299 @@ impl LlmExecutor {
         }
     }
 
+    /// Handle a connector meta-tool call inline, before it reaches the registry.
+    ///
+    /// Mutates `tool_specs` to add newly resolved connector tools so the next
+    /// LLM call in the expansion loop has them available.
+    /// Returns a JSON value describing the result, which is injected back as
+    /// a synthetic tool result message.
+    async fn handle_connector_meta_tool(
+        &self,
+        tool_name: &str,
+        args: &serde_json::Value,
+        state: &AgentState,
+        tool_specs: &mut Vec<crate::providers::ToolSpec>,
+    ) -> serde_json::Value {
+        match tool_name {
+            "list_connectors_in_category" => {
+                let category = args["category"].as_str().unwrap_or("all");
+                let mut connectors: Vec<serde_json::Value> = Vec::new();
+
+                // Built-in connectors from connector_tool::ALL_CONNECTORS (single source of truth)
+                for (cat_suffix, name, summary) in builtin_connector_catalogue() {
+                    if category == "all" || cat_suffix == category {
+                        connectors.push(serde_json::json!({
+                            "name":     name,
+                            "category": format!("connector/{}", cat_suffix),
+                            "summary":  summary,
+                        }));
+                    }
+                }
+
+                // Tenant custom connectors
+                if let Some(store) = &self.store {
+                    let tenant_conns = if category == "all" {
+                        store.list_tenant_connectors(&state.tenant_id).await.unwrap_or_default()
+                    } else {
+                        let cat = format!("connector/{}", category);
+                        store.list_tenant_connectors_by_category(&state.tenant_id, &cat)
+                            .await
+                            .unwrap_or_default()
+                    };
+                    for tc in &tenant_conns {
+                        connectors.push(serde_json::json!({
+                            "name":     tc.name,
+                            "category": tc.category,
+                            "summary":  tc.summary,
+                        }));
+                        // Pre-inject full ToolSpec for tenant connectors
+                        let already = tool_specs.iter().any(|s| s.name == tc.name);
+                        if !already {
+                            tool_specs.push(build_tenant_connector_spec(tc));
+                        }
+                    }
+                }
+
+                // Pre-inject full ToolSpecs for all listed built-in connectors so the
+                // LLM can call them immediately without another round-trip.
+                let current_names: std::collections::HashSet<String> =
+                    tool_specs.iter().map(|s| s.name.clone()).collect();
+                for connector_json in &connectors {
+                    if let Some(name) = connector_json["name"].as_str() {
+                        if !current_names.contains(name) {
+                            if let Some(spec) = self.tools.get(name) {
+                                use crate::tools::Tool;
+                                tool_specs.push(crate::providers::ToolSpec {
+                                    name:        spec.name().to_string(),
+                                    description: spec.description().to_string(),
+                                    parameters: serde_json::json!({
+                                        "type": "object",
+                                        "properties": spec.parameters_schema().iter().fold(
+                                            serde_json::Map::new(),
+                                            |mut acc, p| {
+                                                acc.insert(p.name.clone(), serde_json::json!({
+                                                    "type":        p.param_type,
+                                                    "description": p.description,
+                                                }));
+                                                acc
+                                            }
+                                        ),
+                                        "required": spec.parameters_schema().iter()
+                                            .filter(|p| p.required)
+                                            .map(|p| p.name.clone())
+                                            .collect::<Vec<_>>(),
+                                    }),
+                                });
+                            }
+                        }
+                    }
+                }
+
+                serde_json::json!({
+                    "category":    category,
+                    "connectors":  connectors,
+                    "instruction": "Pick the connector you need by name. \
+                                    Call it directly as a tool — its full spec is now injected.",
+                })
+            }
+
+            "request_more_connectors" => {
+                let category = args["category"].as_str().unwrap_or("");
+                let reason   = args["reason"].as_str().unwrap_or("");
+
+                // Check if there are any tenant connectors in this category not yet in tool_specs
+                let current_names: std::collections::HashSet<String> =
+                    tool_specs.iter().map(|s| s.name.clone()).collect();
+                let full_cat = format!("connector/{}", category);
+                let more_available = if let Some(store) = &self.store {
+                    store.list_tenant_connectors_by_category(&state.tenant_id, &full_cat)
+                        .await
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|tc| !current_names.contains(&tc.name))
+                        .count() > 0
+                } else {
+                    false
+                };
+
+                if more_available {
+                    serde_json::json!({
+                        "status": "more_available",
+                        "message": format!("Additional {} connectors found. Use list_connectors_in_category to see them.", category),
+                    })
+                } else {
+                    serde_json::json!({
+                        "status": "exhausted",
+                        "category": category,
+                        "reason": reason,
+                        "options": [
+                            {
+                                "action": "create_custom_connector",
+                                "description": "Add a custom connector by providing the API URL, \
+                                                auth details, and endpoint descriptions or docs."
+                            },
+                            {
+                                "action": "ask_user",
+                                "description": "Ask the user which service they use and how to connect to it."
+                            }
+                        ],
+                    })
+                }
+            }
+
+            "create_custom_connector" => {
+                let name = args["name"].as_str().unwrap_or("").to_string();
+                let category_raw = args["category"].as_str().unwrap_or("custom").to_string();
+                let category = if category_raw.starts_with("connector/") {
+                    category_raw.clone()
+                } else {
+                    format!("connector/{}", category_raw)
+                };
+                let base_url      = args["base_url"].as_str().unwrap_or("").to_string();
+                let auth_type_str = args["auth_type"].as_str().unwrap_or("bearer");
+                let cred_key      = args["auth_credential_key"].as_str().map(String::from);
+                let summary       = args["summary"].as_str().unwrap_or(&name).to_string();
+                let source_docs   = args["api_docs"].as_str().map(String::from);
+                let creation_path = args["creation_path"].as_str().unwrap_or("manual");
+
+                if name.is_empty() || base_url.is_empty() {
+                    return serde_json::json!({
+                        "error": "name and base_url are required to create a custom connector"
+                    });
+                }
+
+                let auth_type = match auth_type_str {
+                    "api_key_header" => {
+                        let hname = args["auth_header_name"].as_str().unwrap_or("X-API-Key");
+                        crate::agent::definition::ConnectorAuthType::ApiKeyHeader {
+                            header_name: hname.to_string(),
+                        }
+                    }
+                    "basic" => crate::agent::definition::ConnectorAuthType::Basic,
+                    "none"  => crate::agent::definition::ConnectorAuthType::None,
+                    _       => crate::agent::definition::ConnectorAuthType::Bearer,
+                };
+
+                let source = match creation_path {
+                    "known_saas" => {
+                        let product = args["product_name"].as_str().unwrap_or(&name).to_string();
+                        crate::agent::definition::ConnectorSource::KnownSaas { product_name: product }
+                    }
+                    "api_docs" => crate::agent::definition::ConnectorSource::ApiDocs,
+                    _          => crate::agent::definition::ConnectorSource::Manual,
+                };
+
+                // Parse endpoints from args if provided
+                let endpoints: Vec<crate::agent::definition::EndpointDef> = args["endpoints"]
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter().filter_map(|e| {
+                            Some(crate::agent::definition::EndpointDef {
+                                method:      e["method"].as_str().unwrap_or("GET").to_string(),
+                                path:        e["path"].as_str().unwrap_or("").to_string(),
+                                description: e["description"].as_str().unwrap_or("").to_string(),
+                                params:      Vec::new(),
+                            })
+                        }).collect()
+                    })
+                    .unwrap_or_default();
+
+                let tc = crate::agent::definition::TenantConnector {
+                    id:                  uuid::Uuid::new_v4().to_string(),
+                    tenant_id:           state.tenant_id.clone(),
+                    name:                name.clone(),
+                    category:            category.clone(),
+                    base_url:            base_url.clone(),
+                    auth_type,
+                    auth_credential_key: cred_key,
+                    source,
+                    source_docs,
+                    endpoints,
+                    summary:             summary.clone(),
+                    created_at:          chrono::Utc::now(),
+                    updated_at:          chrono::Utc::now(),
+                };
+
+                // Save to DB
+                if let Some(store) = &self.store {
+                    if let Err(e) = store.upsert_tenant_connector(&tc).await {
+                        tracing::error!(error = %e, connector = %name, "failed to save custom connector");
+                        return serde_json::json!({ "error": format!("failed to save connector: {}", e) });
+                    }
+                }
+
+                // Build a live ToolSpec for this connector and inject into tool_specs
+                let spec = build_tenant_connector_spec(&tc);
+                let already_there = tool_specs.iter().any(|s| s.name == spec.name);
+                if !already_there {
+                    tool_specs.push(spec);
+                }
+
+                tracing::info!(
+                    tenant_id = %state.tenant_id,
+                    connector = %name,
+                    category  = %category,
+                    "custom connector created and injected"
+                );
+
+                serde_json::json!({
+                    "status":   "created",
+                    "name":     name,
+                    "category": category,
+                    "message":  format!("Connector '{}' is now available. Call it as a tool.", name),
+                })
+            }
+
+            "request_more_tools" => {
+                // Expand core tool categories — distinct from connector expansion.
+                let categories: Vec<String> = args["categories"]
+                    .as_array()
+                    .unwrap_or(&vec![])
+                    .iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect();
+
+                if categories.is_empty() {
+                    return serde_json::json!({
+                        "error": "'categories' must be a non-empty array"
+                    });
+                }
+
+                let mut added: Vec<String> = Vec::new();
+                let current_names: std::collections::HashSet<String> =
+                    tool_specs.iter().map(|s| s.name.clone()).collect();
+
+                for cat in &categories {
+                    let new_specs = self.tools.tool_specs_for_category(cat);
+                    for spec in new_specs {
+                        if !current_names.contains(&spec.name) {
+                            added.push(spec.name.clone());
+                            tool_specs.push(spec);
+                        }
+                    }
+                }
+
+                tracing::info!(
+                    tenant_id  = %state.tenant_id,
+                    categories = ?categories,
+                    added      = ?added,
+                    "request_more_tools: expanded toolset"
+                );
+
+                serde_json::json!({
+                    "status":              "expanded",
+                    "requested_categories": categories,
+                    "tools_added":         added,
+                    "message":             "Your toolset has been expanded. Use the new tools in your next action.",
+                })
+            }
+
+            other => {
+                serde_json::json!({ "error": format!("unknown meta-tool: {}", other) })
+            }
+        }
+    }
+
     /// Load tenant policy rules — from DB if TenantStore is available, else empty.
     async fn tenant_rules(&self, tenant_id: &str) -> PolicyRuleSet {
         if let Some(ref ts) = self.tenant_store {
@@ -785,7 +1165,7 @@ impl Executor for LlmExecutor {
         let job_type = JobType::detect(&state.goal);
         let direct_response_mode = is_direct_response_goal(&state.goal) && plan.steps.len() == 1 && step.tool.is_none();
         let answer_only_step = !direct_response_mode && is_answer_only_step(step);
-        let tool_specs = if direct_response_mode || answer_only_step {
+        let mut tool_specs = if direct_response_mode || answer_only_step {
             Vec::new()
         } else {
             select_tools_for_step(&self.tools, step, &job_type, &[])
@@ -798,6 +1178,89 @@ impl Executor for LlmExecutor {
             planner_hint = ?step.tool,
             "executor: selected tools for step"
         );
+
+        // ── Connector meta-tool intercept loop ─────────────────────────────
+        // If the LLM calls list_connectors_in_category, request_more_connectors,
+        // or create_custom_connector, we handle it inline and re-call the LLM
+        // with the expanded/resolved toolset. Max 3 rounds to prevent loops.
+        const META_TOOL_NAMES: &[&str] = &[
+            "list_connectors_in_category",
+            "request_more_connectors",
+            "create_custom_connector",
+            "request_more_tools",
+        ];
+        let mut connector_expansion_rounds = 0u8;
+        let history_text = history.summarise();
+        let conv_history = self.conversation_history(state).await;
+        let (system, user, complexity) = build_executor_prompts(
+            state, step, plan, &history_text, &conv_history, direct_response_mode, answer_only_step,
+        );
+
+        tracing::info!(
+            agent_id          = %state.id,
+            step_index        = step.index,
+            complexity        = ?complexity,
+            direct_response   = direct_response_mode,
+            answer_only       = answer_only_step,
+            system_prompt     = %truncate_for_log(&system, 1200),
+            user_prompt       = %truncate_for_log(&user, 1200),
+            "executor prompts prepared"
+        );
+
+        let mut request = GatewayRequest::new(
+            state.id.clone(),
+            state.tenant_id.clone(),
+            complexity.clone(),
+            vec![Message::system(system.clone()), Message::user(user.clone())],
+        )
+        .with_tools(tool_specs.clone())
+        .no_cache();
+
+        let mut resp = loop {
+            let r = self.gateway.chat(request.clone()).await?;
+
+            // Check if the LLM called a connector meta-tool
+            let meta_call = r.tool_calls.iter().find(|tc| META_TOOL_NAMES.contains(&tc.name.as_str()));
+            if meta_call.is_none() || connector_expansion_rounds >= 3 {
+                break r;
+            }
+            connector_expansion_rounds += 1;
+            let call = meta_call.unwrap();
+
+            tracing::info!(
+                agent_id  = %state.id,
+                step      = step.index,
+                meta_tool = %call.name,
+                round     = connector_expansion_rounds,
+                "executor: intercepting connector meta-tool call"
+            );
+
+            let meta_result = self.handle_connector_meta_tool(
+                call.name.as_str(),
+                &call.arguments,
+                state,
+                &mut tool_specs,
+            ).await;
+
+            // Inject the meta-tool result as a tool_result message and rebuild request
+            let result_content = serde_json::to_string(&meta_result).unwrap_or_default();
+            let mut messages = request.messages.clone();
+            // Append assistant turn with tool call + tool result
+            messages.push(Message::user(format!(
+                "[tool:{name}] → {result}",
+                name   = call.name,
+                result = &result_content[..result_content.len().min(2000)],
+            )));
+
+            request = GatewayRequest::new(
+                state.id.clone(),
+                state.tenant_id.clone(),
+                complexity.clone(),
+                messages,
+            )
+            .with_tools(tool_specs.clone())
+            .no_cache();
+        };
         tracing::info!(
             agent_id = %state.id,
             step_index = step.index,
@@ -807,48 +1270,6 @@ impl Executor for LlmExecutor {
             "executor request prepared"
         );
 
-        let history_text = history.summarise();
-        let conv_history = self.conversation_history(state).await;
-        let (system, user, complexity) = if direct_response_mode {
-            (
-                ExecutorPrompt::direct_response_system().to_string(),
-                ExecutorPrompt::direct_response_user(state, &history_text, &conv_history),
-                TaskComplexity::Simple,
-            )
-        } else if answer_only_step {
-            (
-                ExecutorPrompt::synthesis_system().to_string(),
-                ExecutorPrompt::synthesis_user(state, step, &history_text, &[]),
-                TaskComplexity::Simple,
-            )
-        } else {
-            (
-                ExecutorPrompt::system(state, plan),
-                ExecutorPrompt::user_step(state, step, &history_text, &[], &conv_history),
-                TaskComplexity::infer(&step.description),
-            )
-        };
-        tracing::info!(
-            agent_id = %state.id,
-            step_index = step.index,
-            complexity = ?complexity,
-            direct_response_mode,
-            answer_only_step,
-            system_prompt = %truncate_for_log(&system, 1200),
-            user_prompt = %truncate_for_log(&user, 1200),
-            "executor prompts prepared"
-        );
-
-        let request = GatewayRequest::new(
-            state.id.clone(),
-            state.tenant_id.clone(),
-            complexity,
-            vec![Message::system(system), Message::user(user)],
-        )
-        .with_tools(tool_specs)
-        .no_cache();
-
-        let resp = self.gateway.chat(request).await?;
         tracing::info!(
             agent_id = %state.id,
             step_index = step.index,
@@ -899,6 +1320,25 @@ impl Executor for LlmExecutor {
                 }
             }
             normalize_tool_args_for_workspace(&tool_call.name, &mut tool_call.arguments, &state.workspace_path);
+
+            // ── Inject tenant_id into tools that need credential lookup ───────────
+            // external_db, external_api, and named connector tools all look up
+            // stored tokens by tenant_id — inject it so they don't need it from the LLM.
+            {
+                let needs_tenant = matches!(
+                    tool_call.name.as_str(),
+                    "external_db" | "external_api"
+                ) || crate::tools::connector_tool::ALL_CONNECTORS
+                    .iter()
+                    .any(|c| c.name == tool_call.name.as_str());
+
+                if needs_tenant {
+                    if let Some(obj) = tool_call.arguments.as_object_mut() {
+                        obj.entry("tenant_id")
+                            .or_insert_with(|| serde_json::json!(state.tenant_id));
+                    }
+                }
+            }
 
             tools_called.push(tool_call.name.clone());
             tracing::info!(
@@ -1095,7 +1535,7 @@ impl Executor for LlmExecutor {
         let is_final_step = plan.is_complete(step.index + 1);
         let mut final_answer_candidate = sanitize_final_answer_candidate(&output);
 
-        if !direct_response_mode && is_final_step && (!tool_results.is_empty() || final_answer_candidate.is_none()) {
+        if !direct_response_mode && is_final_step && !output.contains("STEP FAILED") && (!tool_results.is_empty() || final_answer_candidate.is_none()) {
             if let Some(synthesized) = self.synthesize_final_answer(state, step, history, &tool_results).await? {
                 output = synthesized.clone();
                 final_answer_candidate = Some(synthesized);
@@ -1104,7 +1544,35 @@ impl Executor for LlmExecutor {
 
         let success = (tool_results.is_empty() || all_ok) && !output.contains("STEP FAILED");
 
-        Ok(StepResult { step_index: step.index, success, output, final_answer_candidate, tool_results, tools_called })
+        // ── Extract items_processed from tool outputs ─────────────────────
+        // Returned in StepResult so loop.rs can write it to state.metadata
+        // where CompletionCriteria checks and the savings estimator can read it.
+        let items_processed: u64 = tool_results.iter()
+            .filter(|r| r.success)
+            .filter_map(|r| {
+                r.output.get("count").or_else(|| r.output.get("processed"))
+                    .or_else(|| r.output.get("total"))
+                    .or_else(|| r.output.get("rows"))
+                    .and_then(|v| v.as_u64())
+            })
+            .sum();
+
+        // Capture which connectors wrote successfully (for RecordUpdated criterion)
+        let connector_writes: Vec<String> = tool_results.iter()
+            .filter(|r| r.success)
+            .filter_map(|r| r.output.get("connector")?.as_str().map(String::from))
+            .collect();
+
+        Ok(StepResult {
+            step_index: step.index,
+            success,
+            output,
+            final_answer_candidate,
+            tool_results,
+            tools_called,
+            items_processed,
+            connector_writes,
+        })
     }
 }
 
@@ -1184,7 +1652,17 @@ mod tests {
     #[async_trait]
     impl LlmGateway for MockGateway {
         async fn chat(&self, _req: GatewayRequest) -> Result<ChatResponse> {
-            Ok(self.responses.lock().unwrap().remove(0))
+            let mut queue = self.responses.lock().unwrap();
+            if queue.is_empty() {
+                Ok(ChatResponse {
+                    content: Some("{}".into()),
+                    tool_calls: vec![],
+                    input_tokens: 0,
+                    output_tokens: 0,
+                })
+            } else {
+                Ok(queue.remove(0))
+            }
         }
     }
 
