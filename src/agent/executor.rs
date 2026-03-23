@@ -670,8 +670,10 @@ fn build_executor_prompts(
     state: &AgentState,
     step: &PlannedStep,
     plan: &Plan,
+    job_type: &JobType,
     history_text: &str,
     conv_history: &str,
+    role_policy_context: Option<&str>,
     direct_response_mode: bool,
     answer_only_step: bool,
 ) -> (String, String, TaskComplexity) {
@@ -689,7 +691,7 @@ fn build_executor_prompts(
         )
     } else {
         (
-            ExecutorPrompt::system(state, plan),
+            ExecutorPrompt::system(state, plan, job_type, role_policy_context),
             ExecutorPrompt::user_step(state, step, history_text, &[], conv_history),
             TaskComplexity::infer(&step.description),
         )
@@ -765,6 +767,13 @@ pub struct LlmExecutor {
     store: Option<Arc<PostgresStore>>,
 }
 
+struct RoleExecutionPolicy {
+    job_type: JobType,
+    tool_preferences: Vec<String>,
+    preferred_tool_categories: Vec<String>,
+    prompt_context: String,
+}
+
 impl LlmExecutor {
     pub fn new(gateway: Arc<dyn LlmGateway>, tools: Arc<ToolRegistry>, services: Arc<AgentServices>) -> Self {
         Self { gateway, tools, services, tenant_store: None, event_bus: None, store: None }
@@ -810,6 +819,76 @@ impl LlmExecutor {
                 String::new()
             }
         }
+    }
+
+    async fn load_role_execution_policy(&self, state: &AgentState) -> Option<RoleExecutionPolicy> {
+        let store = self.store.as_ref()?;
+        let role_id = state.metadata.get("role_id").and_then(|value| value.as_str())?;
+        let role = store.get_agent_role(&state.tenant_id, role_id).await.ok()??;
+        let workflow_hints = role.execution_guidelines.workflow_hints();
+        let preferred_tool_categories = role.execution_guidelines.preferred_tool_categories();
+        let preferred_connector_categories = role.execution_guidelines.preferred_connector_categories();
+
+        let mut parts = vec![
+            format!("Role category: {}", role.role_category.as_str()),
+            format!("Memory scope: {:?}", role.memory_scope).to_lowercase(),
+            format!(
+                "Execution limits: max_steps={}, max_retries={}, timeout_secs={}, max_cost_usd={}",
+                role.execution_limits.max_steps,
+                role.execution_limits.max_retries,
+                role.execution_limits.timeout_secs,
+                role.execution_limits
+                    .max_cost_usd
+                    .map(|value| format!("{value:.2}"))
+                    .unwrap_or_else(|| "none".into())
+            ),
+        ];
+
+        if !role.execution_guidelines.is_empty() {
+            parts.push(format!("Execution guidelines:\n{}", role.execution_guidelines.to_prompt()));
+        }
+        if !workflow_hints.is_empty() {
+            parts.push(format!(
+                "Preferred execution sequence:\n- {}",
+                workflow_hints.join("\n- ")
+            ));
+        }
+        if !preferred_tool_categories.is_empty() {
+            parts.push(format!(
+                "Preferred tool categories: {}",
+                preferred_tool_categories.join(", ")
+            ));
+        }
+        if !preferred_connector_categories.is_empty() {
+            parts.push(format!(
+                "Preferred connector categories: {}",
+                preferred_connector_categories.join(", ")
+            ));
+        }
+        if !role.connectors.is_empty() {
+            parts.push(format!("Allowed connectors: {}", role.connectors.join(", ")));
+        }
+        if !role.tools.is_empty() {
+            parts.push(format!("Preferred tools for this role: {}", role.tools.join(", ")));
+        }
+        if !role.output_spec.description.is_empty() {
+            parts.push(format!("Expected output: {}", role.output_spec.description));
+        }
+        if let Ok(Some(agent)) = store.get_agent_definition(&state.tenant_id, &role.agent_id).await {
+            if !agent.persona.is_empty() {
+                parts.push(format!("Persona: {}", agent.persona));
+            }
+            if !agent.constraints.is_empty() {
+                parts.push(format!("Hard constraints:\n- {}", agent.constraints.join("\n- ")));
+            }
+        }
+
+        Some(RoleExecutionPolicy {
+            job_type: JobType::from_role_category(&role.role_category),
+            tool_preferences: role.tools,
+            preferred_tool_categories,
+            prompt_context: parts.join("\n\n"),
+        })
     }
 
     /// Handle a connector meta-tool call inline, before it reaches the registry.
@@ -1162,13 +1241,25 @@ impl Executor for LlmExecutor {
         plan: &Plan,
         history: &StepHistory,
     ) -> Result<StepResult> {
-        let job_type = JobType::detect(&state.goal);
+        let role_policy = self.load_role_execution_policy(state).await;
+        let job_type = role_policy
+            .as_ref()
+            .map(|policy| policy.job_type.clone())
+            .unwrap_or_else(|| JobType::detect(&state.goal));
         let direct_response_mode = is_direct_response_goal(&state.goal) && plan.steps.len() == 1 && step.tool.is_none();
         let answer_only_step = !direct_response_mode && is_answer_only_step(step);
         let mut tool_specs = if direct_response_mode || answer_only_step {
             Vec::new()
         } else {
-            select_tools_for_step(&self.tools, step, &job_type, &[])
+            let role_tools = role_policy
+                .as_ref()
+                .map(|policy| policy.tool_preferences.clone())
+                .unwrap_or_default();
+            let role_tool_categories = role_policy
+                .as_ref()
+                .map(|policy| policy.preferred_tool_categories.clone())
+                .unwrap_or_default();
+            select_tools_for_step(&self.tools, step, &job_type, &role_tools, &role_tool_categories)
         };
 
         tracing::debug!(
@@ -1193,7 +1284,15 @@ impl Executor for LlmExecutor {
         let history_text = history.summarise();
         let conv_history = self.conversation_history(state).await;
         let (system, user, complexity) = build_executor_prompts(
-            state, step, plan, &history_text, &conv_history, direct_response_mode, answer_only_step,
+            state,
+            step,
+            plan,
+            &job_type,
+            &history_text,
+            &conv_history,
+            role_policy.as_ref().map(|policy| policy.prompt_context.as_str()),
+            direct_response_mode,
+            answer_only_step,
         );
 
         tracing::info!(

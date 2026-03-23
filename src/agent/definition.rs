@@ -128,6 +128,12 @@ pub struct AgentRole {
     /// e.g. "Enrich inbound Salesforce leads and draft personalised outreach"
     pub purpose: String,
 
+    /// Primary role category.
+    /// Used by plan mode to persist durable policy and by runtime as a
+    /// first-class alternative to heuristic job detection.
+    #[serde(default)]
+    pub role_category: RoleCategory,
+
     /// Structured guidelines for the planner — happy path AND failure handling.
     /// The planner injects these verbatim into its system prompt.
     ///
@@ -177,6 +183,60 @@ pub enum RoleStatus {
     Archived,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RoleCategory {
+    SoftwareEngineer,
+    ResearchAnalyst,
+    CustomerSupport,
+    DevOps,
+    Marketing,
+    DataExtraction,
+    SalesRevOps,
+    FinanceAccounting,
+    HRPeopleOps,
+    LegalContract,
+    ITOpsITSM,
+    #[default]
+    General,
+}
+
+impl RoleCategory {
+    pub fn from_slug(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "software_engineer" => Self::SoftwareEngineer,
+            "research_analyst" => Self::ResearchAnalyst,
+            "customer_support" => Self::CustomerSupport,
+            "devops" => Self::DevOps,
+            "marketing" => Self::Marketing,
+            "data_extraction" => Self::DataExtraction,
+            "sales_revops" => Self::SalesRevOps,
+            "finance_accounting" => Self::FinanceAccounting,
+            "hr_people_ops" => Self::HRPeopleOps,
+            "legal_contract" => Self::LegalContract,
+            "it_ops_itsm" => Self::ITOpsITSM,
+            _ => Self::General,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::SoftwareEngineer => "software_engineer",
+            Self::ResearchAnalyst => "research_analyst",
+            Self::CustomerSupport => "customer_support",
+            Self::DevOps => "devops",
+            Self::Marketing => "marketing",
+            Self::DataExtraction => "data_extraction",
+            Self::SalesRevOps => "sales_revops",
+            Self::FinanceAccounting => "finance_accounting",
+            Self::HRPeopleOps => "hr_people_ops",
+            Self::LegalContract => "legal_contract",
+            Self::ITOpsITSM => "it_ops_itsm",
+            Self::General => "general",
+        }
+    }
+}
+
 impl AgentRole {
     pub fn new(id: String, agent_id: String, tenant_id: String, name: String) -> Self {
         let now = Utc::now();
@@ -189,6 +249,7 @@ impl AgentRole {
             name,
             trigger: TriggerDef::default(),
             purpose: String::new(),
+            role_category: RoleCategory::default(),
             execution_guidelines: ExecutionGuidelines::default(),
             connectors: Vec::new(),
             tools: Vec::new(),
@@ -421,6 +482,36 @@ impl ExecutionGuidelines {
         for f in other.failure_handling  { self.add_failure(f); }
         for p in other.priorities        { self.add_priority(p); }
         for c in other.completion_criteria { self.add_completion(c); }
+    }
+
+    pub fn preferred_tool_categories(&self) -> Vec<String> {
+        self.extract_csv_rule_values("Prefer these tool categories when relevant:")
+    }
+
+    pub fn preferred_connector_categories(&self) -> Vec<String> {
+        self.extract_csv_rule_values("Prefer connectors from these categories when relevant:")
+    }
+
+    pub fn workflow_hints(&self) -> Vec<String> {
+        self.priorities.clone()
+    }
+
+    fn extract_csv_rule_values(&self, prefix: &str) -> Vec<String> {
+        self.rules
+            .iter()
+            .find_map(|rule| {
+                rule.text.strip_prefix(prefix).map(|value| {
+                    value
+                        .trim()
+                        .trim_end_matches('.')
+                        .split(',')
+                        .map(|part| part.trim())
+                        .filter(|part| !part.is_empty())
+                        .map(String::from)
+                        .collect::<Vec<_>>()
+                })
+            })
+            .unwrap_or_default()
     }
 
     /// Parse a domain skill EXECUTION BRIEF text section into typed guidelines.
@@ -694,7 +785,7 @@ pub enum MemoryScope {
 
 /// Safety limits applied to every GoalInstance of this role.
 /// Prevents runaway agents and controls cost.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExecutionLimits {
     /// Maximum number of planner steps. Default 15.
     pub max_steps: u32,
@@ -714,6 +805,92 @@ impl Default for ExecutionLimits {
             max_retries: 2,
             timeout_secs: 600,
             max_cost_usd: None,
+        }
+    }
+}
+
+impl RoleCategory {
+    pub fn default_persona(&self) -> &'static str {
+        match self {
+            Self::SoftwareEngineer =>
+                "You are a senior software engineer who works carefully, verifies changes, and explains tradeoffs clearly.",
+            Self::ResearchAnalyst =>
+                "You are a rigorous research analyst who gathers evidence before making claims and clearly separates facts from inference.",
+            Self::CustomerSupport =>
+                "You are an empathetic customer support specialist who resolves issues precisely, calmly, and without overpromising.",
+            Self::DevOps | Self::ITOpsITSM =>
+                "You are a cautious operations engineer who observes first, changes systems deliberately, and verifies health after every action.",
+            Self::Marketing =>
+                "You are a thoughtful marketing strategist who produces polished work grounded in audience, positioning, and evidence.",
+            Self::DataExtraction =>
+                "You are a meticulous data operations specialist who values completeness, schema consistency, and traceable outputs.",
+            Self::SalesRevOps =>
+                "You are a sharp revenue operations partner who prioritises accuracy, useful enrichment, and clear handoff-ready outputs.",
+            Self::FinanceAccounting =>
+                "You are a detail-oriented finance operator who shows your work, flags discrepancies, and avoids silent assumptions.",
+            Self::HRPeopleOps =>
+                "You are a careful people operations partner who protects privacy, applies policy consistently, and escalates sensitive decisions.",
+            Self::LegalContract =>
+                "You are a precise legal operations analyst who grounds every finding in the source text and highlights risk clearly.",
+            Self::General =>
+                "You are a reliable AI teammate who works step by step, follows instructions closely, and communicates clearly.",
+        }
+    }
+
+    pub fn default_memory_scope(&self) -> MemoryScope {
+        match self {
+            Self::ResearchAnalyst
+            | Self::FinanceAccounting
+            | Self::HRPeopleOps
+            | Self::LegalContract => MemoryScope::Role,
+            _ => MemoryScope::Agent,
+        }
+    }
+
+    pub fn default_execution_limits(&self) -> ExecutionLimits {
+        match self {
+            Self::SoftwareEngineer => ExecutionLimits {
+                max_steps: 18,
+                max_retries: 2,
+                timeout_secs: 1_200,
+                max_cost_usd: Some(3.0),
+            },
+            Self::ResearchAnalyst | Self::DataExtraction => ExecutionLimits {
+                max_steps: 18,
+                max_retries: 2,
+                timeout_secs: 1_200,
+                max_cost_usd: Some(2.5),
+            },
+            Self::DevOps | Self::ITOpsITSM => ExecutionLimits {
+                max_steps: 16,
+                max_retries: 2,
+                timeout_secs: 900,
+                max_cost_usd: Some(2.0),
+            },
+            Self::FinanceAccounting | Self::LegalContract => ExecutionLimits {
+                max_steps: 14,
+                max_retries: 2,
+                timeout_secs: 900,
+                max_cost_usd: Some(2.0),
+            },
+            Self::SalesRevOps | Self::HRPeopleOps | Self::Marketing => ExecutionLimits {
+                max_steps: 12,
+                max_retries: 2,
+                timeout_secs: 900,
+                max_cost_usd: Some(1.5),
+            },
+            Self::CustomerSupport => ExecutionLimits {
+                max_steps: 12,
+                max_retries: 2,
+                timeout_secs: 600,
+                max_cost_usd: Some(1.0),
+            },
+            Self::General => ExecutionLimits {
+                max_steps: 12,
+                max_retries: 2,
+                timeout_secs: 600,
+                max_cost_usd: Some(1.0),
+            },
         }
     }
 }
@@ -1035,6 +1212,7 @@ mod tests {
         let r = make_role();
         assert_eq!(r.status, RoleStatus::Draft);
         assert_eq!(r.version, 1);
+        assert_eq!(r.role_category, RoleCategory::General);
     }
 
     #[test]
@@ -1068,6 +1246,16 @@ mod tests {
         assert_eq!(l.max_retries, 2);
         assert_eq!(l.timeout_secs, 600);
         assert!(l.max_cost_usd.is_none());
+    }
+
+    #[test]
+    fn test_role_category_roundtrip_and_defaults() {
+        let category = RoleCategory::from_slug("finance_accounting");
+        assert_eq!(category, RoleCategory::FinanceAccounting);
+        assert_eq!(category.as_str(), "finance_accounting");
+        assert_eq!(category.default_memory_scope(), MemoryScope::Role);
+        assert_eq!(category.default_execution_limits().max_steps, 14);
+        assert!(!category.default_persona().is_empty());
     }
 
     // ── WorkforceEventPayload ──────────────────────────────────────────────

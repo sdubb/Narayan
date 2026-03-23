@@ -12,6 +12,7 @@
 
 use crate::{
     agent::{
+        definition::RoleCategory,
         executor::StepResult,
         planner::{Plan, PlannedStep},
     },
@@ -81,6 +82,23 @@ pub fn is_direct_response_goal(goal: &str) -> bool {
 }
 
 impl JobType {
+    pub fn from_role_category(category: &RoleCategory) -> Self {
+        match category {
+            RoleCategory::SoftwareEngineer => Self::SoftwareEngineer,
+            RoleCategory::ResearchAnalyst => Self::ResearchAnalyst,
+            RoleCategory::CustomerSupport => Self::CustomerSupport,
+            RoleCategory::DevOps => Self::DevOps,
+            RoleCategory::Marketing => Self::Marketing,
+            RoleCategory::DataExtraction => Self::DataExtraction,
+            RoleCategory::SalesRevOps => Self::SalesRevOps,
+            RoleCategory::FinanceAccounting => Self::FinanceAccounting,
+            RoleCategory::HRPeopleOps => Self::HRPeopleOps,
+            RoleCategory::LegalContract => Self::LegalContract,
+            RoleCategory::ITOpsITSM => Self::ITOpsITSM,
+            RoleCategory::General => Self::General,
+        }
+    }
+
     pub fn detect(goal: &str) -> Self {
         let g = goal.to_lowercase();
         let is = |kw: &[&str]| kw.iter().any(|k| g.contains(k));
@@ -756,9 +774,12 @@ Reply directly to the user's message.
         }
     }
 
-    pub fn system(state: &AgentState, plan: &Plan) -> String {
-        let job_type = JobType::detect(&state.goal);
-
+    pub fn system(
+        state: &AgentState,
+        plan: &Plan,
+        job_type: &JobType,
+        role_policy_context: Option<&str>,
+    ) -> String {
         let execution_style = match job_type {
             JobType::SoftwareEngineer => {
                 "\
@@ -865,6 +886,11 @@ EXECUTION STYLE:
             }
         };
 
+        let role_policy_section = role_policy_context
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| format!("\nROLE POLICY:\n{}\n", value))
+            .unwrap_or_default();
+
         format!(
             r#"You are an autonomous AI agent executing a real-world task.
 
@@ -874,11 +900,16 @@ WORKSPACE: {ws}
 PLAN LENGTH: {n} steps
 You are executing one step from the plan. The current step, retry context, and any user clarifications are provided in the user message.
 
+{role_policy}
+
 {style}
 
 EXECUTION RULES:
 - Execute ONLY the current step shown in the user message — do not skip ahead
 - Call the tool specified in the plan; only deviate if you have a concrete reason
+- If you need more non-connector tools from a category, call request_more_tools with the category names
+- If you need a connector but only know the category, call list_connectors_in_category first
+- If no listed connector satisfies the need, call request_more_connectors or create_custom_connector
 - file_read is for files, not directories; if a path is a directory, inspect the listing and then switch to a concrete child file or use glob_search/content_search
 - After every tool call, state what you observed and whether it achieved the step's intent
 - If the step is complete, end your response with exactly: STEP COMPLETE
@@ -888,6 +919,7 @@ EXECUTION RULES:
             jt = job_type.label(),
             ws = state.workspace_path,
             n = plan.steps.len(),
+            role_policy = role_policy_section,
             style = execution_style,
         )
     }

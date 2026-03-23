@@ -73,6 +73,11 @@ pub struct LlmPlanner {
     store: Option<Arc<PostgresStore>>,
 }
 
+struct RolePlannerContext {
+    prompt_context: String,
+    job_type: JobType,
+}
+
 impl LlmPlanner {
     pub fn new(gateway: Arc<dyn LlmGateway>) -> Self {
         Self { gateway, store: None }
@@ -104,13 +109,18 @@ impl LlmPlanner {
     /// Load role context from AgentDefinition + AgentRole if the agent's metadata
     /// carries a role_id.  Returns a formatted string injected into the planner
     /// prompt so it knows the scoped connectors, guidelines, and output spec.
-    async fn load_role_context(&self, state: &AgentState) -> Option<String> {
+    async fn load_role_context(&self, state: &AgentState) -> Option<RolePlannerContext> {
         let store = self.store.as_ref()?;
         let role_id = state.metadata.get("role_id").and_then(|v| v.as_str())?;
 
         let role = store.get_agent_role(&state.tenant_id, role_id).await.ok()??;
+        let job_type = JobType::from_role_category(&role.role_category);
+        let workflow_hints = role.execution_guidelines.workflow_hints();
+        let preferred_tool_categories = role.execution_guidelines.preferred_tool_categories();
+        let preferred_connector_categories = role.execution_guidelines.preferred_connector_categories();
 
         let mut parts: Vec<String> = Vec::new();
+        parts.push(format!("Role category: {}", role.role_category.as_str()));
 
         if !role.connectors.is_empty() {
             parts.push(format!("Available connectors for this role: {}", role.connectors.join(", ")));
@@ -121,9 +131,38 @@ impl LlmPlanner {
         if !role.execution_guidelines.is_empty() {
             parts.push(format!("Execution guidelines:\n{}", role.execution_guidelines.to_prompt()));
         }
+        if !workflow_hints.is_empty() {
+            parts.push(format!(
+                "Preferred workflow order for this role:\n- {}",
+                workflow_hints.join("\n- ")
+            ));
+        }
+        if !preferred_tool_categories.is_empty() {
+            parts.push(format!(
+                "Preferred tool categories for this role: {}",
+                preferred_tool_categories.join(", ")
+            ));
+        }
+        if !preferred_connector_categories.is_empty() {
+            parts.push(format!(
+                "Preferred connector categories for this role: {}",
+                preferred_connector_categories.join(", ")
+            ));
+        }
         if !role.output_spec.description.is_empty() {
             parts.push(format!("Expected output: {}", role.output_spec.description));
         }
+        parts.push(format!("Memory scope: {:?}", role.memory_scope).to_lowercase());
+        parts.push(format!(
+            "Execution limits: max_steps={}, max_retries={}, timeout_secs={}, max_cost_usd={}",
+            role.execution_limits.max_steps,
+            role.execution_limits.max_retries,
+            role.execution_limits.timeout_secs,
+            role.execution_limits
+                .max_cost_usd
+                .map(|value| format!("{value:.2}"))
+                .unwrap_or_else(|| "none".into())
+        ));
         // Load agent constraints
         if let Ok(Some(agent)) = store.get_agent_definition(&state.tenant_id, &role.agent_id).await {
             if !agent.constraints.is_empty() {
@@ -134,11 +173,7 @@ impl LlmPlanner {
             }
         }
 
-        if parts.is_empty() {
-            None
-        } else {
-            Some(parts.join("\n\n"))
-        }
+        Some(RolePlannerContext { prompt_context: parts.join("\n\n"), job_type })
     }
 }
 
@@ -166,23 +201,22 @@ impl Planner for LlmPlanner {
             });
         }
 
-        let job_type = JobType::detect(&state.goal);
+        let role_context = self.load_role_context(state).await;
+        let job_type = role_context
+            .as_ref()
+            .map(|ctx| ctx.job_type.clone())
+            .unwrap_or_else(|| JobType::detect(&state.goal));
 
         let system = PlannerPrompt::system(&job_type);
         let manifest = crate::tools::selector::tool_manifest_from_names(available_tools);
         let conv_history = self.conversation_history(state).await;
-
-        // Build role context from AgentRole if this agent has one configured.
-        // This gives the planner the execution guidelines, output spec, and
-        // scoped connector list — so it doesn't have to guess.
-        let role_context = self.load_role_context(state).await;
 
         let user = PlannerPrompt::user_create(
             state,
             context,
             &manifest,
             &conv_history,
-            role_context.as_deref(),
+            role_context.as_ref().map(|ctx| ctx.prompt_context.as_str()),
         );
 
         tracing::debug!(
@@ -254,7 +288,11 @@ impl Planner for LlmPlanner {
 
     async fn revise_plan(&self, plan: &Plan, state: &AgentState, feedback: &str) -> Result<Plan> {
         let user = PlannerPrompt::user_revise(plan, feedback, state);
-        let job_type = JobType::detect(&state.goal);
+        let job_type = self
+            .load_role_context(state)
+            .await
+            .map(|ctx| ctx.job_type)
+            .unwrap_or_else(|| JobType::detect(&state.goal));
         let system = PlannerPrompt::system(&job_type);
 
         let request = GatewayRequest::new(

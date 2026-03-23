@@ -207,6 +207,7 @@ impl PostgresStore {
                 name                 TEXT NOT NULL,
                 trigger              JSONB NOT NULL DEFAULT '{}',
                 purpose              TEXT NOT NULL DEFAULT '',
+                role_category        TEXT NOT NULL DEFAULT 'general',
                 execution_guidelines TEXT,
                 connectors           JSONB NOT NULL DEFAULT '[]',
                 tools                JSONB NOT NULL DEFAULT '[]',
@@ -223,6 +224,9 @@ impl PostgresStore {
             .execute(&self.pool)
             .await?;
         sqlx::query("CREATE INDEX IF NOT EXISTS agent_roles_tenant ON agent_roles (tenant_id, status)")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("ALTER TABLE agent_roles ADD COLUMN IF NOT EXISTS role_category TEXT NOT NULL DEFAULT 'general'")
             .execute(&self.pool)
             .await?;
 
@@ -904,15 +908,16 @@ impl PostgresStore {
             r#"
             INSERT INTO agent_roles
                 (id, agent_id, tenant_id, version, status, name, trigger, purpose,
-                 execution_guidelines, connectors, tools, output_spec, memory_scope,
+                 role_category, execution_guidelines, connectors, tools, output_spec, memory_scope,
                  execution_limits, created_at, updated_at)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
             ON CONFLICT (id) DO UPDATE SET
                 version              = EXCLUDED.version,
                 status               = EXCLUDED.status,
                 name                 = EXCLUDED.name,
                 trigger              = EXCLUDED.trigger,
                 purpose              = EXCLUDED.purpose,
+                role_category        = EXCLUDED.role_category,
                 execution_guidelines = EXCLUDED.execution_guidelines,
                 connectors           = EXCLUDED.connectors,
                 tools                = EXCLUDED.tools,
@@ -930,6 +935,7 @@ impl PostgresStore {
         .bind(&role.name)
         .bind(serde_json::to_value(&role.trigger).unwrap_or_default())
         .bind(&role.purpose)
+        .bind(role.role_category.as_str())
         .bind(serde_json::to_value(&role.execution_guidelines).unwrap_or_default())
         .bind(serde_json::json!(role.connectors))
         .bind(serde_json::json!(role.tools))
@@ -1581,6 +1587,10 @@ fn str_to_memory_scope(s: &str) -> MemoryScope {
     }
 }
 
+fn str_to_role_category(s: &str) -> crate::agent::definition::RoleCategory {
+    crate::agent::definition::RoleCategory::from_slug(s)
+}
+
 fn row_to_agent_role(row: &PgRow) -> AgentRole {
     let connectors: Vec<String> = row
         .try_get::<serde_json::Value, _>("connectors")
@@ -1616,6 +1626,7 @@ fn row_to_agent_role(row: &PgRow) -> AgentRole {
         name:                row.get("name"),
         trigger,
         purpose:             row.get("purpose"),
+        role_category:       str_to_role_category(&row.try_get::<String, _>("role_category").unwrap_or_else(|_| "general".into())),
         execution_guidelines: row
             .try_get::<Option<serde_json::Value>, _>("execution_guidelines")
             .ok()

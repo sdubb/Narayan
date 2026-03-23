@@ -20,7 +20,7 @@
 //!   Reviewing              → show the full config for user confirmation
 //!   Complete               → save and close
 
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 use anyhow::Result;
 use chrono::Utc;
@@ -29,13 +29,14 @@ use uuid::Uuid;
 use crate::{
     agent::definition::{
         AgentDefinition, AgentDefinitionStatus, AgentRole, ConnectorAuthType, EndpointDef,
-        ExecutionLimits, MemoryScope, OutputDestination, OutputFormat, OutputSpec, PlanModeMessage,
-        PlanModePhase, PlanModeSession, RoleStatus, TenantConnector, TriggerDef, TriggerType,
+        OutputDestination, OutputFormat, OutputSpec, PlanModeMessage, PlanModePhase,
+        PlanModeSession, RoleCategory, RoleStatus, TenantConnector, TriggerDef, TriggerType,
     },
     connectors::ConnectorInstallStore,
     gateway::{GatewayRequest, LlmGateway, TaskComplexity},
     providers::Message,
     storage::PostgresStore,
+    tools::ToolRegistry,
 };
 
 // ── Built-in connector catalogue ─────────────────────────────────────────────
@@ -57,21 +58,25 @@ impl IntentExtractor {
         Self { gateway }
     }
 
-    pub async fn extract(
+    pub async fn extract_initial(
         &self,
         session_id: &str,
         tenant_id: &str,
         description: &str,
-        custom_context: &str,
+        capability_directory: &str,
     ) -> Result<serde_json::Value> {
-        let custom_section = if custom_context.is_empty() {
+        let capability_section = if capability_directory.is_empty() {
             String::new()
         } else {
-            format!("\n\nTENANT'S REGISTERED CONNECTIONS (use exact names):\n{}", custom_context)
+            format!("\n\nCAPABILITY DIRECTORY:\n{}", capability_directory)
         };
 
         let system = format!(r#"You are a business analyst helping configure an AI automation agent.
 Extract structured intent AND generate specific clarifying questions.
+
+Work in two stages internally:
+1. Infer the business workflow shape and the capability categories needed.
+2. Pick exact connectors or tools only when the directory/context makes them clear.
 
 Respond ONLY with valid JSON. Schema:
 {{
@@ -79,6 +84,12 @@ Respond ONLY with valid JSON. Schema:
   "write_targets": ["systems the agent writes to"],
   "actions": ["what the agent does, plain English verbs"],
   "category": "sales_revops|customer_support|devops|finance_accounting|hr_people_ops|legal_contract|research_analyst|software_engineer|marketing|general",
+  "preferred_tool_categories": ["tool category names such as data, web, automation"],
+  "preferred_tools": ["exact tool names from the capability directory only"],
+  "needed_connector_categories": ["connector category suffixes such as crm, support, communication"],
+  "candidate_connectors": ["exact installed or built-in connector names if likely"],
+  "missing_capabilities": ["custom_db|custom_api|connector/<category>|tool/<category>"],
+  "workflow_outline": ["short ordered workflow hints, e.g. fetch records, enrich them, update CRM, notify Slack"],
   "uses_external_db": "registered database name or null",
   "uses_external_api": "registered API name or null",
   "trigger_hint": "schedule|webhook|user_message|manual",
@@ -99,24 +110,73 @@ Respond ONLY with valid JSON. Schema:
 }}{}
 
 Rules:
+- Use exact tool names only from the capability directory or detailed context
+- Use exact connector names only when they are clearly supported by the context
+- If the user likely needs a database not in the installed connectors, prefer missing_capabilities=["custom_db"]
+- If the user likely needs a custom REST backend, prefer missing_capabilities=["custom_api"]
+- If the needed connector category is clear but no installed connector is obvious, add connector/<category> to missing_capabilities
+- workflow_outline should be high-level and ordered, not low-level tool calls
 - trigger_confidence is high only when cron/event is fully unambiguous
 - trigger_confidence medium: parsed but missing detail (no time, no connector named)
 - trigger_confidence low: trigger type itself unclear
 - output_questions: only ask what you cannot infer
 - multi_role_suggested: true only if 2+ clearly distinct responsibilities with different triggers or outputs
-- responsibilities: always list at least one entry"#, custom_section);
+- responsibilities: always list at least one entry"#, capability_section);
 
         let user = format!("Configure an agent to do:\n\n{}", description);
 
-        let req = GatewayRequest::new(
+        let first_pass = GatewayRequest::new(
             session_id.to_string(),
             tenant_id.to_string(),
             TaskComplexity::Medium,
             vec![Message::system(system), Message::user(user)],
         );
 
-        let resp = self.gateway.chat(req).await?;
-        let raw = resp.content.unwrap_or_default();
+        self.parse_json_response(self.gateway.chat(first_pass).await?.content.unwrap_or_default())
+    }
+
+    pub async fn refine(
+        &self,
+        session_id: &str,
+        tenant_id: &str,
+        description: &str,
+        initial: &serde_json::Value,
+        detailed_context: &str,
+    ) -> Result<serde_json::Value> {
+        let refine_system = format!(r#"You are refining a previously inferred agent configuration.
+Use the detailed capability context below to keep what was right, correct what was vague,
+and choose exact tools/connectors where supported.
+
+Return ONLY valid JSON with the exact same schema as before.
+
+Detailed capability context:
+{}
+
+Rules:
+- Preserve the original business intent unless the detailed context proves it impossible
+- Fill preferred_tools with exact tool names only when the tool is clearly relevant
+- Fill candidate_connectors with exact names only when the connector is clearly relevant
+- Keep missing_capabilities accurate if no installed/custom option satisfies the need
+- Keep workflow_outline ordered and practical
+"#, detailed_context);
+
+        let refine_user = format!(
+            "Original request:\n{}\n\nPreliminary inference JSON:\n{}",
+            description,
+            serde_json::to_string_pretty(&initial).unwrap_or_else(|_| initial.to_string())
+        );
+
+        let second_pass = GatewayRequest::new(
+            session_id.to_string(),
+            tenant_id.to_string(),
+            TaskComplexity::Medium,
+            vec![Message::system(refine_system), Message::user(refine_user)],
+        );
+
+        self.parse_json_response(self.gateway.chat(second_pass).await?.content.unwrap_or_default())
+    }
+
+    fn parse_json_response(&self, raw: String) -> Result<serde_json::Value> {
         let cleaned = raw.trim()
             .trim_start_matches("```json")
             .trim_start_matches("```")
@@ -161,6 +221,18 @@ impl ConnectorResolver {
             .chain(actions.iter())
             .map(String::as_str)
             .collect();
+        let candidate_connectors: Vec<String> = intent["candidate_connectors"]
+            .as_array()
+            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        let needed_connector_categories: Vec<String> = intent["needed_connector_categories"]
+            .as_array()
+            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        let missing_capabilities: Vec<String> = intent["missing_capabilities"]
+            .as_array()
+            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default();
 
         // ── Tool overrides for external_db and external_api ─────────────
         let mut tool_overrides: Vec<String> = Vec::new();
@@ -213,6 +285,15 @@ impl ConnectorResolver {
         let mut ambiguous_categories: Vec<(&str, Vec<&str>)> = Vec::new();
         let mut resolved_categories: std::collections::HashSet<&str> = Default::default();
 
+        for requested in &candidate_connectors {
+            if installed.iter().any(|name| name == requested) || tenant_connectors.iter().any(|tc| tc.name == *requested) {
+                resolved.push(requested.clone());
+                if let Some(entry) = BUILTIN_CONNECTORS.iter().find(|entry| entry.name == requested.as_str()) {
+                    resolved_categories.insert(entry.category);
+                }
+            }
+        }
+
         for (_, entry) in &scored {
             let is_installed = installed.iter().any(|i| i == entry.name);
             if !is_installed { continue; }
@@ -247,10 +328,72 @@ impl ConnectorResolver {
                     display_cat,
                     names.join(", ")
                 )
-            });
+            })
+            .or_else(|| build_missing_connector_question(
+                &needed_connector_categories,
+                &missing_capabilities,
+                installed,
+                tenant_connectors,
+            ));
+
+        resolved.sort();
+        resolved.dedup();
+        tool_overrides.sort();
+        tool_overrides.dedup();
 
         (resolved, tool_overrides, clarifying)
     }
+}
+
+fn build_missing_connector_question(
+    needed_connector_categories: &[String],
+    missing_capabilities: &[String],
+    installed: &[String],
+    tenant_connectors: &[TenantConnector],
+) -> Option<String> {
+    for category in needed_connector_categories {
+        let full_category = format!("connector/{}", category);
+        let installed_builtin: Vec<&str> = BUILTIN_CONNECTORS.iter()
+            .filter(|entry| entry.category == full_category)
+            .filter(|entry| installed.iter().any(|name| name == entry.name))
+            .map(|entry| entry.name)
+            .collect();
+        let installed_tenant: Vec<&str> = tenant_connectors.iter()
+            .filter(|connector| connector.category == full_category)
+            .map(|connector| connector.name.as_str())
+            .collect();
+
+        if installed_builtin.is_empty() && installed_tenant.is_empty() {
+            let suggestions: Vec<&str> = BUILTIN_CONNECTORS.iter()
+                .filter(|entry| entry.category == full_category)
+                .map(|entry| entry.name)
+                .take(3)
+                .collect();
+            let suggestion_text = if suggestions.is_empty() {
+                "a custom connector".to_string()
+            } else {
+                suggestions.join(", ")
+            };
+            return Some(format!(
+                "This sounds like it needs a {} connector, but none is installed. Should we use a custom database/API, or should you connect {}?",
+                category,
+                suggestion_text,
+            ));
+        }
+    }
+
+    if missing_capabilities.iter().any(|value| value == "custom_db") {
+        return Some(
+            "This may need a custom database connection. If you already have one registered, tell me its name; otherwise add it as a custom DB connector.".into()
+        );
+    }
+    if missing_capabilities.iter().any(|value| value == "custom_api") {
+        return Some(
+            "This may need a custom API connection. If you already have one registered, tell me its name; otherwise add it as a custom API connector.".into()
+        );
+    }
+
+    None
 }
 
 /// Returns true if any intent term meaningfully matches the connector's name/summary.
@@ -287,6 +430,7 @@ pub struct PlanModeManager {
     gateway:        Arc<dyn LlmGateway>,
     store:          Arc<PostgresStore>,
     installs:       Arc<ConnectorInstallStore>,
+    tools:          Arc<ToolRegistry>,
     extractor:      IntentExtractor,
     skill_registry: Option<Arc<tokio::sync::RwLock<crate::skills::registry::SkillRegistry>>>,
 }
@@ -296,9 +440,10 @@ impl PlanModeManager {
         gateway:  Arc<dyn LlmGateway>,
         store:    Arc<PostgresStore>,
         installs: Arc<ConnectorInstallStore>,
+        tools:    Arc<ToolRegistry>,
     ) -> Self {
         let extractor = IntentExtractor::new(Arc::clone(&gateway));
-        Self { gateway, store, installs, extractor, skill_registry: None }
+        Self { gateway, store, installs, tools, extractor, skill_registry: None }
     }
 
     pub fn with_skill_registry(
@@ -456,17 +601,26 @@ impl PlanModeManager {
             .await
             .unwrap_or_default();
 
-        // Build a human-readable summary of custom connections to inject
-        // into the IntentExtractor's system prompt so the LLM knows what's available
-        let custom_context = build_custom_context(&installed, &tenant_connectors);
-
-        // Extract structured intent — now with awareness of custom connections
-        let intent = self.extractor.extract(
+        let capability_directory = build_capability_directory(&self.tools, &installed, &tenant_connectors);
+        let initial_intent = self.extractor.extract_initial(
             &session.id,
             &session.tenant_id,
             description,
-            &custom_context,
+            &capability_directory,
         ).await?;
+        let detail_context =
+            build_detailed_capability_context(&self.tools, &initial_intent, &installed, &tenant_connectors);
+        let intent = if detail_context.trim().is_empty() {
+            initial_intent
+        } else {
+            self.extractor.refine(
+                &session.id,
+                &session.tenant_id,
+                description,
+                &initial_intent,
+                &detail_context,
+            ).await?
+        };
 
         // Store intent in the draft role
         let role_id = Uuid::new_v4().to_string();
@@ -477,6 +631,10 @@ impl PlanModeManager {
             "Primary Role".into(),
         );
         role.purpose = description.to_string();
+        role.role_category = RoleCategory::from_slug(
+            intent["category"].as_str().unwrap_or("general"),
+        );
+        apply_role_policy_defaults(&mut session.draft_agent, &mut role);
 
         // Resolve connectors and tool overrides
         let (resolved_connectors, tool_overrides, clarifying_q) =
@@ -486,10 +644,14 @@ impl PlanModeManager {
         session.draft_agent.connectors = resolved_connectors.clone();
         role.connectors = resolved_connectors.clone();
 
-        // Wire tool overrides into role.tools
-        // Format: "external_db:acme_prod" → tool name + encoded arg for executor
-        if !tool_overrides.is_empty() {
-            role.tools = tool_overrides.clone();
+        let mut inferred_tools = inferred_preferred_tools(&self.tools, &intent);
+        for tool_override in &tool_overrides {
+            if !inferred_tools.contains(tool_override) {
+                inferred_tools.push(tool_override.clone());
+            }
+        }
+        if !inferred_tools.is_empty() {
+            role.tools = inferred_tools;
         }
 
         // Build execution guidelines from actions
@@ -517,6 +679,7 @@ impl PlanModeManager {
                 crate::agent::definition::GuidelineRule::always(item)
             );
         }
+        apply_execution_hints(&mut role, &intent);
 
         // Apply trigger from intent (with confidence) — will be confirmed in clarifications phase
         let (parsed_trigger, confidence) = intent_to_trigger(&intent);
@@ -867,10 +1030,22 @@ impl PlanModeManager {
 
 // ── Free helper functions ───────────────────────────────────────────────────
 
+fn apply_role_policy_defaults(agent: &mut AgentDefinition, role: &mut AgentRole) {
+    if agent.persona.trim().is_empty() {
+        agent.persona = role.role_category.default_persona().to_string();
+    }
+
+    role.memory_scope = role.role_category.default_memory_scope();
+
+    if role.execution_limits == crate::agent::definition::ExecutionLimits::default() {
+        role.execution_limits = role.role_category.default_execution_limits();
+    }
+}
+
 /// Build a human-readable summary of the tenant's custom connections
 /// to inject into the IntentExtractor prompt so the LLM knows what's available
 /// and can match user descriptions to registered names exactly.
-fn build_custom_context(installed: &[String], tenant_connectors: &[TenantConnector]) -> String {
+fn build_custom_context(_installed: &[String], tenant_connectors: &[TenantConnector]) -> String {
     if tenant_connectors.is_empty() {
         return String::new();
     }
@@ -911,6 +1086,209 @@ fn build_custom_context(installed: &[String], tenant_connectors: &[TenantConnect
     }
 
     lines.join("\n")
+}
+
+fn build_capability_directory(
+    registry: &ToolRegistry,
+    installed: &[String],
+    tenant_connectors: &[TenantConnector],
+) -> String {
+    let mut lines: Vec<String> = vec![
+        "Use categories first. Do not assume every connector is installed or every tool is needed.".into(),
+        "Only installed connectors and registered custom connections are immediately usable.".into(),
+        "If no installed connector fits, prefer missing_capabilities such as custom_db, custom_api, or connector/<category>.".into(),
+    ];
+
+    let mut tool_categories: Vec<(String, Vec<String>)> = registry.by_category()
+        .into_iter()
+        .filter(|(category, _)| !category.starts_with("connector/"))
+        .map(|(category, names)| {
+            (
+                category.to_string(),
+                names.into_iter()
+                    .filter(|name| !name.starts_with("request_more_") && *name != "list_connectors_in_category")
+                    .take(4)
+                    .map(String::from)
+                    .collect(),
+            )
+        })
+        .filter(|(_, names)| !names.is_empty())
+        .collect();
+    tool_categories.sort_by(|a, b| a.0.cmp(&b.0));
+    lines.push("Core tool categories (examples only, more detail comes later if relevant):".into());
+    for (category, names) in tool_categories {
+        lines.push(format!("  - {}: {}", category, names.join(", ")));
+    }
+
+    let mut connector_groups: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+    for entry in BUILTIN_CONNECTORS {
+        let cat = entry.category.strip_prefix("connector/").unwrap_or(entry.category);
+        let status = if installed.iter().any(|name| name == entry.name) { "installed" } else { "available" };
+        connector_groups.entry(cat).or_default()
+            .push(format!("{} ({}, {})", entry.name, status, entry.summary));
+    }
+    lines.push("Built-in connector categories:".into());
+    for (category, connectors) in connector_groups {
+        let preview = connectors.into_iter().take(4).collect::<Vec<_>>();
+        lines.push(format!("  - {}: {}", category, preview.join("; ")));
+    }
+
+    let custom_context = build_custom_context(installed, tenant_connectors);
+    if !custom_context.is_empty() {
+        lines.push("Tenant custom connections:".into());
+        lines.push(custom_context);
+    }
+
+    lines.join("\n")
+}
+
+fn build_detailed_capability_context(
+    registry: &ToolRegistry,
+    intent: &serde_json::Value,
+    installed: &[String],
+    tenant_connectors: &[TenantConnector],
+) -> String {
+    let mut lines: Vec<String> = Vec::new();
+
+    let tool_categories: Vec<String> = intent["preferred_tool_categories"]
+        .as_array()
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    for category in tool_categories {
+        let specs = registry.tool_specs_for_category(&category);
+        if specs.is_empty() {
+            continue;
+        }
+        lines.push(format!("Detailed tools for category '{}':", category));
+        for spec in specs.into_iter().take(8) {
+            let params = spec.parameters["required"].as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
+            let required = if params.is_empty() { "none".to_string() } else { params };
+            lines.push(format!(
+                "  - {}: {} | required args: {}",
+                spec.name,
+                spec.description,
+                required,
+            ));
+        }
+    }
+
+    let mut requested_connector_names: Vec<String> = intent["candidate_connectors"]
+        .as_array()
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    let requested_connector_categories: Vec<String> = intent["needed_connector_categories"]
+        .as_array()
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+
+    for category in &requested_connector_categories {
+        for entry in BUILTIN_CONNECTORS {
+            let cat = entry.category.strip_prefix("connector/").unwrap_or(entry.category);
+            if cat == category && !requested_connector_names.iter().any(|name| name == entry.name) {
+                requested_connector_names.push(entry.name.to_string());
+            }
+        }
+    }
+
+    for connector_name in requested_connector_names {
+        if let Some(entry) = BUILTIN_CONNECTORS.iter().find(|entry| entry.name == connector_name) {
+            let installed_status = if installed.iter().any(|name| name == entry.name) { "installed" } else { "not_installed" };
+            lines.push(format!(
+                "Connector '{}': category={} status={} summary={} operations={}",
+                entry.name,
+                entry.category,
+                installed_status,
+                entry.summary,
+                entry.operations.join("; "),
+            ));
+        } else if let Some(connector) = tenant_connectors.iter().find(|connector| connector.name == connector_name) {
+            let operations = connector.endpoints.iter()
+                .map(|endpoint| endpoint.path.as_str())
+                .take(6)
+                .collect::<Vec<_>>();
+            let operation_text = if operations.is_empty() {
+                "custom endpoints configured".to_string()
+            } else {
+                operations.join(", ")
+            };
+            lines.push(format!(
+                "Tenant connector '{}': category={} summary={} endpoints={}",
+                connector.name,
+                connector.category,
+                connector.summary,
+                operation_text,
+            ));
+        }
+    }
+
+    let missing_capabilities: Vec<String> = intent["missing_capabilities"]
+        .as_array()
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    if !missing_capabilities.is_empty() {
+        lines.push(format!(
+            "Missing capability hints already inferred: {}",
+            missing_capabilities.join(", ")
+        ));
+    }
+
+    lines.join("\n")
+}
+
+fn inferred_preferred_tools(registry: &ToolRegistry, intent: &serde_json::Value) -> Vec<String> {
+    intent["preferred_tools"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|value| value.as_str())
+                .filter(|tool_name| registry.get(tool_name).is_some())
+                .map(String::from)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+fn apply_execution_hints(role: &mut AgentRole, intent: &serde_json::Value) {
+    let workflow_outline: Vec<String> = intent["workflow_outline"]
+        .as_array()
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    for item in workflow_outline.into_iter().take(5) {
+        role.execution_guidelines.add_priority(item);
+    }
+
+    let tool_categories: Vec<String> = intent["preferred_tool_categories"]
+        .as_array()
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    if !tool_categories.is_empty() {
+        role.execution_guidelines.add_rule(
+            crate::agent::definition::GuidelineRule::always(format!(
+                "Prefer these tool categories when relevant: {}.",
+                tool_categories.join(", ")
+            ))
+        );
+    }
+
+    let connector_categories: Vec<String> = intent["needed_connector_categories"]
+        .as_array()
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    if !connector_categories.is_empty() {
+        role.execution_guidelines.add_rule(
+            crate::agent::definition::GuidelineRule::always(format!(
+                "Prefer connectors from these categories when relevant: {}.",
+                connector_categories.join(", ")
+            ))
+        );
+    }
 }
 
 /// Parse a natural-language trigger description into a `TriggerDef`.
@@ -1371,6 +1749,40 @@ mod tests {
             ConnectorResolver::resolve(&intent, &[], &[])
         );
         assert!(tools.contains(&"external_db:prod_db".to_string()));
+    }
+
+    #[test]
+    fn test_connector_resolver_uses_candidate_connector_hint() {
+        let intent = serde_json::json!({
+            "data_sources": ["customer data"],
+            "write_targets": [],
+            "actions": ["sync records"],
+            "candidate_connectors": ["hubspot"],
+        });
+        let installed = vec!["hubspot".into()];
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (resolved, _tools, clarifying) = rt.block_on(
+            ConnectorResolver::resolve(&intent, &installed, &[])
+        );
+        assert!(resolved.contains(&"hubspot".to_string()));
+        assert!(clarifying.is_none());
+    }
+
+    #[test]
+    fn test_connector_resolver_prompts_for_missing_connector_category() {
+        let intent = serde_json::json!({
+            "data_sources": ["pipeline data"],
+            "write_targets": [],
+            "actions": ["update CRM records"],
+            "needed_connector_categories": ["crm"],
+        });
+        let installed: Vec<String> = vec!["slack".into()];
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (_resolved, _tools, clarifying) = rt.block_on(
+            ConnectorResolver::resolve(&intent, &installed, &[])
+        );
+        let question = clarifying.expect("should ask for missing crm connector");
+        assert!(question.to_lowercase().contains("crm connector"));
     }
 
     #[test]

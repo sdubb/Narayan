@@ -35,6 +35,10 @@ const ALWAYS_INCLUDE: &[&str] = &[
     "delegate",
     "plane_guard",
     "vector_search",
+    "list_connectors_in_category",
+    "request_more_connectors",
+    "create_custom_connector",
+    "request_more_tools",
 ];
 
 /// Select the best tool subset for a given step.
@@ -42,7 +46,8 @@ pub fn select_tools_for_step(
     registry: &ToolRegistry,
     step: &PlannedStep,
     job_type: &JobType,
-    _tenant_tools: &[String], // tools the tenant has credentials for (optional filter)
+    role_tools: &[String],
+    role_tool_categories: &[String],
 ) -> Vec<ToolSpec> {
     let mut selected: Vec<String> = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -63,7 +68,30 @@ pub fn select_tools_for_step(
         add(name, &mut selected, &mut seen);
     }
 
-    // ── 3. Job-type preferred tools ───────────────────────────────────────────
+    // ── 3. Role-scoped tool preferences ───────────────────────────────────────
+    for name in role_tools {
+        if selected.len() >= MAX_TOOLS {
+            break;
+        }
+        add(name, &mut selected, &mut seen);
+    }
+
+    // ── 4. Job-type preferred tools ───────────────────────────────────────────
+    let tools_by_category = registry.by_category();
+    for category in role_tool_categories {
+        if selected.len() >= MAX_TOOLS {
+            break;
+        }
+        if let Some(names) = tools_by_category.get(category.as_str()) {
+            for name in names {
+                if selected.len() >= MAX_TOOLS {
+                    break;
+                }
+                add(name, &mut selected, &mut seen);
+            }
+        }
+    }
+
     for name in job_type.preferred_tools() {
         if selected.len() >= MAX_TOOLS {
             break;
@@ -71,7 +99,7 @@ pub fn select_tools_for_step(
         add(name, &mut selected, &mut seen);
     }
 
-    // ── 4. Keyword relevance matching ─────────────────────────────────────────
+    // ── 5. Keyword relevance matching ─────────────────────────────────────────
     // Extract meaningful words from the step description
     let step_words = extract_keywords(&step.description);
 
@@ -103,7 +131,7 @@ pub fn select_tools_for_step(
         }
     }
 
-    // ── 5. Build ToolSpec list ────────────────────────────────────────────────
+    // ── 6. Build ToolSpec list ────────────────────────────────────────────────
     selected
         .into_iter()
         .filter_map(|name| registry.get(&name))
@@ -354,7 +382,7 @@ mod tests {
             condition: None,
         };
         let job_type = JobType::detect("build a web app");
-        let specs = select_tools_for_step(&registry, &step, &job_type, &[]);
+        let specs = select_tools_for_step(&registry, &step, &job_type, &[], &[]);
         let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"shell"), "expected 'shell' in selected tools");
         assert!(names.contains(&"file_read"), "expected 'file_read' in selected tools");
@@ -372,7 +400,7 @@ mod tests {
             condition: None,
         };
         let job_type = JobType::detect("encrypt some data");
-        let specs = select_tools_for_step(&registry, &step, &job_type, &[]);
+        let specs = select_tools_for_step(&registry, &step, &job_type, &[], &[]);
         let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"crypto_tool"), "expected 'crypto_tool' in selected tools");
     }
@@ -391,8 +419,41 @@ mod tests {
             condition: None,
         };
         let job_type = JobType::detect("build a web app");
-        let specs = select_tools_for_step(&registry, &step, &job_type, &[]);
+        let specs = select_tools_for_step(&registry, &step, &job_type, &[], &[]);
         assert!(specs.len() <= MAX_TOOLS, "expected <= {} tools, got {}", MAX_TOOLS, specs.len());
+    }
+
+    #[test]
+    fn test_role_scoped_tools_are_honored() {
+        let registry = default_registry();
+        let step = PlannedStep {
+            index: 0,
+            description: "fetch a page and summarize it".into(),
+            tool: None,
+            tool_args: None,
+            success_criteria: String::new(),
+            condition: None,
+        };
+        let job_type = JobType::General;
+        let specs = select_tools_for_step(&registry, &step, &job_type, &["web_fetch".into()], &[]);
+        let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"web_fetch"), "expected role-scoped tool 'web_fetch' in selected tools");
+    }
+
+    #[test]
+    fn test_role_tool_categories_expand_toolset() {
+        let registry = default_registry();
+        let step = PlannedStep {
+            index: 0,
+            description: "inspect an api response".into(),
+            tool: None,
+            tool_args: None,
+            success_criteria: String::new(),
+            condition: None,
+        };
+        let specs = select_tools_for_step(&registry, &step, &JobType::General, &[], &["integration".into()]);
+        let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"api_call") || names.contains(&"http_request"));
     }
 
     #[test]

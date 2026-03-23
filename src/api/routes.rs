@@ -2172,6 +2172,11 @@ pub async fn create_agent_role(
     if let Some(arr) = body["tools"].as_array() {
         role.tools = arr.iter().filter_map(|v| v.as_str().map(String::from)).collect();
     }
+    if let Some(category) = body.get("role_category") {
+        if let Ok(c) = serde_json::from_value::<crate::agent::definition::RoleCategory>(category.clone()) {
+            role.role_category = c;
+        }
+    }
     if let Some(trigger) = body.get("trigger") {
         if let Ok(t) = serde_json::from_value::<crate::agent::definition::TriggerDef>(trigger.clone()) {
             role.trigger = t;
@@ -2232,6 +2237,11 @@ pub async fn update_agent_role(
 
     if let Some(name)    = body["name"].as_str()    { role.name    = name.into(); }
     if let Some(purpose) = body["purpose"].as_str() { role.purpose = purpose.into(); }
+    if let Some(category) = body.get("role_category") {
+        if let Ok(c) = serde_json::from_value::<crate::agent::definition::RoleCategory>(category.clone()) {
+            role.role_category = c;
+        }
+    }
     if let Some(g) = body["execution_guidelines"].as_str() {
         role.execution_guidelines = g.into();
     }
@@ -2876,6 +2886,16 @@ pub async fn list_plan_mode_templates(
     Json(serde_json::json!({ "templates": list })).into_response()
 }
 
+fn template_persona(group: &str, category: &crate::agent::definition::RoleCategory) -> String {
+    match group {
+        "founders" =>
+            "You are a high-agency operator helping a founder move quickly, make sound decisions, and avoid avoidable mistakes.".into(),
+        "personal" =>
+            "You are a careful personal assistant who protects privacy, stays organised, and handles important details reliably.".into(),
+        _ => category.default_persona().to_string(),
+    }
+}
+
 pub async fn start_plan_mode_session(
     State(state): State<AppState>,
     tenant: AuthenticatedTenant,
@@ -2907,10 +2927,18 @@ pub async fn start_plan_mode_session(
                 &session.tenant_id,
             );
             role.name = tmpl.name.into();
+            role.role_category = crate::agent::definition::RoleCategory::from_slug(tmpl.category);
+            role.memory_scope = role.role_category.default_memory_scope();
+            if role.execution_limits == crate::agent::definition::ExecutionLimits::default() {
+                role.execution_limits = role.role_category.default_execution_limits();
+            }
 
             // Use the template's agent name if none was given
             if session.draft_agent.name == "New Agent" {
                 session.draft_agent.name = tmpl.name.into();
+            }
+            if session.draft_agent.persona.trim().is_empty() {
+                session.draft_agent.persona = template_persona(tmpl.persona, &role.role_category);
             }
 
             session.draft_agent.connectors = role.connectors.clone();
@@ -3160,6 +3188,7 @@ fn build_plan_mode_manager(state: &AppState) -> crate::agent::PlanModeManager {
         gateway,
         Arc::clone(&state.store),
         Arc::clone(&state.connector_installs),
+        Arc::new(crate::tools::default_registry()),
     )
     .with_skill_registry(Arc::clone(&state.skill_registry))
 }

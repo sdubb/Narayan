@@ -297,24 +297,12 @@ impl TenantSavingsSummary {
 // ── AgentRole helper ──────────────────────────────────────────────────────
 
 // Extend AgentRole with a category accessor for savings estimation.
-// Category is stored as a guideline rule added during intent extraction.
 trait RoleCategoryAccessor {
     fn purpose_category(&self) -> String;
 }
 
 impl RoleCategoryAccessor for AgentRole {
     fn purpose_category(&self) -> String {
-        // Try to find category from guidelines (stored during intent extraction)
-        // or infer from purpose keywords
-        let purpose = self.purpose.to_lowercase();
-        if purpose.contains("lead") || purpose.contains("crm") || purpose.contains("salesforce") { return "sales_revops".into(); }
-        if purpose.contains("ticket") || purpose.contains("support") || purpose.contains("customer") { return "customer_support".into(); }
-        if purpose.contains("invoice") || purpose.contains("reconcil") || purpose.contains("accounting") { return "finance_accounting".into(); }
-        if purpose.contains("deploy") || purpose.contains("infra") || purpose.contains("incident") { return "devops".into(); }
-        if purpose.contains("contract") || purpose.contains("legal") || purpose.contains("nda") { return "legal_contract".into(); }
-        if purpose.contains("candidate") || purpose.contains("hiring") || purpose.contains("onboard") { return "hr_people_ops".into(); }
-        if purpose.contains("research") || purpose.contains("analys") { return "research_analyst".into(); }
-        if purpose.contains("code") || purpose.contains("pull request") || purpose.contains("deploy") { return "software_engineer".into(); }
-        "general".into()
+        self.role_category.as_str().to_string()
     }
 }
