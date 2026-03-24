@@ -49,7 +49,7 @@ use gateway::{CostTracker, LlmGateway, NarayanGateway, ProviderLimits, RateLimit
 use knowledge::KnowledgeGraph;
 use memory::{build_embedding_model, store::RedisMemoryStore, DistanceMetric, PgVectorStore};
 use metrics::Metrics;
-use scheduler::{DbPollingScheduler, InMemoryQueue, Queue, RedisBackedQueue, Scheduler};
+use scheduler::{DbPollingScheduler, InMemoryQueue, Queue, RedisBackedQueue, Scheduler, ScheduleTicker};
 use skill_marketplace::SkillMarketplace;
 use skills::registry::SkillRegistry;
 use storage::PostgresStore;
@@ -462,6 +462,9 @@ async fn main() -> Result<()> {
     // ── Connector poller ───────────────────────────────────────────────────
     let connector_poller = Arc::new(ConnectorPoller::new(connector_installs.clone(), manager.clone()));
 
+    // ── Schedule ticker (cron-based role triggers) ───────────────────────
+    let schedule_ticker = Arc::new(ScheduleTicker::new(store.clone(), manager.clone()));
+
     // ── API ────────────────────────────────────────────────────────────────
     let app_state = AppState {
         store: store.clone(),
@@ -517,14 +520,15 @@ async fn main() -> Result<()> {
     );
 
     tokio::select! {
-        r = scheduler.run()         => tracing::error!("scheduler exited: {:?}", r),
-        r = pool.run()              => tracing::error!("worker pool exited: {:?}", r),
-        _ = connector_poller.run()  => tracing::error!("connector poller exited"),
+        r = scheduler.run()          => tracing::error!("scheduler exited: {:?}", r),
+        r = pool.run()               => tracing::error!("worker pool exited: {:?}", r),
+        _ = connector_poller.run()   => tracing::error!("connector poller exited"),
+        _ = schedule_ticker.run()    => tracing::error!("schedule ticker exited"),
         r = serve(
             app_state, tenant_store, event_bus, store,
             audit_log, cost_tracker, metrics,
             &cfg.server.host, cfg.server.port
-        )                           => tracing::error!("API exited: {:?}", r),
+        )                            => tracing::error!("API exited: {:?}", r),
     }
 
     Ok(())

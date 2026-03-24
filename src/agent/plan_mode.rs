@@ -1284,7 +1284,7 @@ fn build_capability_directory(
                     })
                     .take(4)
                     .map(String::from)
-                    .collect(),
+                    .collect::<Vec<String>>(),
             )
         })
         .filter(|(_, names)| !names.is_empty())
@@ -1677,11 +1677,26 @@ pub(crate) fn natural_to_cron(text: &str) -> String {
     // Specific time extraction: "at 9am", "at 14:00", "at 3pm"
     let hour = if let Some(h) = extract_hour(&lower) { h } else { 9u32 };
 
+    // Minute-level schedules (must be before "every hour")
+    if lower.contains("every min") || lower.contains("every minute") {
+        return "* * * * *".into();
+    }
+    if lower.contains("every 5 min")  { return "*/5 * * * *".into(); }
+    if lower.contains("every 10 min") { return "*/10 * * * *".into(); }
+    if lower.contains("every 15 min") { return "*/15 * * * *".into(); }
+
     if lower.contains("every hour") || lower.contains("hourly") {
         return format!("0 * * * *");
     }
     if lower.contains("every 30 min") || lower.contains("every half hour") {
         return format!("*/30 * * * *");
+    }
+    // Generic "every N min/minutes" (must be after specific checks above)
+    if lower.contains("every") && lower.contains("min") {
+        if let Some(n) = extract_number(&lower) {
+            return format!("*/{} * * * *", n);
+        }
+        return "* * * * *".into();
     }
     if lower.contains("midnight") { return "0 0 * * *".into(); }
     if lower.contains("noon")     { return "0 12 * * *".into(); }
@@ -2112,6 +2127,20 @@ mod tests {
 
     #[test]
     fn test_natural_to_cron_midnight() { assert_eq!(natural_to_cron("daily at midnight"), "0 0 * * *"); }
+
+    #[test]
+    fn test_every_minute_cron() {
+        assert_eq!(natural_to_cron("every min"), "* * * * *");
+        assert_eq!(natural_to_cron("every minute"), "* * * * *");
+    }
+
+    #[test]
+    fn test_every_n_minutes_cron() {
+        assert_eq!(natural_to_cron("every 5 min"), "*/5 * * * *");
+        assert_eq!(natural_to_cron("every 10 min"), "*/10 * * * *");
+        assert_eq!(natural_to_cron("every 15 min"), "*/15 * * * *");
+        assert_eq!(natural_to_cron("every 7 minutes"), "*/7 * * * *");
+    }
 
     #[test]
     fn test_build_custom_context_empty() {

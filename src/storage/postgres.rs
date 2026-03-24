@@ -428,6 +428,18 @@ impl PostgresStore {
         .execute(&self.pool)
         .await?;
 
+        // ── ScheduleTicker: next_run_at for cron-based roles ────────────
+        sqlx::query("ALTER TABLE agent_roles ADD COLUMN IF NOT EXISTS next_run_at TIMESTAMPTZ")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_roles_next_run
+             ON agent_roles (next_run_at)
+             WHERE status = 'active' AND trigger->>'trigger_type' = 'schedule'",
+        )
+        .execute(&self.pool)
+        .await?;
+
         Ok(())
     }
 
@@ -1046,6 +1058,45 @@ impl PostgresStore {
         sqlx::query("DELETE FROM agent_roles WHERE id = $1 AND tenant_id = $2")
             .bind(id)
             .bind(tenant_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    // ── Schedule Ticker queries ─────────────────────────────────────────────
+
+    /// Atomically claim scheduled roles whose cron is due.
+    /// Sets `next_run_at` to a far-future sentinel so they aren't re-claimed.
+    /// Caller must compute the real next_run_at and call `update_role_next_run_at`.
+    pub async fn claim_due_scheduled_roles(&self, limit: i64) -> Result<Vec<AgentRole>> {
+        let rows = sqlx::query(
+            r#"
+            UPDATE agent_roles
+            SET next_run_at = '9999-01-01T00:00:00Z'::timestamptz, updated_at = NOW()
+            WHERE id IN (
+                SELECT id FROM agent_roles
+                WHERE status = 'active'
+                  AND trigger->>'trigger_type' = 'schedule'
+                  AND trigger->>'cron' IS NOT NULL
+                  AND (next_run_at IS NULL OR next_run_at <= NOW())
+                ORDER BY next_run_at ASC NULLS FIRST
+                LIMIT $1
+                FOR UPDATE SKIP LOCKED
+            )
+            RETURNING *
+            "#,
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(row_to_agent_role).collect())
+    }
+
+    /// Set the next fire time for a scheduled role after processing.
+    pub async fn update_role_next_run_at(&self, role_id: &str, next: chrono::DateTime<chrono::Utc>) -> Result<()> {
+        sqlx::query("UPDATE agent_roles SET next_run_at = $1, updated_at = NOW() WHERE id = $2")
+            .bind(next)
+            .bind(role_id)
             .execute(&self.pool)
             .await?;
         Ok(())

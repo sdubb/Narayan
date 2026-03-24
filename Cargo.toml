@@ -75,6 +75,8 @@ printpdf         = "0.7"           # pdf create
 ring             = "0.17"          # crypto
 hmac             = "0.12"
 urlencoding      = "2"
+croner           = "2"
+chrono-tz        = "0.10"
 
 [dev-dependencies]
 tokio-test = "0.4"

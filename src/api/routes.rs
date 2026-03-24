@@ -2565,7 +2565,7 @@ pub async fn register_tenant_wasm_tool(
     };
     let module_bytes = match base64::engine::general_purpose::STANDARD.decode(module_b64) {
         Ok(bytes) => bytes,
-        Err(err) => return err(StatusCode::BAD_REQUEST, format!("invalid base64 module bytes: {}", err)),
+        Err(e) => return err(StatusCode::BAD_REQUEST, format!("invalid base64 module bytes: {}", e)),
     };
     if module_bytes.len() > MAX_TENANT_WASM_MODULE_BYTES {
         return err(
@@ -2584,7 +2584,7 @@ pub async fn register_tenant_wasm_tool(
     let wasm_engine = wasmtime::Engine::default();
     let wasm_module = match wasmtime::Module::from_binary(&wasm_engine, &module_bytes) {
         Ok(module) => module,
-        Err(err) => return err(StatusCode::BAD_REQUEST, format!("WASM validation failed: {}", err)),
+        Err(e) => return err(StatusCode::BAD_REQUEST, format!("WASM validation failed: {}", e)),
     };
 
     let exports: Vec<String> = wasm_module.exports().map(|export| export.name().to_string()).collect();
@@ -2619,7 +2619,7 @@ pub async fn register_tenant_wasm_tool(
 
     let existing = match state.store.get_tenant_wasm_tool(&tenant.tenant_id, &name).await {
         Ok(tool) => tool,
-        Err(err) => return err(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     };
 
     let now = chrono::Utc::now();
@@ -2668,9 +2668,9 @@ pub async fn register_tenant_wasm_tool(
                 "tool": tool,
             }))
             .into_response(),
-            Err(err) => err(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+            Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
         },
-        Err(err) => err(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
 
@@ -2686,12 +2686,12 @@ pub async fn set_tenant_wasm_tool_enabled(
         None => return err(StatusCode::BAD_REQUEST, "'enabled' boolean is required"),
     };
 
-    if let Err(err) = state
+    if let Err(e) = state
         .store
         .set_tenant_wasm_tool_enabled(&tenant.tenant_id, &name, enabled)
         .await
     {
-        return err(StatusCode::INTERNAL_SERVER_ERROR, err.to_string());
+        return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
     }
 
     match state.store.get_tenant_wasm_tool(&tenant.tenant_id, &name).await {
@@ -2701,7 +2701,7 @@ pub async fn set_tenant_wasm_tool_enabled(
         }))
         .into_response(),
         Ok(None) => err(StatusCode::NOT_FOUND, "tenant wasm tool not found"),
-        Err(err) => err(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
 
@@ -2713,7 +2713,7 @@ pub async fn delete_tenant_wasm_tool(
 ) -> impl IntoResponse {
     match state.store.delete_tenant_wasm_tool(&tenant.tenant_id, &name).await {
         Ok(_) => Json(serde_json::json!({ "deleted": true })).into_response(),
-        Err(err) => err(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
 
