@@ -121,12 +121,12 @@ pub fn build_router(
         .route("/tenant-wasm-tools/:name/enabled", put(set_tenant_wasm_tool_enabled))
         .route("/tenant-wasm-tools/:name", delete(delete_tenant_wasm_tool))
         // Custom connections — MCP server, REST API, database
-        .route("/connections/mcp/test",  post(test_mcp_connection))
-        .route("/connections/mcp",       post(register_mcp_connection))
-        .route("/connections/api/test",  post(test_api_connection))
-        .route("/connections/api",       post(register_api_connection))
-        .route("/connections/db/test",   post(test_db_connection))
-        .route("/connections/db",        post(register_db_connection))
+        .route("/connections/mcp/test", post(test_mcp_connection))
+        .route("/connections/mcp", post(register_mcp_connection))
+        .route("/connections/api/test", post(test_api_connection))
+        .route("/connections/api", post(register_api_connection))
+        .route("/connections/db/test", post(test_db_connection))
+        .route("/connections/db", post(register_db_connection))
         // Citations (cross-agent)
         .route("/citations", get(list_tenant_citations))
         // Skills

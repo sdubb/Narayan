@@ -114,28 +114,19 @@ impl Evaluator for LlmEvaluator {
                     {
                         return None;
                     }
-                    let answer = trimmed
-                        .strip_suffix("STEP COMPLETE")
-                        .map(str::trim)
-                        .unwrap_or(trimmed)
-                        .trim();
-                    if answer.is_empty() { None } else { Some(answer.to_string()) }
+                    let answer = trimmed.strip_suffix("STEP COMPLETE").map(str::trim).unwrap_or(trimmed).trim();
+                    if answer.is_empty() {
+                        None
+                    } else {
+                        Some(answer.to_string())
+                    }
                 })
                 .or_else(|| {
                     let trimmed = result.output.trim();
-                    if trimmed.is_empty()
-                        || trimmed.eq_ignore_ascii_case("no output")
-                        || trimmed == "STEP COMPLETE"
-                    {
+                    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("no output") || trimmed == "STEP COMPLETE" {
                         None
                     } else {
-                        Some(
-                            trimmed
-                                .strip_suffix("STEP COMPLETE")
-                                .unwrap_or(trimmed)
-                                .trim()
-                                .to_string(),
-                        )
+                        Some(trimmed.strip_suffix("STEP COMPLETE").unwrap_or(trimmed).trim().to_string())
                     }
                 })
                 .unwrap_or_else(|| "goal complete".into());
@@ -296,16 +287,16 @@ impl Evaluator for LlmEvaluator {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CriterionResult {
     pub description: String,
-    pub satisfied:   bool,
-    pub check_type:  String,  // "output_exists" | "all_items_processed" | etc.
-    pub detail:      String,  // human-readable explanation of why pass/fail
+    pub satisfied: bool,
+    pub check_type: String, // "output_exists" | "all_items_processed" | etc.
+    pub detail: String,     // human-readable explanation of why pass/fail
 }
 
 /// Check whether a completed run satisfies its CompletionCriteria.
 /// Returns (all_satisfied, results_per_criterion).
 /// Caller writes results into goal_instance.result["criteria_checks"].
 pub fn check_completion_criteria(
-    role:  &crate::agent::definition::AgentRole,
+    role: &crate::agent::definition::AgentRole,
     state: &AgentState,
 ) -> (bool, Vec<CriterionResult>) {
     use crate::agent::definition::CompletionCheck;
@@ -352,14 +343,14 @@ pub fn check_completion_criteria(
                 )
             }
             CompletionCheck::AllItemsProcessed { collection_hint } => {
-                let processed = state.metadata
+                let processed = state
+                    .metadata
                     .get("step_outputs")
                     .and_then(|v| v.as_array())
                     .and_then(|arr| {
-                        arr.iter().filter_map(|o| {
-                            o.get("processed").or_else(|| o.get("count"))
-                                .and_then(|v| v.as_u64())
-                        }).reduce(|a, b| a + b)
+                        arr.iter()
+                            .filter_map(|o| o.get("processed").or_else(|| o.get("count")).and_then(|v| v.as_u64()))
+                            .reduce(|a, b| a + b)
                     })
                     .unwrap_or(0);
                 let ok = processed > 0;
@@ -374,15 +365,18 @@ pub fn check_completion_criteria(
                 )
             }
             CompletionCheck::RecordUpdated { connector } => {
-                let written = state.metadata
+                let written = state
+                    .metadata
                     .get("step_outputs")
                     .and_then(|v| v.as_array())
-                    .map(|arr| arr.iter().any(|o| {
-                        o.get("connectors")
-                            .and_then(|c| c.as_array())
-                            .map(|cs| cs.iter().any(|c| c.as_str() == Some(connector.as_str())))
-                            .unwrap_or(false)
-                    }))
+                    .map(|arr| {
+                        arr.iter().any(|o| {
+                            o.get("connectors")
+                                .and_then(|c| c.as_array())
+                                .map(|cs| cs.iter().any(|c| c.as_str() == Some(connector.as_str())))
+                                .unwrap_or(false)
+                        })
+                    })
                     .unwrap_or(false);
                 (
                     written,
@@ -396,7 +390,9 @@ pub fn check_completion_criteria(
             }
             CompletionCheck::CountMatches { source, target } => {
                 let get_count = |key: &str| -> u64 {
-                    state.metadata.get("step_outputs")
+                    state
+                        .metadata
+                        .get("step_outputs")
                         .and_then(|v| v.as_array())
                         .and_then(|arr| arr.iter().find_map(|o| o.get(key)?.as_u64()))
                         .unwrap_or(0)
@@ -422,12 +418,7 @@ pub fn check_completion_criteria(
             }
         };
 
-        results.push(CriterionResult {
-            description: criterion.description.clone(),
-            satisfied,
-            check_type,
-            detail,
-        });
+        results.push(CriterionResult { description: criterion.description.clone(), satisfied, check_type, detail });
     }
 
     let all_satisfied = results.iter().all(|r| r.satisfied);

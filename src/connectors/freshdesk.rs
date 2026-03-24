@@ -27,15 +27,14 @@ impl FreshdeskConnector {
     }
 
     fn auth(config: &ConnectorConfig) -> Option<reqwest::header::HeaderValue> {
-        let api_key = config.credentials.get("api_key")
+        let api_key = config
+            .credentials
+            .get("api_key")
             .or_else(|| config.credentials.get("access_token"))
             .or_else(|| config.credentials.get("token"))
             .and_then(|v| v.as_str())?;
         // Freshdesk uses HTTP Basic: api_key:X
-        let encoded = base64::Engine::encode(
-            &base64::engine::general_purpose::STANDARD,
-            format!("{}:X", api_key),
-        );
+        let encoded = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, format!("{}:X", api_key));
         format!("Basic {}", encoded).parse().ok()
     }
 
@@ -46,23 +45,28 @@ impl FreshdeskConnector {
 
 #[async_trait]
 impl Connector for FreshdeskConnector {
-    fn connector_type(&self) -> &str { "freshdesk" }
+    fn connector_type(&self) -> &str {
+        "freshdesk"
+    }
 
     async fn handle_inbound(&self, event: &ConnectorEvent, _config: &ConnectorConfig) -> Result<Option<String>> {
         let payload = &event.payload;
 
         match event.event_type.as_str() {
             "ticket_created" => {
-                let id       = payload["id"].as_u64().unwrap_or(0);
-                let subject  = payload["subject"].as_str().unwrap_or("ticket");
-                let desc     = payload["description_text"].as_str()
-                    .or_else(|| payload["description"].as_str())
-                    .unwrap_or("");
+                let id = payload["id"].as_u64().unwrap_or(0);
+                let subject = payload["subject"].as_str().unwrap_or("ticket");
+                let desc =
+                    payload["description_text"].as_str().or_else(|| payload["description"].as_str()).unwrap_or("");
                 let priority = match payload["priority"].as_u64().unwrap_or(1) {
-                    1 => "low", 2 => "medium", 3 => "high", 4 => "urgent", _ => "normal",
+                    1 => "low",
+                    2 => "medium",
+                    3 => "high",
+                    4 => "urgent",
+                    _ => "normal",
                 };
                 let requester = payload["requester"]["name"].as_str().unwrap_or("customer");
-                let email     = payload["requester"]["email"].as_str().unwrap_or("");
+                let email = payload["requester"]["email"].as_str().unwrap_or("");
 
                 Ok(Some(format!(
                     "New Freshdesk ticket #{id} ({priority} priority) from {requester} ({email}). \
@@ -74,7 +78,7 @@ impl Connector for FreshdeskConnector {
             }
 
             "ticket_updated" => {
-                let id      = payload["id"].as_u64().unwrap_or(0);
+                let id = payload["id"].as_u64().unwrap_or(0);
                 let subject = payload["subject"].as_str().unwrap_or("ticket");
                 let changes = payload.get("changes").cloned().unwrap_or_default();
 
@@ -84,10 +88,17 @@ impl Connector for FreshdeskConnector {
                     return Ok(None);
                 }
 
-                let new_status = changes["status"].as_array()
+                let new_status = changes["status"]
+                    .as_array()
                     .and_then(|arr| arr.get(1))
                     .and_then(|v| v.as_u64())
-                    .map(|s| match s { 2 => "open", 3 => "pending", 4 => "resolved", 5 => "closed", _ => "updated" })
+                    .map(|s| match s {
+                        2 => "open",
+                        3 => "pending",
+                        4 => "resolved",
+                        5 => "closed",
+                        _ => "updated",
+                    })
                     .unwrap_or("updated");
 
                 Ok(Some(format!(
@@ -107,8 +118,7 @@ impl Connector for FreshdeskConnector {
         output: &str,
         metadata: &serde_json::Value,
     ) -> Result<()> {
-        let auth = Self::auth(config)
-            .ok_or_else(|| anyhow::anyhow!("missing Freshdesk api_key"))?;
+        let auth = Self::auth(config).ok_or_else(|| anyhow::anyhow!("missing Freshdesk api_key"))?;
         let base = Self::base_url(config);
 
         let is_private = metadata.get("private").and_then(|v| v.as_bool()).unwrap_or(true);
@@ -119,7 +129,8 @@ impl Connector for FreshdeskConnector {
             "private": is_private,
         });
 
-        let resp = self.http
+        let resp = self
+            .http
             .post(&url)
             .header("Authorization", auth)
             .header("Content-Type", "application/json")
@@ -136,8 +147,7 @@ impl Connector for FreshdeskConnector {
     }
 
     async fn validate_config(&self, config: &ConnectorConfig) -> Result<()> {
-        let auth = Self::auth(config)
-            .ok_or_else(|| anyhow::anyhow!("missing 'api_key' in credentials"))?;
+        let auth = Self::auth(config).ok_or_else(|| anyhow::anyhow!("missing 'api_key' in credentials"))?;
         let domain = Self::domain(config);
         if domain.is_empty() {
             anyhow::bail!("missing 'domain' in settings (e.g. 'acme' for acme.freshdesk.com)");

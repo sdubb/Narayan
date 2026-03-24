@@ -78,11 +78,7 @@ impl ScheduleTicker {
 
         // Create the agent via AgentManager
         let purpose = format!("[scheduled] {}", role.purpose);
-        let (_goal, agent_state) = self.manager.create_goal(
-            role.tenant_id.clone(),
-            purpose,
-            None,
-        ).await?;
+        let (_goal, agent_state) = self.manager.create_goal(role.tenant_id.clone(), purpose, None).await?;
 
         // Create GoalInstance linking back to this role
         let gi = GoalInstance::new(
@@ -92,10 +88,7 @@ impl ScheduleTicker {
             role.id.clone(),
             role.version,
             serde_json::json!({ "scheduled_at": now.to_rfc3339() }),
-            TriggerSource::Schedule {
-                cron: cron_str.to_string(),
-                scheduled_at: now,
-            },
+            TriggerSource::Schedule { cron: cron_str.to_string(), scheduled_at: now },
             false,
         );
         let mut gi = gi;
@@ -117,27 +110,23 @@ impl ScheduleTicker {
 
 /// Compute the next occurrence of a cron expression after `after`.
 /// If `timezone` is provided, the cron is evaluated in that timezone.
-fn compute_next_run(
-    cron_str: &str,
-    after: DateTime<Utc>,
-    timezone: Option<&str>,
-) -> Result<DateTime<Utc>> {
-    let cron = Cron::new(cron_str)
-        .parse()
-        .map_err(|e| anyhow::anyhow!("invalid cron '{}': {}", cron_str, e))?;
+fn compute_next_run(cron_str: &str, after: DateTime<Utc>, timezone: Option<&str>) -> Result<DateTime<Utc>> {
+    let cron = Cron::new(cron_str).parse().map_err(|e| anyhow::anyhow!("invalid cron '{}': {}", cron_str, e))?;
 
     if let Some(tz_name) = timezone {
         // Parse timezone and compute in local time, then convert back to UTC
         if let Ok(tz) = tz_name.parse::<chrono_tz::Tz>() {
             let local_now = after.with_timezone(&tz);
-            let next_local = cron.find_next_occurrence(&local_now, false)
+            let next_local = cron
+                .find_next_occurrence(&local_now, false)
                 .map_err(|e| anyhow::anyhow!("no next occurrence for cron '{}': {}", cron_str, e))?;
             return Ok(next_local.with_timezone(&Utc));
         }
         tracing::warn!(tz = tz_name, "unknown timezone, falling back to UTC");
     }
 
-    let next = cron.find_next_occurrence(&after, false)
+    let next = cron
+        .find_next_occurrence(&after, false)
         .map_err(|e| anyhow::anyhow!("no next occurrence for cron '{}': {}", cron_str, e))?;
     Ok(next.with_timezone(&Utc))
 }

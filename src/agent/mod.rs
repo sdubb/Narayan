@@ -14,25 +14,37 @@ pub mod role_chat;
 pub mod savings;
 pub mod templates;
 
+#[allow(unused_imports)]
 pub use clarifier::{ClarificationAnswers, LlmClarifier};
+#[allow(unused_imports)]
 pub use definition::{
-    AgentDefinition, AgentDefinitionStatus, AgentRole, CompletionCheck, CompletionCriterion,
-    ConnectorAuthType, ConnectorSource, EndpointDef, EndpointParam, ExecutionGuidelines,
-    ExecutionLimits, FailureAction, FailureRule, GuidelineRule, MemoryScope, OutputDestination,
-    OutputFormat, OutputSpec, ParamLocation, PlanModeMessage, PlanModePhase, PlanModeSession,
-    RoleResponsibility, RoleStatus, RulePhase, TenantConnector, TriggerConfidence, TriggerDef,
-    TriggerType, WorkforceEventPayload, WorkforceEventSubscription, infer_failure_action,
+    infer_failure_action, AgentDefinition, AgentDefinitionStatus, AgentRole, CompletionCheck, CompletionCriterion,
+    ConnectorAuthType, ConnectorSource, EndpointDef, EndpointParam, ExecutionGuidelines, ExecutionLimits,
+    FailureAction, FailureRule, GuidelineRule, MemoryScope, OutputDestination, OutputFormat, OutputSpec, ParamLocation,
+    PlanModeAttachment, PlanModeAttachmentKind, PlanModeAttachmentUpload, PlanModeMessage, PlanModePhase,
+    PlanModeSession, RoleResponsibility, RoleStatus, RulePhase, TenantConnector, TriggerConfidence, TriggerDef,
+    TriggerType, WorkforceEventPayload, WorkforceEventSubscription,
 };
+#[allow(unused_imports)]
 pub use evaluator::LlmEvaluator;
+#[allow(unused_imports)]
 pub use executor::LlmExecutor;
+#[allow(unused_imports)]
 pub use manager::AgentManager;
+#[allow(unused_imports)]
 pub use plan_mode::PlanModeManager;
+#[allow(unused_imports)]
 pub use planner::LlmPlanner;
+#[allow(unused_imports)]
 pub use preflight::LlmPreflight;
-pub use role_chat::RoleChatManager;
+#[allow(unused_imports)]
 pub use r#loop::AgentLoop;
+#[allow(unused_imports)]
 pub use reflector::LlmReflector;
-pub use templates::{RoleTemplate, all_templates, find_template};
+#[allow(unused_imports)]
+pub use role_chat::RoleChatManager;
+#[allow(unused_imports)]
+pub use templates::{all_templates, find_template, RoleTemplate};
 
 #[cfg(test)]
 pub(crate) mod test_helpers;

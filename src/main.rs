@@ -49,7 +49,7 @@ use gateway::{CostTracker, LlmGateway, NarayanGateway, ProviderLimits, RateLimit
 use knowledge::KnowledgeGraph;
 use memory::{build_embedding_model, store::RedisMemoryStore, DistanceMetric, PgVectorStore};
 use metrics::Metrics;
-use scheduler::{DbPollingScheduler, InMemoryQueue, Queue, RedisBackedQueue, Scheduler, ScheduleTicker};
+use scheduler::{DbPollingScheduler, InMemoryQueue, Queue, RedisBackedQueue, ScheduleTicker, Scheduler};
 use skill_marketplace::SkillMarketplace;
 use skills::registry::SkillRegistry;
 use storage::PostgresStore;
@@ -204,7 +204,7 @@ async fn main() -> Result<()> {
     //
     // Memory is keyed as:  HSET narayan:mem:{agent_id} {key} {value}
     // TTL of 7 days keeps stale agent memory from accumulating indefinitely.
-    let memory_store: Arc<dyn memory::store::MemoryStore> = if cfg.redis.enabled {
+    let _memory_store: Arc<dyn memory::store::MemoryStore> = if cfg.redis.enabled {
         match RedisMemoryStore::new(&cfg.redis.url) {
             Ok(s) => {
                 tracing::info!("agent memory: Redis-backed (durable, multi-instance)");
@@ -284,14 +284,17 @@ async fn main() -> Result<()> {
     metrics.load_steps_from_db(&store.pool()).await;
     let rate_limits = build_rate_limits(cfg.gateway.requests_per_sec);
     let rate_limiter = Arc::new(RateLimiter::new(rate_limits));
-    let gateway: Arc<dyn LlmGateway> = Arc::new(NarayanGateway::new(
-        tenant_store.clone(),
-        encrypt_key.clone(),
-        cache,
-        cost_tracker.clone(),
-        rate_limiter,
-        fallback_providers,
-    ).with_event_bus(event_bus.clone()));
+    let gateway: Arc<dyn LlmGateway> = Arc::new(
+        NarayanGateway::new(
+            tenant_store.clone(),
+            encrypt_key.clone(),
+            cache,
+            cost_tracker.clone(),
+            rate_limiter,
+            fallback_providers,
+        )
+        .with_event_bus(event_bus.clone()),
+    );
     tracing::info!("LLM gateway ready (BYOK)");
 
     // ── Browser Pool ───────────────────────────────────────────────────────
@@ -359,22 +362,22 @@ async fn main() -> Result<()> {
         .register(Arc::new(tools::mcp_session::McpSessionTool::new().with_install_store(connector_installs.clone())));
 
     // Wire stores into external DB and API tools
+    tool_registry
+        .register(Arc::new(tools::external_db::ExternalDbTool::with_install_store(connector_installs.clone())));
     tool_registry.register(Arc::new(
-        tools::external_db::ExternalDbTool::with_install_store(connector_installs.clone())
+        tools::external_api::ExternalApiTool::new().with_stores(connector_installs.clone(), store.clone()),
     ));
-    tool_registry.register(Arc::new(
-        tools::external_api::ExternalApiTool::new()
-            .with_stores(connector_installs.clone(), store.clone())
-    ));
-    tool_registry.register(Arc::new(
-        tools::run_registered_wasm::RunRegisteredWasmTool::new().with_store(store.clone())
-    ));
+    tool_registry
+        .register(Arc::new(tools::run_registered_wasm::RunRegisteredWasmTool::new().with_store(store.clone())));
 
     // Re-register all built-in connector tools with the install store so stored
     // OAuth tokens / API keys are injected automatically into mcp_session calls.
     // This overwrites the no-store versions registered by default_registry().
     tools::connector_tool::register_all_connectors(&mut tool_registry, Some(connector_installs.clone()));
-    tracing::info!("{} connector tools registered with OAuth token injection", tools::connector_tool::ALL_CONNECTORS.len());
+    tracing::info!(
+        "{} connector tools registered with OAuth token injection",
+        tools::connector_tool::ALL_CONNECTORS.len()
+    );
 
     let tool_registry = Arc::new(tool_registry);
     tracing::info!("{} tools registered", tool_registry.list().len());
@@ -419,7 +422,8 @@ async fn main() -> Result<()> {
 
     // AgentManager uses WorkspaceManager to create workspaces
     // agent_services provides SLA start-on-create per job type
-    let manager = Arc::new(AgentManager::new(store.clone(), workspace_manager.clone(), agent_services.clone(), gateway.clone()));
+    let manager =
+        Arc::new(AgentManager::new(store.clone(), workspace_manager.clone(), agent_services.clone(), gateway.clone()));
 
     // ── Scheduler ──────────────────────────────────────────────────────────
     let scheduler = Arc::new(DbPollingScheduler::new(

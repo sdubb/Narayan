@@ -945,7 +945,8 @@ pub async fn list_workspace_files(
         "agent_id": agent_id,
         "files": files,
         "count": files.len()
-    })).into_response()
+    }))
+    .into_response()
 }
 
 fn collect_workspace_files(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<serde_json::Value>) {
@@ -964,12 +965,10 @@ fn collect_workspace_files(root: &std::path::Path, dir: &std::path::Path, out: &
                 }));
             } else {
                 let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-                let modified = entry.metadata().ok()
-                    .and_then(|m| m.modified().ok())
-                    .map(|t| {
-                        let dt: chrono::DateTime<chrono::Utc> = t.into();
-                        dt.to_rfc3339()
-                    });
+                let modified = entry.metadata().ok().and_then(|m| m.modified().ok()).map(|t| {
+                    let dt: chrono::DateTime<chrono::Utc> = t.into();
+                    dt.to_rfc3339()
+                });
                 out.push(serde_json::json!({
                     "name": entry.file_name().to_string_lossy(),
                     "path": rel,
@@ -1043,23 +1042,27 @@ pub async fn list_agent_children(
 
     match state.store.get_agent_children(&tenant.tenant_id, &agent_id).await {
         Ok(children) => {
-            let body: Vec<serde_json::Value> = children.iter().map(|c| {
-                let step_count = c.plan.as_ref().map(|p| p.steps.len()).unwrap_or(0);
-                serde_json::json!({
-                    "id": c.id,
-                    "goal": c.goal,
-                    "status": format!("{:?}", c.status).to_lowercase(),
-                    "current_step": c.current_step,
-                    "step_count": step_count,
-                    "created_at": c.created_at.to_rfc3339(),
-                    "updated_at": c.updated_at.to_rfc3339(),
+            let body: Vec<serde_json::Value> = children
+                .iter()
+                .map(|c| {
+                    let step_count = c.plan.as_ref().map(|p| p.steps.len()).unwrap_or(0);
+                    serde_json::json!({
+                        "id": c.id,
+                        "goal": c.goal,
+                        "status": format!("{:?}", c.status).to_lowercase(),
+                        "current_step": c.current_step,
+                        "step_count": step_count,
+                        "created_at": c.created_at.to_rfc3339(),
+                        "updated_at": c.updated_at.to_rfc3339(),
+                    })
                 })
-            }).collect();
+                .collect();
             Json(serde_json::json!({
                 "parent_id": agent_id,
                 "children": body,
                 "count": body.len()
-            })).into_response()
+            }))
+            .into_response()
         }
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
@@ -1090,19 +1093,18 @@ pub async fn approve_plan(
     // ── Load agent ──────────────────────────────────────────────────────────
     let mut agent = match state.store.get_agent(&tenant.tenant_id, &agent_id).await {
         Ok(Some(a)) => a,
-        Ok(None)    => return err(StatusCode::NOT_FOUND, "agent not found"),
-        Err(e)      => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        Ok(None) => return err(StatusCode::NOT_FOUND, "agent not found"),
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     };
 
     if agent.status != AgentStatus::PlanApprovalNeeded {
         return err(StatusCode::BAD_REQUEST, "agent is not awaiting plan approval");
     }
 
-    let approved     = body.get("approved").and_then(|v| v.as_bool()).unwrap_or(false);
-    let revise       = body.get("revise").and_then(|v| v.as_bool()).unwrap_or(false);
-    let feedback     = body.get("feedback").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let edited_steps = body.get("edited_steps")
-        .and_then(|v| if v.is_array() { Some(v.clone()) } else { None });
+    let approved = body.get("approved").and_then(|v| v.as_bool()).unwrap_or(false);
+    let revise = body.get("revise").and_then(|v| v.as_bool()).unwrap_or(false);
+    let feedback = body.get("feedback").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let edited_steps = body.get("edited_steps").and_then(|v| if v.is_array() { Some(v.clone()) } else { None });
 
     if approved {
         // ── Approve path ────────────────────────────────────────────────────
@@ -1110,17 +1112,14 @@ pub async fn approve_plan(
         // Server-side credential re-check (guards against race where the user
         // clicks Approve before finishing connector setup).
         let tenant_config = match state.tenant_store.get_config(&tenant.tenant_id).await {
-            Ok(c)  => c,
+            Ok(c) => c,
             Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
         };
-        let installed_creds: Vec<String> =
-            tenant_config.credentials.keys().map(|k| k.clone()).collect();
+        let installed_creds: Vec<String> = tenant_config.credentials.keys().map(|k| k.clone()).collect();
 
         if let Some(plan) = agent.plan.as_ref() {
-            let planned_tools: Vec<Option<String>> =
-                plan.steps.iter().map(|s| s.tool.clone()).collect();
-            let descs: Vec<String> =
-                plan.steps.iter().map(|s| s.description.clone()).collect();
+            let planned_tools: Vec<Option<String>> = plan.steps.iter().map(|s| s.tool.clone()).collect();
+            let descs: Vec<String> = plan.steps.iter().map(|s| s.description.clone()).collect();
             let (missing, _) = crate::tools::credential_requirements::scan_plan_credentials(
                 &planned_tools,
                 &installed_creds,
@@ -1145,16 +1144,12 @@ pub async fn approve_plan(
             if let Some(plan) = agent.plan.as_ref() {
                 let mut plan_json = serde_json::to_value(plan).unwrap_or_default();
                 plan_json["steps"] = steps;
-                if let Err(e) = state.store
-                    .update_agent_plan(&tenant.tenant_id, &agent_id, &plan_json)
-                    .await
-                {
+                if let Err(e) = state.store.update_agent_plan(&tenant.tenant_id, &agent_id, &plan_json).await {
                     return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
                 }
-                state.event_bus_handle.publish(crate::events::AgentEvent::PlanEdited {
-                    agent_id: agent_id.clone(),
-                    step_count,
-                });
+                state
+                    .event_bus_handle
+                    .publish(crate::events::AgentEvent::PlanEdited { agent_id: agent_id.clone(), step_count });
             }
         }
 
@@ -1164,28 +1159,28 @@ pub async fn approve_plan(
             agent.metadata["execution_context"] = serde_json::json!(feedback);
         }
 
-        agent.status    = AgentStatus::Waiting;
-        agent.next_run  = chrono::Utc::now();
+        agent.status = AgentStatus::Waiting;
+        agent.next_run = chrono::Utc::now();
         agent.updated_at = chrono::Utc::now();
 
         if let Err(e) = state.store.upsert_agent(&agent).await {
             return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
         }
 
-        state.event_bus_handle.publish(crate::events::AgentEvent::PlanApproved {
-            agent_id: agent_id.clone(),
-        });
+        state.event_bus_handle.publish(crate::events::AgentEvent::PlanApproved { agent_id: agent_id.clone() });
 
-        let _ = state.audit_log.append(
-            &tenant.tenant_id,
-            Some(&agent_id),
-            crate::audit::AuditAction::PlanApproved,
-            serde_json::json!({"feedback": feedback}),
-            None,
-        ).await;
+        let _ = state
+            .audit_log
+            .append(
+                &tenant.tenant_id,
+                Some(&agent_id),
+                crate::audit::AuditAction::PlanApproved,
+                serde_json::json!({"feedback": feedback}),
+                None,
+            )
+            .await;
 
         Json(serde_json::json!({"status": "approved", "agent_id": agent_id})).into_response()
-
     } else {
         // ── Reject / revise path ────────────────────────────────────────────
 
@@ -1195,20 +1190,20 @@ pub async fn approve_plan(
         // Fire PlanRejected immediately so the frontend can show "Replanning..."
         // before any state change lands.
         state.event_bus_handle.publish(crate::events::AgentEvent::PlanRejected {
-            agent_id:       agent_id.clone(),
+            agent_id: agent_id.clone(),
             rejection_count: new_count,
-            max_rejections:  MAX_REJECTIONS,
-            feedback:        feedback.clone(),
+            max_rejections: MAX_REJECTIONS,
+            feedback: feedback.clone(),
             will_replan,
         });
 
         agent.plan_rejection_count = new_count;
-        agent.metadata["revise"]   = serde_json::json!(revise);
+        agent.metadata["revise"] = serde_json::json!(revise);
 
         if !will_replan {
             // Hard stop after MAX_REJECTIONS
-            agent.status       = AgentStatus::Failed;
-            agent.updated_at   = chrono::Utc::now();
+            agent.status = AgentStatus::Failed;
+            agent.updated_at = chrono::Utc::now();
             let stop_msg = format!("Plan rejected {} times — stopping.", MAX_REJECTIONS);
             agent.set_final_answer(&stop_msg);
 
@@ -1218,20 +1213,23 @@ pub async fn approve_plan(
 
             state.event_bus_handle.publish(crate::events::AgentEvent::GoalFailed {
                 agent_id: agent_id.clone(),
-                reason:   stop_msg.clone(),
+                reason: stop_msg.clone(),
             });
 
-            let _ = state.audit_log.append(
-                &tenant.tenant_id,
-                Some(&agent_id),
-                crate::audit::AuditAction::PlanRejected,
-                serde_json::json!({
-                    "feedback":         feedback,
-                    "rejection_count":  new_count,
-                    "final_rejection":  true,
-                }),
-                None,
-            ).await;
+            let _ = state
+                .audit_log
+                .append(
+                    &tenant.tenant_id,
+                    Some(&agent_id),
+                    crate::audit::AuditAction::PlanRejected,
+                    serde_json::json!({
+                        "feedback":         feedback,
+                        "rejection_count":  new_count,
+                        "final_rejection":  true,
+                    }),
+                    None,
+                )
+                .await;
 
             return Json(serde_json::json!({
                 "status":          "rejected",
@@ -1245,26 +1243,29 @@ pub async fn approve_plan(
         // Replan: clear the plan and store feedback for the planner prompt.
         agent.plan = None;
         agent.metadata["plan_rejection_feedback"] = serde_json::json!(feedback);
-        agent.status    = AgentStatus::Waiting;
-        agent.next_run  = chrono::Utc::now();
+        agent.status = AgentStatus::Waiting;
+        agent.next_run = chrono::Utc::now();
         agent.updated_at = chrono::Utc::now();
 
         if let Err(e) = state.store.upsert_agent(&agent).await {
             return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
         }
 
-        let _ = state.audit_log.append(
-            &tenant.tenant_id,
-            Some(&agent_id),
-            crate::audit::AuditAction::PlanRejected,
-            serde_json::json!({
-                "feedback":        feedback,
-                "rejection_count": new_count,
-                "will_replan":     true,
-                "revise":          revise,
-            }),
-            None,
-        ).await;
+        let _ = state
+            .audit_log
+            .append(
+                &tenant.tenant_id,
+                Some(&agent_id),
+                crate::audit::AuditAction::PlanRejected,
+                serde_json::json!({
+                    "feedback":        feedback,
+                    "rejection_count": new_count,
+                    "will_replan":     true,
+                    "revise":          revise,
+                }),
+                None,
+            )
+            .await;
 
         Json(serde_json::json!({
             "status":          "rejected",
@@ -1377,13 +1378,8 @@ pub async fn submit_clarification(
                 .unwrap_or_default();
 
             for (index, question) in questions.iter().enumerate() {
-                if question.required
-                    && body.answers.get(index).map(|answer| answer.trim().is_empty()).unwrap_or(true)
-                {
-                    return err(
-                        StatusCode::BAD_REQUEST,
-                        format!("answer required for '{}'", question.prompt),
-                    );
+                if question.required && body.answers.get(index).map(|answer| answer.trim().is_empty()).unwrap_or(true) {
+                    return err(StatusCode::BAD_REQUEST, format!("answer required for '{}'", question.prompt));
                 }
             }
 
@@ -1419,7 +1415,8 @@ pub async fn submit_clarification(
 
             let sanitized_answers = crate::agent::ClarificationAnswers {
                 answers: safe_answers.clone(),
-                freeform: if questions.iter().any(|question| question.secret || question.store_as_credential.is_some()) {
+                freeform: if questions.iter().any(|question| question.secret || question.store_as_credential.is_some())
+                {
                     None
                 } else {
                     body.freeform.clone()
@@ -1428,8 +1425,12 @@ pub async fn submit_clarification(
 
             // Persist answers into metadata so the loop can use them without leaking secrets.
             agent.metadata["clarification_answers"] = serde_json::to_value(&sanitized_answers).unwrap_or_default();
-            agent.metadata["last_user_input_context"] =
-                serde_json::json!(safe_answers.iter().filter(|answer| !answer.is_empty()).cloned().collect::<Vec<_>>().join("\n"));
+            agent.metadata["last_user_input_context"] = serde_json::json!(safe_answers
+                .iter()
+                .filter(|answer| !answer.is_empty())
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n"));
             if let Some(metadata) = agent.metadata.as_object_mut() {
                 metadata.remove("clarification_questions");
             }
@@ -1441,9 +1442,9 @@ pub async fn submit_clarification(
 
             match state.store.upsert_agent(&agent).await {
                 Ok(_) => {
-                    state.event_bus_handle.publish(crate::events::AgentEvent::ClarificationReceived {
-                        agent_id: agent.id.clone(),
-                    });
+                    state
+                        .event_bus_handle
+                        .publish(crate::events::AgentEvent::ClarificationReceived { agent_id: agent.id.clone() });
                     Json(serde_json::json!({ "acknowledged": true })).into_response()
                 }
                 Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
@@ -1793,8 +1794,8 @@ pub async fn connector_inbound(
             role.version,
             mapped_input,
             crate::state::TriggerSource::Webhook {
-                connector:   connector_type.clone(),
-                event_type:  event_type.clone(),
+                connector: connector_type.clone(),
+                event_type: event_type.clone(),
                 external_id: external_id_str.clone(),
             },
             role.status == crate::agent::definition::RoleStatus::Testing,
@@ -1823,10 +1824,10 @@ pub async fn connector_inbound(
         match state.manager.create_goal(tenant.tenant_id.clone(), goal_str.clone(), None).await {
             Ok((goal, agent)) => {
                 state.event_bus_handle.publish(crate::events::AgentEvent::ConnectorTrigger {
-                    agent_id:       agent.id.clone(),
+                    agent_id: agent.id.clone(),
                     connector_type: connector_type.clone(),
-                    event_type:     event_type.clone(),
-                    external_id:    external_id_str.clone(),
+                    event_type: event_type.clone(),
+                    external_id: external_id_str.clone(),
                 });
                 (Some(agent.id), Some(goal.id))
             }
@@ -1836,19 +1837,22 @@ pub async fn connector_inbound(
             }
         };
 
-    let _ = state.audit_log.append(
-        &tenant.tenant_id,
-        fallback_agent_id.as_deref(),
-        crate::audit::AuditAction::Custom,
-        serde_json::json!({
-            "action":                "connector_triggered",
-            "connector_type":        connector_type,
-            "event_type":            event_type,
-            "goal":                  goal_str,
-            "role_instances_created": role_instances_created.len(),
-        }),
-        None,
-    ).await;
+    let _ = state
+        .audit_log
+        .append(
+            &tenant.tenant_id,
+            fallback_agent_id.as_deref(),
+            crate::audit::AuditAction::Custom,
+            serde_json::json!({
+                "action":                "connector_triggered",
+                "connector_type":        connector_type,
+                "event_type":            event_type,
+                "goal":                  goal_str,
+                "role_instances_created": role_instances_created.len(),
+            }),
+            None,
+        )
+        .await;
 
     tracing::info!(
         connector             = %connector_type,
@@ -1869,7 +1873,8 @@ pub async fn connector_inbound(
             "fallback_agent_id":      fallback_agent_id,
             "fallback_goal_id":       fallback_goal_id,
         })),
-    ).into_response()
+    )
+        .into_response()
 }
 
 // ── Review queue endpoints ────────────────────────────────────────────────
@@ -2063,19 +2068,13 @@ pub async fn resolve_all_reviews(
 // ══════════════════════════════════════════════════════════════════════════
 
 /// GET /agent-definitions — list all agent definitions for the tenant
-pub async fn list_agent_definitions(
-    State(state): State<AppState>,
-    tenant: AuthenticatedTenant,
-) -> impl IntoResponse {
+pub async fn list_agent_definitions(State(state): State<AppState>, tenant: AuthenticatedTenant) -> impl IntoResponse {
     match state.store.list_agent_definitions(&tenant.tenant_id).await {
         Ok(defs) => {
             // Embed roles for each agent in a single batch to avoid N+1 queries from the client
             let mut result = Vec::with_capacity(defs.len());
             for def in defs {
-                let roles = state.store
-                    .list_roles_for_agent(&tenant.tenant_id, &def.id)
-                    .await
-                    .unwrap_or_default();
+                let roles = state.store.list_roles_for_agent(&tenant.tenant_id, &def.id).await.unwrap_or_default();
                 let mut v = serde_json::to_value(&def).unwrap_or_default();
                 if let Some(obj) = v.as_object_mut() {
                     obj.insert("roles".to_string(), serde_json::to_value(&roles).unwrap_or_default());
@@ -2096,8 +2095,8 @@ pub async fn get_agent_definition(
 ) -> impl IntoResponse {
     match state.store.get_agent_definition(&tenant.tenant_id, &id).await {
         Ok(Some(def)) => Json(def).into_response(),
-        Ok(None)      => err(StatusCode::NOT_FOUND, "agent definition not found"),
-        Err(e)        => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        Ok(None) => err(StatusCode::NOT_FOUND, "agent definition not found"),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
 
@@ -2110,12 +2109,16 @@ pub async fn update_agent_definition(
 ) -> impl IntoResponse {
     let mut def = match state.store.get_agent_definition(&tenant.tenant_id, &id).await {
         Ok(Some(d)) => d,
-        Ok(None)    => return err(StatusCode::NOT_FOUND, "agent definition not found"),
-        Err(e)      => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        Ok(None) => return err(StatusCode::NOT_FOUND, "agent definition not found"),
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     };
 
-    if let Some(name) = body["name"].as_str() { def.name = name.into(); }
-    if let Some(persona) = body["persona"].as_str() { def.persona = persona.into(); }
+    if let Some(name) = body["name"].as_str() {
+        def.name = name.into();
+    }
+    if let Some(persona) = body["persona"].as_str() {
+        def.persona = persona.into();
+    }
     if let Some(arr) = body["connectors"].as_array() {
         def.connectors = arr.iter().filter_map(|v| v.as_str().map(String::from)).collect();
     }
@@ -2124,16 +2127,16 @@ pub async fn update_agent_definition(
     }
     if let Some(s) = body["status"].as_str() {
         def.status = match s {
-            "active"   => crate::agent::definition::AgentDefinitionStatus::Active,
-            "paused"   => crate::agent::definition::AgentDefinitionStatus::Paused,
+            "active" => crate::agent::definition::AgentDefinitionStatus::Active,
+            "paused" => crate::agent::definition::AgentDefinitionStatus::Paused,
             "archived" => crate::agent::definition::AgentDefinitionStatus::Archived,
-            _          => crate::agent::definition::AgentDefinitionStatus::Draft,
+            _ => crate::agent::definition::AgentDefinitionStatus::Draft,
         };
     }
     def.updated_at = chrono::Utc::now();
 
     match state.store.upsert_agent_definition(&def).await {
-        Ok(_)  => Json(def).into_response(),
+        Ok(_) => Json(def).into_response(),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
@@ -2145,7 +2148,7 @@ pub async fn delete_agent_definition(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     match state.store.delete_agent_definition(&tenant.tenant_id, &id).await {
-        Ok(_)  => Json(serde_json::json!({ "deleted": true })).into_response(),
+        Ok(_) => Json(serde_json::json!({ "deleted": true })).into_response(),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
@@ -2162,7 +2165,7 @@ pub async fn list_agent_roles(
 ) -> impl IntoResponse {
     match state.store.list_roles_for_agent(&tenant.tenant_id, &agent_id).await {
         Ok(roles) => Json(serde_json::json!({ "roles": roles })).into_response(),
-        Err(e)    => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
 
@@ -2176,22 +2179,17 @@ pub async fn create_agent_role(
     // Verify agent exists
     let agent = match state.store.get_agent_definition(&tenant.tenant_id, &agent_id).await {
         Ok(Some(a)) => a,
-        Ok(None)    => return err(StatusCode::NOT_FOUND, "agent definition not found"),
-        Err(e)      => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        Ok(None) => return err(StatusCode::NOT_FOUND, "agent definition not found"),
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     };
 
     let name = match body["name"].as_str() {
         Some(n) => n.to_string(),
-        None    => return err(StatusCode::BAD_REQUEST, "'name' is required"),
+        None => return err(StatusCode::BAD_REQUEST, "'name' is required"),
     };
 
     let role_id = uuid::Uuid::new_v4().to_string();
-    let mut role = crate::agent::definition::AgentRole::new(
-        role_id,
-        agent_id.clone(),
-        tenant.tenant_id.clone(),
-        name,
-    );
+    let mut role = crate::agent::definition::AgentRole::new(role_id, agent_id.clone(), tenant.tenant_id.clone(), name);
 
     if let Some(purpose) = body["purpose"].as_str() {
         role.purpose = purpose.into();
@@ -2200,8 +2198,7 @@ pub async fn create_agent_role(
         role.execution_guidelines = guidelines.into();
     }
     if let Some(arr) = body["connectors"].as_array() {
-        let connectors: Vec<String> =
-            arr.iter().filter_map(|v| v.as_str().map(String::from)).collect();
+        let connectors: Vec<String> = arr.iter().filter_map(|v| v.as_str().map(String::from)).collect();
         // Validate subset of agent connectors
         let violations = agent.validate_role_connectors(&connectors);
         if !violations.is_empty() {
@@ -2238,17 +2235,15 @@ pub async fn create_agent_role(
     if let Some(scope) = body["memory_scope"].as_str() {
         role.memory_scope = match scope {
             "global" => crate::agent::definition::MemoryScope::Global,
-            "role"   => crate::agent::definition::MemoryScope::Role,
-            _        => crate::agent::definition::MemoryScope::Agent,
+            "role" => crate::agent::definition::MemoryScope::Role,
+            _ => crate::agent::definition::MemoryScope::Agent,
         };
     }
 
     match state.store.upsert_agent_role(&role).await {
         Ok(_) => {
             // Sync workforce event subscription if applicable
-            let _ = crate::events::workforce::sync_subscriptions_for_role(
-                &role, &state.store
-            ).await;
+            let _ = crate::events::workforce::sync_subscriptions_for_role(&role, &state.store).await;
             Json(role).into_response()
         }
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
@@ -2264,22 +2259,26 @@ pub async fn update_agent_role(
 ) -> impl IntoResponse {
     let agent = match state.store.get_agent_definition(&tenant.tenant_id, &agent_id).await {
         Ok(Some(a)) => a,
-        Ok(None)    => return err(StatusCode::NOT_FOUND, "agent definition not found"),
-        Err(e)      => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        Ok(None) => return err(StatusCode::NOT_FOUND, "agent definition not found"),
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     };
 
     let mut role = match state.store.get_agent_role(&tenant.tenant_id, &role_id).await {
         Ok(Some(r)) => r,
-        Ok(None)    => return err(StatusCode::NOT_FOUND, "role not found"),
-        Err(e)      => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        Ok(None) => return err(StatusCode::NOT_FOUND, "role not found"),
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     };
 
     if role.agent_id != agent_id {
         return err(StatusCode::FORBIDDEN, "role does not belong to this agent");
     }
 
-    if let Some(name)    = body["name"].as_str()    { role.name    = name.into(); }
-    if let Some(purpose) = body["purpose"].as_str() { role.purpose = purpose.into(); }
+    if let Some(name) = body["name"].as_str() {
+        role.name = name.into();
+    }
+    if let Some(purpose) = body["purpose"].as_str() {
+        role.purpose = purpose.into();
+    }
     if let Some(category) = body.get("role_category") {
         if let Ok(c) = serde_json::from_value::<crate::agent::definition::RoleCategory>(category.clone()) {
             role.role_category = c;
@@ -2289,8 +2288,7 @@ pub async fn update_agent_role(
         role.execution_guidelines = g.into();
     }
     if let Some(arr) = body["connectors"].as_array() {
-        let connectors: Vec<String> =
-            arr.iter().filter_map(|v| v.as_str().map(String::from)).collect();
+        let connectors: Vec<String> = arr.iter().filter_map(|v| v.as_str().map(String::from)).collect();
         let violations = agent.validate_role_connectors(&connectors);
         if !violations.is_empty() {
             return err(
@@ -2301,21 +2299,27 @@ pub async fn update_agent_role(
         role.connectors = connectors;
     }
     if let Some(trigger) = body.get("trigger") {
-        if let Ok(t) = serde_json::from_value(trigger.clone()) { role.trigger = t; }
+        if let Ok(t) = serde_json::from_value(trigger.clone()) {
+            role.trigger = t;
+        }
     }
     if let Some(output) = body.get("output_spec") {
-        if let Ok(o) = serde_json::from_value(output.clone()) { role.output_spec = o; }
+        if let Ok(o) = serde_json::from_value(output.clone()) {
+            role.output_spec = o;
+        }
     }
     if let Some(limits) = body.get("execution_limits") {
-        if let Ok(l) = serde_json::from_value(limits.clone()) { role.execution_limits = l; }
+        if let Ok(l) = serde_json::from_value(limits.clone()) {
+            role.execution_limits = l;
+        }
     }
     if let Some(s) = body["status"].as_str() {
         role.status = match s {
-            "testing"  => crate::agent::definition::RoleStatus::Testing,
-            "active"   => crate::agent::definition::RoleStatus::Active,
-            "paused"   => crate::agent::definition::RoleStatus::Paused,
+            "testing" => crate::agent::definition::RoleStatus::Testing,
+            "active" => crate::agent::definition::RoleStatus::Active,
+            "paused" => crate::agent::definition::RoleStatus::Paused,
             "archived" => crate::agent::definition::RoleStatus::Archived,
-            _          => crate::agent::definition::RoleStatus::Draft,
+            _ => crate::agent::definition::RoleStatus::Draft,
         };
     }
 
@@ -2323,9 +2327,7 @@ pub async fn update_agent_role(
 
     match state.store.upsert_agent_role(&role).await {
         Ok(_) => {
-            let _ = crate::events::workforce::sync_subscriptions_for_role(
-                &role, &state.store
-            ).await;
+            let _ = crate::events::workforce::sync_subscriptions_for_role(&role, &state.store).await;
             Json(role).into_response()
         }
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
@@ -2342,7 +2344,7 @@ pub async fn delete_agent_role(
     let sub_id = format!("wfsub-{}", role_id);
     let _ = state.store.deactivate_workforce_subscription(&tenant.tenant_id, &sub_id).await;
     match state.store.delete_agent_role(&tenant.tenant_id, &role_id).await {
-        Ok(_)  => Json(serde_json::json!({ "deleted": true })).into_response(),
+        Ok(_) => Json(serde_json::json!({ "deleted": true })).into_response(),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
@@ -2361,7 +2363,7 @@ pub async fn list_goal_instances(
     let limit = params.get("limit").and_then(|s| s.parse::<i64>().ok()).unwrap_or(50);
     match state.store.list_goal_instances_for_agent(&tenant.tenant_id, &agent_id, limit).await {
         Ok(instances) => Json(serde_json::json!({ "goal_instances": instances })).into_response(),
-        Err(e)        => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
 
@@ -2375,7 +2377,7 @@ pub async fn list_role_goal_instances(
     let limit = params.get("limit").and_then(|s| s.parse::<i64>().ok()).unwrap_or(50);
     match state.store.list_goal_instances_for_role(&tenant.tenant_id, &role_id, limit).await {
         Ok(instances) => Json(serde_json::json!({ "goal_instances": instances })).into_response(),
-        Err(e)        => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
 
@@ -2388,8 +2390,8 @@ pub async fn trigger_role(
 ) -> impl IntoResponse {
     let role = match state.store.get_agent_role(&tenant.tenant_id, &role_id).await {
         Ok(Some(r)) => r,
-        Ok(None)    => return err(StatusCode::NOT_FOUND, "role not found"),
-        Err(e)      => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        Ok(None) => return err(StatusCode::NOT_FOUND, "role not found"),
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     };
 
     if role.agent_id != agent_id {
@@ -2410,14 +2412,12 @@ pub async fn trigger_role(
         role_id.clone(),
         role.version,
         input_data,
-        crate::state::TriggerSource::Manual {
-            created_by: tenant.tenant_id.clone(),
-        },
+        crate::state::TriggerSource::Manual { created_by: tenant.tenant_id.clone() },
         role.status == crate::agent::definition::RoleStatus::Testing,
     );
 
     match state.store.upsert_goal_instance(&gi).await {
-        Ok(_)  => Json(serde_json::json!({ "goal_instance_id": gi.id, "status": "pending" })).into_response(),
+        Ok(_) => Json(serde_json::json!({ "goal_instance_id": gi.id, "status": "pending" })).into_response(),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
@@ -2444,17 +2444,15 @@ pub async fn get_goal_instance_detail(
             "created_at":              gi.created_at,
             "updated_at":              gi.updated_at,
             "completed_at":            gi.completed_at,
-        })).into_response(),
+        }))
+        .into_response(),
         Ok(None) => err(StatusCode::NOT_FOUND, "goal instance not found"),
-        Err(e)   => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
 
 /// GET /savings — tenant-wide ROI summary
-pub async fn get_savings_summary(
-    State(state): State<AppState>,
-    tenant: AuthenticatedTenant,
-) -> impl IntoResponse {
+pub async fn get_savings_summary(State(state): State<AppState>, tenant: AuthenticatedTenant) -> impl IntoResponse {
     match state.store.get_tenant_savings_summary(&tenant.tenant_id).await {
         Ok(summary) => Json(serde_json::json!({
             "total_runs":            summary.total_runs,
@@ -2463,7 +2461,8 @@ pub async fn get_savings_summary(
             "total_ai_cost_usd":     summary.total_ai_cost_usd,
             "roi_multiple":          summary.roi_multiple,
             "by_role":               summary.by_role,
-        })).into_response(),
+        }))
+        .into_response(),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
@@ -2473,13 +2472,10 @@ pub async fn get_savings_summary(
 // ══════════════════════════════════════════════════════════════════════════
 
 /// GET /tenant-connectors — list all custom connectors for the tenant
-pub async fn list_tenant_connectors(
-    State(state): State<AppState>,
-    tenant: AuthenticatedTenant,
-) -> impl IntoResponse {
+pub async fn list_tenant_connectors(State(state): State<AppState>, tenant: AuthenticatedTenant) -> impl IntoResponse {
     match state.store.list_tenant_connectors(&tenant.tenant_id).await {
         Ok(connectors) => Json(serde_json::json!({ "connectors": connectors })).into_response(),
-        Err(e)         => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
 
@@ -2490,7 +2486,7 @@ pub async fn delete_tenant_connector(
     Path(name): Path<String>,
 ) -> impl IntoResponse {
     match state.store.delete_tenant_connector(&tenant.tenant_id, &name).await {
-        Ok(_)  => Json(serde_json::json!({ "deleted": true })).into_response(),
+        Ok(_) => Json(serde_json::json!({ "deleted": true })).into_response(),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
@@ -2502,10 +2498,7 @@ pub struct WasmRunQuery {
 }
 
 /// GET /tenant-wasm-tools — list all registered tenant WASM tools (metadata only).
-pub async fn list_tenant_wasm_tools(
-    State(state): State<AppState>,
-    tenant: AuthenticatedTenant,
-) -> impl IntoResponse {
+pub async fn list_tenant_wasm_tools(State(state): State<AppState>, tenant: AuthenticatedTenant) -> impl IntoResponse {
     match state.store.list_tenant_wasm_tools(&tenant.tenant_id).await {
         Ok(tools) => Json(serde_json::json!({ "tools": tools })).into_response(),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
@@ -2519,11 +2512,7 @@ pub async fn list_tenant_wasm_tool_runs(
     Query(query): Query<WasmRunQuery>,
 ) -> impl IntoResponse {
     let limit = query.limit.unwrap_or(50).clamp(1, 200);
-    match state
-        .store
-        .list_wasm_tool_run_audit(&tenant.tenant_id, query.tool_name.as_deref(), limit)
-        .await
-    {
+    match state.store.list_wasm_tool_run_audit(&tenant.tenant_id, query.tool_name.as_deref(), limit).await {
         Ok(runs) => Json(serde_json::json!({ "runs": runs })).into_response(),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
@@ -2552,10 +2541,7 @@ pub async fn register_tenant_wasm_tool(
         None => return err(StatusCode::BAD_REQUEST, "'name' is required"),
     };
     if !is_valid_wasm_tool_name(raw_name) {
-        return err(
-            StatusCode::BAD_REQUEST,
-            "invalid name: use 2-64 chars [a-zA-Z0-9_-], starting with alphanumeric",
-        );
+        return err(StatusCode::BAD_REQUEST, "invalid name: use 2-64 chars [a-zA-Z0-9_-], starting with alphanumeric");
     }
     let name = raw_name.to_ascii_lowercase();
 
@@ -2570,11 +2556,7 @@ pub async fn register_tenant_wasm_tool(
     if module_bytes.len() > MAX_TENANT_WASM_MODULE_BYTES {
         return err(
             StatusCode::BAD_REQUEST,
-            format!(
-                "WASM module too large: {} bytes (max {})",
-                module_bytes.len(),
-                MAX_TENANT_WASM_MODULE_BYTES
-            ),
+            format!("WASM module too large: {} bytes (max {})", module_bytes.len(), MAX_TENANT_WASM_MODULE_BYTES),
         );
     }
     if module_bytes.len() < 4 || &module_bytes[..4] != b"\0asm" {
@@ -2593,10 +2575,7 @@ pub async fn register_tenant_wasm_tool(
     }
     let has_entrypoint = exports.iter().any(|name| name == "_start" || name == "_initialize");
     if !has_entrypoint {
-        return err(
-            StatusCode::BAD_REQUEST,
-            "module must export '_start' or '_initialize' for run_registered_wasm",
-        );
+        return err(StatusCode::BAD_REQUEST, "module must export '_start' or '_initialize' for run_registered_wasm");
     }
 
     let permissions = body
@@ -2612,10 +2591,7 @@ pub async fn register_tenant_wasm_tool(
         .unwrap_or_default()
         .clamped();
     let enabled = body["enabled"].as_bool().unwrap_or(true);
-    let description = body["description"]
-        .as_str()
-        .unwrap_or("Tenant-registered WASM tool")
-        .to_string();
+    let description = body["description"].as_str().unwrap_or("Tenant-registered WASM tool").to_string();
 
     let existing = match state.store.get_tenant_wasm_tool(&tenant.tenant_id, &name).await {
         Ok(tool) => tool,
@@ -2623,14 +2599,8 @@ pub async fn register_tenant_wasm_tool(
     };
 
     let now = chrono::Utc::now();
-    let id = existing
-        .as_ref()
-        .map(|tool| tool.id.clone())
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let created_at = existing
-        .as_ref()
-        .map(|tool| tool.created_at.clone())
-        .unwrap_or(now);
+    let id = existing.as_ref().map(|tool| tool.id.clone()).unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let created_at = existing.as_ref().map(|tool| tool.created_at.clone()).unwrap_or(now);
     let version = existing.as_ref().map(|tool| tool.version).unwrap_or(1);
 
     let module_sha256 = {
@@ -2686,11 +2656,7 @@ pub async fn set_tenant_wasm_tool_enabled(
         None => return err(StatusCode::BAD_REQUEST, "'enabled' boolean is required"),
     };
 
-    if let Err(e) = state
-        .store
-        .set_tenant_wasm_tool_enabled(&tenant.tenant_id, &name, enabled)
-        .await
-    {
+    if let Err(e) = state.store.set_tenant_wasm_tool_enabled(&tenant.tenant_id, &name, enabled).await {
         return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
     }
 
@@ -2729,23 +2695,18 @@ pub async fn test_mcp_connection(
 ) -> impl IntoResponse {
     let server_url = match body["server_url"].as_str() {
         Some(u) => u.to_string(),
-        None    => return err(StatusCode::BAD_REQUEST, "'server_url' is required"),
+        None => return err(StatusCode::BAD_REQUEST, "'server_url' is required"),
     };
     let token = body["token"].as_str().map(String::from);
 
     // Attempt MCP tools/list to verify server is reachable
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .unwrap_or_default();
+    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(10)).build().unwrap_or_default();
 
-    let mut req = client.post(&server_url)
-        .header("Content-Type", "application/json")
-        .json(&serde_json::json!({
-            "jsonrpc": "2.0",
-            "method":  "tools/list",
-            "id":      1,
-        }));
+    let mut req = client.post(&server_url).header("Content-Type", "application/json").json(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "method":  "tools/list",
+        "id":      1,
+    }));
 
     if let Some(ref tok) = token {
         req = req.bearer_auth(tok);
@@ -2755,24 +2716,21 @@ pub async fn test_mcp_connection(
         Ok(resp) => {
             let status = resp.status().as_u16();
             let body: serde_json::Value = resp.json().await.unwrap_or_default();
-            let tools = body.get("result")
-                .and_then(|r| r.get("tools"))
-                .cloned()
-                .unwrap_or(serde_json::json!([]));
+            let tools = body.get("result").and_then(|r| r.get("tools")).cloned().unwrap_or(serde_json::json!([]));
 
             Json(serde_json::json!({
                 "reachable":    status < 400,
                 "status":       status,
                 "tools":        tools,
                 "tool_count":   tools.as_array().map(|a| a.len()).unwrap_or(0),
-            })).into_response()
+            }))
+            .into_response()
         }
-        Err(e) => {
-            Json(serde_json::json!({
-                "reachable": false,
-                "error":     e.to_string(),
-            })).into_response()
-        }
+        Err(e) => Json(serde_json::json!({
+            "reachable": false,
+            "error":     e.to_string(),
+        }))
+        .into_response(),
     }
 }
 
@@ -2782,26 +2740,32 @@ pub async fn register_mcp_connection(
     tenant: AuthenticatedTenant,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    let name       = match body["name"].as_str() { Some(n) => n.to_string(), None => return err(StatusCode::BAD_REQUEST, "'name' required") };
-    let server_url = match body["server_url"].as_str() { Some(u) => u.to_string(), None => return err(StatusCode::BAD_REQUEST, "'server_url' required") };
-    let token      = body.get("token").and_then(|v| v.as_str()).map(String::from);
-    let summary    = body["summary"].as_str().unwrap_or(&format!("MCP server at {}", server_url)).to_string();
+    let name = match body["name"].as_str() {
+        Some(n) => n.to_string(),
+        None => return err(StatusCode::BAD_REQUEST, "'name' required"),
+    };
+    let server_url = match body["server_url"].as_str() {
+        Some(u) => u.to_string(),
+        None => return err(StatusCode::BAD_REQUEST, "'server_url' required"),
+    };
+    let token = body.get("token").and_then(|v| v.as_str()).map(String::from);
+    let summary = body["summary"].as_str().unwrap_or(&format!("MCP server at {}", server_url)).to_string();
 
     // Save TenantConnector definition
     let tc = crate::agent::definition::TenantConnector {
-        id:                  uuid::Uuid::new_v4().to_string(),
-        tenant_id:           tenant.tenant_id.clone(),
-        name:                name.clone(),
-        category:            "connector/mcp".to_string(),
-        base_url:            server_url.clone(),
-        auth_type:           crate::agent::definition::ConnectorAuthType::Bearer,
+        id: uuid::Uuid::new_v4().to_string(),
+        tenant_id: tenant.tenant_id.clone(),
+        name: name.clone(),
+        category: "connector/mcp".to_string(),
+        base_url: server_url.clone(),
+        auth_type: crate::agent::definition::ConnectorAuthType::Bearer,
         auth_credential_key: token.as_ref().map(|_| name.clone()),
-        source:              crate::agent::definition::ConnectorSource::Manual,
-        source_docs:         None,
-        endpoints:           Vec::new(),
+        source: crate::agent::definition::ConnectorSource::Manual,
+        source_docs: None,
+        endpoints: Vec::new(),
         summary,
-        created_at:          chrono::Utc::now(),
-        updated_at:          chrono::Utc::now(),
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
     };
 
     if let Err(e) = state.store.upsert_tenant_connector(&tc).await {
@@ -2810,7 +2774,10 @@ pub async fn register_mcp_connection(
 
     // Store token in connector_installs
     if let Some(tok) = &token {
-        let _ = state.connector_installs.upsert_api_key(&tenant.tenant_id, &name, tok, serde_json::json!({"mcp_url": server_url})).await;
+        let _ = state
+            .connector_installs
+            .upsert_api_key(&tenant.tenant_id, &name, tok, serde_json::json!({"mcp_url": server_url}))
+            .await;
     }
 
     Json(serde_json::json!({ "registered": true, "name": name, "type": "mcp" })).into_response()
@@ -2822,17 +2789,17 @@ pub async fn test_api_connection(
     _tenant: AuthenticatedTenant,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    let base_url   = match body["base_url"].as_str() { Some(u) => u, None => return err(StatusCode::BAD_REQUEST, "'base_url' required") };
-    let token      = body.get("token").and_then(|v| v.as_str());
-    let auth_type  = body["auth_type"].as_str().unwrap_or("bearer");
-    let test_path  = body["test_path"].as_str().unwrap_or("/");
+    let base_url = match body["base_url"].as_str() {
+        Some(u) => u,
+        None => return err(StatusCode::BAD_REQUEST, "'base_url' required"),
+    };
+    let token = body.get("token").and_then(|v| v.as_str());
+    let auth_type = body["auth_type"].as_str().unwrap_or("bearer");
+    let test_path = body["test_path"].as_str().unwrap_or("/");
 
     let full_url = format!("{}{}", base_url.trim_end_matches('/'), test_path);
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .unwrap_or_default();
+    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(10)).build().unwrap_or_default();
 
     let mut req = client.get(&full_url);
     if let Some(tok) = token {
@@ -2842,7 +2809,7 @@ pub async fn test_api_connection(
                 req.header(header, tok)
             }
             "basic" => req.basic_auth(tok, Option::<&str>::None),
-            _       => req.bearer_auth(tok),
+            _ => req.bearer_auth(tok),
         };
     }
 
@@ -2854,9 +2821,10 @@ pub async fn test_api_connection(
                 "reachable": status < 500,
                 "status":    status,
                 "sample":    body,
-            })).into_response()
+            }))
+            .into_response()
         }
-        Err(e) => Json(serde_json::json!({ "reachable": false, "error": e.to_string() })).into_response()
+        Err(e) => Json(serde_json::json!({ "reachable": false, "error": e.to_string() })).into_response(),
     }
 }
 
@@ -2866,12 +2834,18 @@ pub async fn register_api_connection(
     tenant: AuthenticatedTenant,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    let name      = match body["name"].as_str() { Some(n) => n.to_string(), None => return err(StatusCode::BAD_REQUEST, "'name' required") };
-    let base_url  = match body["base_url"].as_str() { Some(u) => u.to_string(), None => return err(StatusCode::BAD_REQUEST, "'base_url' required") };
-    let summary   = body["summary"].as_str().unwrap_or(&name).to_string();
+    let name = match body["name"].as_str() {
+        Some(n) => n.to_string(),
+        None => return err(StatusCode::BAD_REQUEST, "'name' required"),
+    };
+    let base_url = match body["base_url"].as_str() {
+        Some(u) => u.to_string(),
+        None => return err(StatusCode::BAD_REQUEST, "'base_url' required"),
+    };
+    let summary = body["summary"].as_str().unwrap_or(&name).to_string();
     let auth_type = body["auth_type"].as_str().unwrap_or("bearer");
-    let token     = body.get("token").and_then(|v| v.as_str()).map(String::from);
-    let category  = body["category"].as_str().unwrap_or("custom").to_string();
+    let token = body.get("token").and_then(|v| v.as_str()).map(String::from);
+    let category = body["category"].as_str().unwrap_or("custom").to_string();
 
     let auth = match auth_type {
         "api_key_header" => {
@@ -2879,8 +2853,8 @@ pub async fn register_api_connection(
             crate::agent::definition::ConnectorAuthType::ApiKeyHeader { header_name: header.to_string() }
         }
         "basic" => crate::agent::definition::ConnectorAuthType::Basic,
-        "none"  => crate::agent::definition::ConnectorAuthType::None,
-        _       => crate::agent::definition::ConnectorAuthType::Bearer,
+        "none" => crate::agent::definition::ConnectorAuthType::None,
+        _ => crate::agent::definition::ConnectorAuthType::Bearer,
     };
 
     // Parse endpoints if provided (from OpenAPI or manual)
@@ -2896,19 +2870,19 @@ pub async fn register_api_connection(
     };
 
     let tc = crate::agent::definition::TenantConnector {
-        id:                  uuid::Uuid::new_v4().to_string(),
-        tenant_id:           tenant.tenant_id.clone(),
-        name:                name.clone(),
-        category:            format!("connector/{}", category),
+        id: uuid::Uuid::new_v4().to_string(),
+        tenant_id: tenant.tenant_id.clone(),
+        name: name.clone(),
+        category: format!("connector/{}", category),
         base_url,
-        auth_type:           auth,
+        auth_type: auth,
         auth_credential_key: token.as_ref().map(|_| name.clone()),
         source,
-        source_docs:         body.get("openapi_spec").and_then(|v| v.as_str()).map(String::from),
+        source_docs: body.get("openapi_spec").and_then(|v| v.as_str()).map(String::from),
         endpoints,
         summary,
-        created_at:          chrono::Utc::now(),
-        updated_at:          chrono::Utc::now(),
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
     };
 
     if let Err(e) = state.store.upsert_tenant_connector(&tc).await {
@@ -2930,10 +2904,13 @@ pub async fn test_db_connection(
 ) -> impl IntoResponse {
     let conn_str = match body["connection_string"].as_str() {
         Some(s) => s.to_string(),
-        None    => return err(StatusCode::BAD_REQUEST, "'connection_string' required"),
+        None => return err(StatusCode::BAD_REQUEST, "'connection_string' required"),
     };
 
-    if !conn_str.starts_with("postgres://") && !conn_str.starts_with("postgresql://") && !conn_str.starts_with("mysql://") {
+    if !conn_str.starts_with("postgres://")
+        && !conn_str.starts_with("postgresql://")
+        && !conn_str.starts_with("mysql://")
+    {
         return err(StatusCode::BAD_REQUEST, "Connection string must start with postgres:// or mysql://");
     }
 
@@ -2942,24 +2919,26 @@ pub async fn test_db_connection(
         match tokio::time::timeout(
             std::time::Duration::from_secs(10),
             PgPoolOptions::new().max_connections(1).connect(&conn_str),
-        ).await {
+        )
+        .await
+        {
             Ok(Ok(pool)) => {
                 // Get table count
-                let table_count: i64 = sqlx::query_scalar(
-                    "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public'"
-                )
-                .fetch_one(&pool)
-                .await
-                .unwrap_or(0);
+                let table_count: i64 =
+                    sqlx::query_scalar("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public'")
+                        .fetch_one(&pool)
+                        .await
+                        .unwrap_or(0);
 
                 Json(serde_json::json!({
                     "connected":   true,
                     "db_type":     "postgres",
                     "table_count": table_count,
-                })).into_response()
+                }))
+                .into_response()
             }
             Ok(Err(e)) => Json(serde_json::json!({ "connected": false, "error": e.to_string() })).into_response(),
-            Err(_)     => Json(serde_json::json!({ "connected": false, "error": "Connection timed out" })).into_response(),
+            Err(_) => Json(serde_json::json!({ "connected": false, "error": "Connection timed out" })).into_response(),
         }
     } else {
         Json(serde_json::json!({ "connected": false, "error": "MySQL support coming soon" })).into_response()
@@ -2972,8 +2951,14 @@ pub async fn register_db_connection(
     tenant: AuthenticatedTenant,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    let name        = match body["name"].as_str() { Some(n) => n.to_string(), None => return err(StatusCode::BAD_REQUEST, "'name' required") };
-    let conn_string = match body["connection_string"].as_str() { Some(s) => s.to_string(), None => return err(StatusCode::BAD_REQUEST, "'connection_string' required") };
+    let name = match body["name"].as_str() {
+        Some(n) => n.to_string(),
+        None => return err(StatusCode::BAD_REQUEST, "'name' required"),
+    };
+    let conn_string = match body["connection_string"].as_str() {
+        Some(s) => s.to_string(),
+        None => return err(StatusCode::BAD_REQUEST, "'connection_string' required"),
+    };
     let allow_writes = body["allow_writes"].as_bool().unwrap_or(false);
 
     let db_type = if conn_string.starts_with("postgres") { "postgres" } else { "mysql" };
@@ -2985,19 +2970,19 @@ pub async fn register_db_connection(
         Ok(_) => {
             // Also save to tenant_connectors for discovery
             let tc = crate::agent::definition::TenantConnector {
-                id:                  uuid::Uuid::new_v4().to_string(),
-                tenant_id:           tenant.tenant_id.clone(),
-                name:                name.clone(),
-                category:            "connector/database".to_string(),
-                base_url:            conn_string.split('@').last().unwrap_or("").to_string(),
-                auth_type:           crate::agent::definition::ConnectorAuthType::None,
+                id: uuid::Uuid::new_v4().to_string(),
+                tenant_id: tenant.tenant_id.clone(),
+                name: name.clone(),
+                category: "connector/database".to_string(),
+                base_url: conn_string.split('@').last().unwrap_or("").to_string(),
+                auth_type: crate::agent::definition::ConnectorAuthType::None,
                 auth_credential_key: Some(name.clone()),
-                source:              crate::agent::definition::ConnectorSource::Manual,
-                source_docs:         None,
-                endpoints:           Vec::new(),
+                source: crate::agent::definition::ConnectorSource::Manual,
+                source_docs: None,
+                endpoints: Vec::new(),
                 summary,
-                created_at:          chrono::Utc::now(),
-                updated_at:          chrono::Utc::now(),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
             };
             let _ = state.store.upsert_tenant_connector(&tc).await;
 
@@ -3006,7 +2991,8 @@ pub async fn register_db_connection(
                 "name":         name,
                 "type":         "database",
                 "allow_writes": allow_writes,
-            })).into_response()
+            }))
+            .into_response()
         }
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
@@ -3022,23 +3008,21 @@ pub async fn start_role_chat(
     tenant: AuthenticatedTenant,
     Path(role_id): Path<String>,
 ) -> impl IntoResponse {
-    let manager = crate::agent::RoleChatManager::new(
-        state.manager.gateway(),
-        Arc::clone(&state.store),
-    );
+    let manager = crate::agent::RoleChatManager::new(state.manager.gateway(), Arc::clone(&state.store));
 
     match manager.start(&tenant.tenant_id, &role_id).await {
         Ok((mut session, greeting)) => {
             // Store the opening message in conversation
-            session.conversation.push(crate::agent::role_chat::RoleChatMessage {
-                role: "assistant".into(), content: greeting.clone(),
-            });
+            session
+                .conversation
+                .push(crate::agent::role_chat::RoleChatMessage { role: "assistant".into(), content: greeting.clone() });
             let _ = state.store.upsert_role_chat_session(&session).await;
             Json(serde_json::json!({
                 "session_id": session.id,
                 "role_id":    role_id,
                 "message":    greeting,
-            })).into_response()
+            }))
+            .into_response()
         }
         Err(e) => err(StatusCode::NOT_FOUND, e.to_string()),
     }
@@ -3048,24 +3032,21 @@ pub async fn start_role_chat(
 pub async fn role_chat_turn(
     State(state): State<AppState>,
     tenant: AuthenticatedTenant,
-    Path((role_id, session_id)): Path<(String, String)>,
+    Path((_role_id, session_id)): Path<(String, String)>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let message = match body["message"].as_str() {
         Some(m) => m.to_string(),
-        None    => return err(StatusCode::BAD_REQUEST, "'message' required"),
+        None => return err(StatusCode::BAD_REQUEST, "'message' required"),
     };
 
     let mut session = match state.store.get_role_chat_session(&tenant.tenant_id, &session_id).await {
         Ok(Some(s)) => s,
-        Ok(None)    => return err(StatusCode::NOT_FOUND, "session not found"),
-        Err(e)      => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        Ok(None) => return err(StatusCode::NOT_FOUND, "session not found"),
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     };
 
-    let manager = crate::agent::RoleChatManager::new(
-        state.manager.gateway(),
-        Arc::clone(&state.store),
-    );
+    let manager = crate::agent::RoleChatManager::new(state.manager.gateway(), Arc::clone(&state.store));
 
     match manager.turn(&mut session, &message).await {
         Ok((reply, pending_change)) => {
@@ -3073,7 +3054,8 @@ pub async fn role_chat_turn(
             Json(serde_json::json!({
                 "reply":          reply,
                 "pending_change": pending_change,
-            })).into_response()
+            }))
+            .into_response()
         }
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
@@ -3097,17 +3079,14 @@ pub async fn role_chat_apply(
         match state.store.get_role_chat_session(&tenant.tenant_id, &session_id).await {
             Ok(Some(s)) => match s.pending_change {
                 Some(c) => c,
-                None    => return err(StatusCode::BAD_REQUEST, "no pending change in session"),
+                None => return err(StatusCode::BAD_REQUEST, "no pending change in session"),
             },
             Ok(None) => return err(StatusCode::NOT_FOUND, "session not found"),
-            Err(e)   => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+            Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
         }
     };
 
-    let manager = crate::agent::RoleChatManager::new(
-        state.manager.gateway(),
-        Arc::clone(&state.store),
-    );
+    let manager = crate::agent::RoleChatManager::new(state.manager.gateway(), Arc::clone(&state.store));
 
     match manager.apply_change(&tenant.tenant_id, &role_id, &change).await {
         Ok(updated_role) => {
@@ -3122,7 +3101,8 @@ pub async fn role_chat_apply(
                 "role_id":  updated_role.id,
                 "version":  updated_role.version,
                 "change":   change.description,
-            })).into_response()
+            }))
+            .into_response()
         }
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
@@ -3134,20 +3114,23 @@ pub async fn role_chat_apply(
 
 /// POST /plan-mode/sessions — start a new plan mode session
 /// GET /plan-mode/templates — list all 20 pre-built templates for the picker UI
-pub async fn list_plan_mode_templates(
-    _tenant: AuthenticatedTenant,
-) -> impl IntoResponse {
+pub async fn list_plan_mode_templates(_tenant: AuthenticatedTenant) -> impl IntoResponse {
     use crate::agent::templates::all_templates;
-    let list: Vec<serde_json::Value> = all_templates().iter().map(|t| serde_json::json!({
-        "id":                   t.id,
-        "name":                 t.name,
-        "description":          t.description,
-        "persona":              t.persona,
-        "category":             t.category,
-        "emoji":                t.emoji,
-        "required_connectors":  t.required_connectors,
-        "ask_steps":            t.ask_steps,
-    })).collect();
+    let list: Vec<serde_json::Value> = all_templates()
+        .iter()
+        .map(|t| {
+            serde_json::json!({
+                "id":                   t.id,
+                "name":                 t.name,
+                "description":          t.description,
+                "persona":              t.persona,
+                "category":             t.category,
+                "emoji":                t.emoji,
+                "required_connectors":  t.required_connectors,
+                "ask_steps":            t.ask_steps,
+            })
+        })
+        .collect();
     Json(serde_json::json!({ "templates": list })).into_response()
 }
 
@@ -3175,7 +3158,9 @@ pub async fn start_plan_mode_session(
     // If an existing agent_id is provided, load its definition instead of creating a new draft
     if let Some(existing_id) = body["agent_id"].as_str() {
         match state.store.get_agent_definition(&tenant.tenant_id, existing_id).await {
-            Ok(Some(existing)) => { session.draft_agent = existing; }
+            Ok(Some(existing)) => {
+                session.draft_agent = existing;
+            }
             _ => {}
         }
     }
@@ -3187,10 +3172,7 @@ pub async fn start_plan_mode_session(
     let first_message = if let Some(template_id) = body["template_id"].as_str() {
         if let Some(tmpl) = find_template(template_id) {
             // Build the pre-configured role
-            let mut role = (tmpl.build_role)(
-                &session.draft_agent.id,
-                &session.tenant_id,
-            );
+            let mut role = (tmpl.build_role)(&session.draft_agent.id, &session.tenant_id);
             role.name = tmpl.name.into();
             role.role_category = crate::agent::definition::RoleCategory::from_slug(tmpl.category);
             role.memory_scope = role.role_category.default_memory_scope();
@@ -3215,20 +3197,20 @@ pub async fn start_plan_mode_session(
             // These are the only questions the template hasn't pre-answered
             let step_names: Vec<&str> = tmpl.ask_steps.iter().copied().collect();
             let pending = build_template_clarification_steps(tmpl, &step_names);
-            session.pending_steps = pending.iter()
-                .filter_map(|s| serde_json::to_value(s).ok())
-                .collect();
+            session.pending_steps = pending.iter().filter_map(|s| serde_json::to_value(s).ok()).collect();
 
             // Check which required connectors are not yet installed
-            let installed: Vec<String> = state.connector_installs
-                .list_for_tenant(&session.tenant_id).await
+            let installed: Vec<String> = state
+                .connector_installs
+                .list_for_tenant(&session.tenant_id)
+                .await
                 .unwrap_or_default()
-                .into_iter().map(|c| c.connector_type).collect();
-
-            let missing: Vec<&str> = tmpl.required_connectors.iter()
-                .copied()
-                .filter(|&c| !installed.iter().any(|i| i == c))
+                .into_iter()
+                .map(|c| c.connector_type)
                 .collect();
+
+            let missing: Vec<&str> =
+                tmpl.required_connectors.iter().copied().filter(|&c| !installed.iter().any(|i| i == c)).collect();
 
             if !missing.is_empty() {
                 let connector_list = missing.join(", ");
@@ -3243,11 +3225,14 @@ pub async fn start_plan_mode_session(
                 )
             } else if !step_names.is_empty() {
                 // First question from the personalisation queue
-                session.pending_steps.first()
-                    .and_then(|s| s["question"].as_str().map(String::from))
-                    .unwrap_or_else(|| {
-                        format!("I've configured your **{}** agent. Does this look right? Say **yes** to save.", tmpl.name)
-                    })
+                session.pending_steps.first().and_then(|s| s["question"].as_str().map(String::from)).unwrap_or_else(
+                    || {
+                        format!(
+                            "I've configured your **{}** agent. Does this look right? Say **yes** to save.",
+                            tmpl.name
+                        )
+                    },
+                )
             } else {
                 // Nothing to ask — jump straight to review
                 session.phase = crate::agent::definition::PlanModePhase::Reviewing;
@@ -3260,7 +3245,14 @@ pub async fn start_plan_mode_session(
         "What should this agent do? Describe its job in plain language.".into()
     };
 
-    let save_agent   = state.store.upsert_agent_definition(&session.draft_agent).await;
+    let uploads = plan_mode_attachments_from_body(&body);
+    if !uploads.is_empty() {
+        if let Err(e) = manager.ingest_attachments(&mut session, uploads).await {
+            return err(StatusCode::BAD_REQUEST, e.to_string());
+        }
+    }
+
+    let save_agent = state.store.upsert_agent_definition(&session.draft_agent).await;
     let save_session = state.store.upsert_plan_mode_session(&session).await;
 
     match (save_agent, save_session) {
@@ -3270,7 +3262,9 @@ pub async fn start_plan_mode_session(
             "phase":       serde_json::to_value(&session.phase).unwrap_or_default(),
             "message":     first_message,
             "from_template": body["template_id"].as_str().is_some(),
-        })).into_response(),
+            "attachments": session.attachments.len(),
+        }))
+        .into_response(),
         (Err(e), _) | (_, Err(e)) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
@@ -3278,7 +3272,7 @@ pub async fn start_plan_mode_session(
 /// Build a short clarification step queue for the template fast-path.
 /// Only asks the questions the template genuinely can't pre-answer.
 fn build_template_clarification_steps(
-    tmpl:       &crate::agent::templates::RoleTemplate,
+    _tmpl: &crate::agent::templates::RoleTemplate,
     step_names: &[&str],
 ) -> Vec<crate::agent::plan_mode_steps::ClarificationStep> {
     use crate::agent::plan_mode_steps::{ClarificationStep, StepField};
@@ -3377,19 +3371,29 @@ pub async fn plan_mode_turn(
 ) -> impl IntoResponse {
     let message = match body["message"].as_str() {
         Some(m) => m.to_string(),
-        None    => return err(StatusCode::BAD_REQUEST, "'message' is required"),
+        None => return err(StatusCode::BAD_REQUEST, "'message' is required"),
     };
 
     // Load the full session from DB — conversation history included
     let session = match state.store.get_plan_mode_session(&tenant.tenant_id, &session_id).await {
         Ok(Some(s)) => s,
-        Ok(None)    => return err(StatusCode::NOT_FOUND, "plan mode session not found"),
-        Err(e)      => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        Ok(None) => return err(StatusCode::NOT_FOUND, "plan mode session not found"),
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     };
 
     let agent_id = session.draft_agent.id.clone();
 
     let manager = build_plan_mode_manager(&state);
+    let mut session = session;
+    let uploads = plan_mode_attachments_from_body(&body);
+    if !uploads.is_empty() {
+        if let Err(e) = manager.ingest_attachments(&mut session, uploads).await {
+            return err(StatusCode::BAD_REQUEST, e.to_string());
+        }
+        let _ = state.store.upsert_agent_definition(&session.draft_agent).await;
+        let _ = state.store.upsert_plan_mode_session(&session).await;
+    }
+
     match manager.turn(session, &message).await {
         Ok((reply, updated_session)) => {
             // Persist full updated session (conversation + phase + draft_role) to DB
@@ -3401,6 +3405,7 @@ pub async fn plan_mode_turn(
                 "phase":    serde_json::to_value(&updated_session.phase).unwrap_or_default(),
                 "agent_id": agent_id,
                 "complete": updated_session.phase == crate::agent::definition::PlanModePhase::Complete,
+                "attachments": updated_session.attachments.len(),
             }))
             .into_response()
         }
@@ -3418,15 +3423,12 @@ pub async fn save_plan_mode_session(
     // Load the persisted session — draft_role is stored there
     let session = match state.store.get_plan_mode_session(&tenant.tenant_id, &session_id).await {
         Ok(Some(s)) => s,
-        Ok(None)    => return err(StatusCode::NOT_FOUND, "plan mode session not found"),
-        Err(e)      => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        Ok(None) => return err(StatusCode::NOT_FOUND, "plan mode session not found"),
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     };
 
     if session.draft_role.is_none() {
-        return err(
-            StatusCode::BAD_REQUEST,
-            "session has no draft role — complete the conversation first",
-        );
+        return err(StatusCode::BAD_REQUEST, "session has no draft role — complete the conversation first");
     }
 
     let manager = build_plan_mode_manager(&state);
@@ -3458,10 +3460,15 @@ fn build_plan_mode_manager(state: &AppState) -> crate::agent::PlanModeManager {
     .with_skill_registry(Arc::clone(&state.skill_registry))
 }
 
+fn plan_mode_attachments_from_body(body: &serde_json::Value) -> Vec<crate::agent::PlanModeAttachmentUpload> {
+    body.get("attachments")
+        .and_then(|value| serde_json::from_value::<Vec<crate::agent::PlanModeAttachmentUpload>>(value.clone()).ok())
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
 
     fn sample_usage() -> AgentUsage {
         AgentUsage {

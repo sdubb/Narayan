@@ -99,14 +99,19 @@ impl Tool for RequestMoreToolsTool {
 
         // Validate against known categories
         const KNOWN: &[&str] = &[
-            "filesystem", "web", "code", "data", "memory",
-            "infra", "security", "automation", "integration", "communication",
+            "filesystem",
+            "web",
+            "code",
+            "data",
+            "memory",
+            "infra",
+            "security",
+            "automation",
+            "integration",
+            "communication",
         ];
-        let unknown: Vec<&str> = categories
-            .iter()
-            .filter(|c| !KNOWN.contains(&c.as_str()))
-            .map(String::as_str)
-            .collect();
+        let unknown: Vec<&str> =
+            categories.iter().filter(|c| !KNOWN.contains(&c.as_str())).map(String::as_str).collect();
 
         if !unknown.is_empty() {
             return Ok(ToolResult::err(format!(
@@ -148,10 +153,7 @@ mod tests {
     #[tokio::test]
     async fn test_unknown_category_returns_error() {
         let tool = RequestMoreToolsTool;
-        let result = tool
-            .execute(serde_json::json!({ "categories": ["connector/crm"] }))
-            .await
-            .unwrap();
+        let result = tool.execute(serde_json::json!({ "categories": ["connector/crm"] })).await.unwrap();
         // connector/ categories are handled by list_connectors_in_category, not here
         assert!(!result.success);
     }

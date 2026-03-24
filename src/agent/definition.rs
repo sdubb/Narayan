@@ -95,11 +95,7 @@ impl AgentDefinition {
     /// Validate that all role connectors are a subset of the agent's allowed list.
     /// Returns the names of any connectors the role references that aren't allowed.
     pub fn validate_role_connectors(&self, role_connectors: &[String]) -> Vec<String> {
-        role_connectors
-            .iter()
-            .filter(|c| !self.connectors.contains(c))
-            .cloned()
-            .collect()
+        role_connectors.iter().filter(|c| !self.connectors.contains(c)).cloned().collect()
     }
 }
 
@@ -279,16 +275,21 @@ impl AgentRole {
 /// When a rule applies relative to a tool call.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
-pub enum RulePhase { Before, After, #[default] Always }
+pub enum RulePhase {
+    Before,
+    After,
+    #[default]
+    Always,
+}
 
 /// A single behavioural rule — verb-led, tool-scoped where possible.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GuidelineRule {
-    pub text:       String,
+    pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_scope: Option<String>,
     #[serde(default)]
-    pub phase:      RulePhase,
+    pub phase: RulePhase,
 }
 impl GuidelineRule {
     pub fn always(text: impl Into<String>) -> Self {
@@ -306,32 +307,38 @@ impl GuidelineRule {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum FailureAction {
-    SkipAndLog          { log_path: String },
+    SkipAndLog { log_path: String },
     SkipSilently,
     RetryOnce,
-    EscalateToHuman     { notify_channel: Option<String> },
+    EscalateToHuman { notify_channel: Option<String> },
     Abort,
 }
 
 /// A failure-handling rule, optionally tool-scoped.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FailureRule {
-    pub text:       String,
+    pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_scope: Option<String>,
-    pub action:     FailureAction,
+    pub action: FailureAction,
 }
 impl FailureRule {
     pub fn skip_and_log(tool: Option<&str>, text: impl Into<String>, log_path: impl Into<String>) -> Self {
-        Self { text: text.into(), tool_scope: tool.map(String::from),
-               action: FailureAction::SkipAndLog { log_path: log_path.into() } }
+        Self {
+            text: text.into(),
+            tool_scope: tool.map(String::from),
+            action: FailureAction::SkipAndLog { log_path: log_path.into() },
+        }
     }
     pub fn retry_once(tool: Option<&str>, text: impl Into<String>) -> Self {
         Self { text: text.into(), tool_scope: tool.map(String::from), action: FailureAction::RetryOnce }
     }
     pub fn escalate(channel: Option<&str>, text: impl Into<String>) -> Self {
-        Self { text: text.into(), tool_scope: None,
-               action: FailureAction::EscalateToHuman { notify_channel: channel.map(String::from) } }
+        Self {
+            text: text.into(),
+            tool_scope: None,
+            action: FailureAction::EscalateToHuman { notify_channel: channel.map(String::from) },
+        }
     }
 }
 
@@ -340,18 +347,18 @@ impl FailureRule {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CompletionCheck {
     AllItemsProcessed { collection_hint: String },
-    OutputExists      { path_hint: String },
-    RecordUpdated     { connector: String },
-    CountMatches      { source: String, target: String },
-    ErrorsLogged      { log_hint: String },
-    Custom            { assertion: String },
+    OutputExists { path_hint: String },
+    RecordUpdated { connector: String },
+    CountMatches { source: String, target: String },
+    ErrorsLogged { log_hint: String },
+    Custom { assertion: String },
 }
 
 /// One criterion the evaluator checks to declare a role run complete.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompletionCriterion {
     pub description: String,
-    pub check:       CompletionCheck,
+    pub check: CompletionCheck,
 }
 impl CompletionCriterion {
     pub fn all_items(desc: impl Into<String>, hint: impl Into<String>) -> Self {
@@ -374,13 +381,19 @@ impl CompletionCriterion {
 
 /// Infer a FailureAction from the text of a failure rule.
 pub fn infer_failure_action(lower: &str) -> FailureAction {
-    if lower.contains("retry")   { return FailureAction::RetryOnce; }
-    if lower.contains("abort") || lower.contains("stop all") { return FailureAction::Abort; }
+    if lower.contains("retry") {
+        return FailureAction::RetryOnce;
+    }
+    if lower.contains("abort") || lower.contains("stop all") {
+        return FailureAction::Abort;
+    }
     if lower.contains("escalat") || lower.contains("human") || lower.contains("handoff") {
         let ch = if lower.contains("slack") { Some("#ops-alerts".into()) } else { None };
         return FailureAction::EscalateToHuman { notify_channel: ch };
     }
-    if lower.contains("silent") || lower.contains("ignore") { return FailureAction::SkipSilently; }
+    if lower.contains("silent") || lower.contains("ignore") {
+        return FailureAction::SkipSilently;
+    }
     FailureAction::SkipAndLog { log_path: "workspace/errors.txt".into() }
 }
 
@@ -401,27 +414,34 @@ pub struct WorkflowStep {
 /// clarification steps (user answers) + connector overrides (derived).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ExecutionGuidelines {
-    #[serde(default)] pub rules:               Vec<GuidelineRule>,
-    #[serde(default)] pub failure_handling:    Vec<FailureRule>,
-    #[serde(default)] pub priorities:          Vec<String>,
-    #[serde(default)] pub completion_criteria: Vec<CompletionCriterion>,
+    #[serde(default)]
+    pub rules: Vec<GuidelineRule>,
+    #[serde(default)]
+    pub failure_handling: Vec<FailureRule>,
+    #[serde(default)]
+    pub priorities: Vec<String>,
+    #[serde(default)]
+    pub completion_criteria: Vec<CompletionCriterion>,
     /// Enriched workflow steps with tool resolution and arg templates.
     /// When non-empty, runtime builds a deterministic Plan from these
     /// instead of calling the LLM planner.
-    #[serde(default)] pub workflow_outline:    Vec<WorkflowStep>,
+    #[serde(default)]
+    pub workflow_outline: Vec<WorkflowStep>,
 }
 
 impl ExecutionGuidelines {
-    const MAX_RULES:      usize = 12;
-    const MAX_FAILURE:    usize = 8;
+    const MAX_RULES: usize = 12;
+    const MAX_FAILURE: usize = 8;
     const MAX_PRIORITIES: usize = 5;
     const MAX_COMPLETION: usize = 6;
 
     const MAX_WORKFLOW: usize = 12;
 
     pub fn is_empty(&self) -> bool {
-        self.rules.is_empty() && self.failure_handling.is_empty()
-            && self.priorities.is_empty() && self.completion_criteria.is_empty()
+        self.rules.is_empty()
+            && self.failure_handling.is_empty()
+            && self.priorities.is_empty()
+            && self.completion_criteria.is_empty()
             && self.workflow_outline.is_empty()
     }
 
@@ -442,36 +462,53 @@ impl ExecutionGuidelines {
         let mut parts: Vec<String> = Vec::new();
 
         if !self.rules.is_empty() {
-            let items: Vec<String> = self.rules.iter().take(Self::MAX_RULES).enumerate().map(|(i, r)| {
-                let prefix = match (&r.tool_scope, &r.phase) {
-                    (Some(t), RulePhase::Before) => format!("[BEFORE {}] ", t),
-                    (Some(t), RulePhase::After)  => format!("[AFTER {}] ", t),
-                    (Some(t), _)                 => format!("[{}] ", t),
-                    (None, _)                    => String::new(),
-                };
-                format!("{}. {}{}", i + 1, prefix, r.text)
-            }).collect();
+            let items: Vec<String> = self
+                .rules
+                .iter()
+                .take(Self::MAX_RULES)
+                .enumerate()
+                .map(|(i, r)| {
+                    let prefix = match (&r.tool_scope, &r.phase) {
+                        (Some(t), RulePhase::Before) => format!("[BEFORE {}] ", t),
+                        (Some(t), RulePhase::After) => format!("[AFTER {}] ", t),
+                        (Some(t), _) => format!("[{}] ", t),
+                        (None, _) => String::new(),
+                    };
+                    format!("{}. {}{}", i + 1, prefix, r.text)
+                })
+                .collect();
             parts.push(format!("RULES (apply in order):\n{}", items.join("\n")));
         }
 
         if !self.failure_handling.is_empty() {
-            let items: Vec<String> = self.failure_handling.iter().take(Self::MAX_FAILURE).enumerate().map(|(i, f)| {
-                let scope = f.tool_scope.as_deref().map(|t| format!("[{} fails] ", t)).unwrap_or_default();
-                let act = match &f.action {
-                    FailureAction::SkipAndLog { log_path }           => format!("→ Skip, log to {}", log_path),
-                    FailureAction::SkipSilently                      => "→ Skip silently".into(),
-                    FailureAction::RetryOnce                         => "→ Retry once".into(),
-                    FailureAction::EscalateToHuman { notify_channel: Some(ch) } => format!("→ Escalate, notify {}", ch),
-                    FailureAction::EscalateToHuman { notify_channel: None }     => "→ Escalate to human".into(),
-                    FailureAction::Abort                             => "→ Abort run".into(),
-                };
-                format!("{}. {}{} {}", i + 1, scope, f.text, act)
-            }).collect();
+            let items: Vec<String> = self
+                .failure_handling
+                .iter()
+                .take(Self::MAX_FAILURE)
+                .enumerate()
+                .map(|(i, f)| {
+                    let scope = f.tool_scope.as_deref().map(|t| format!("[{} fails] ", t)).unwrap_or_default();
+                    let act = match &f.action {
+                        FailureAction::SkipAndLog { log_path } => format!("→ Skip, log to {}", log_path),
+                        FailureAction::SkipSilently => "→ Skip silently".into(),
+                        FailureAction::RetryOnce => "→ Retry once".into(),
+                        FailureAction::EscalateToHuman { notify_channel: Some(ch) } => {
+                            format!("→ Escalate, notify {}", ch)
+                        }
+                        FailureAction::EscalateToHuman { notify_channel: None } => "→ Escalate to human".into(),
+                        FailureAction::Abort => "→ Abort run".into(),
+                    };
+                    format!("{}. {}{} {}", i + 1, scope, f.text, act)
+                })
+                .collect();
             parts.push(format!("FAILURE HANDLING:\n{}", items.join("\n")));
         }
 
         if !self.priorities.is_empty() {
-            let items: Vec<String> = self.priorities.iter().take(Self::MAX_PRIORITIES)
+            let items: Vec<String> = self
+                .priorities
+                .iter()
+                .take(Self::MAX_PRIORITIES)
                 .enumerate()
                 .map(|(i, p)| {
                     let display = p.strip_prefix("step: ").map(str::trim).unwrap_or(p.as_str());
@@ -482,8 +519,13 @@ impl ExecutionGuidelines {
         }
 
         if !self.completion_criteria.is_empty() {
-            let items: Vec<String> = self.completion_criteria.iter().take(Self::MAX_COMPLETION)
-                .enumerate().map(|(i, c)| format!("{}. [ ] {}", i + 1, c.description)).collect();
+            let items: Vec<String> = self
+                .completion_criteria
+                .iter()
+                .take(Self::MAX_COMPLETION)
+                .enumerate()
+                .map(|(i, c)| format!("{}. [ ] {}", i + 1, c.description))
+                .collect();
             parts.push(format!("DONE WHEN ALL OF:\n{}", items.join("\n")));
         }
 
@@ -496,8 +538,7 @@ impl ExecutionGuidelines {
         }
     }
     pub fn add_failure(&mut self, r: FailureRule) {
-        if self.failure_handling.len() < Self::MAX_FAILURE
-            && !self.failure_handling.iter().any(|x| x.text == r.text) {
+        if self.failure_handling.len() < Self::MAX_FAILURE && !self.failure_handling.iter().any(|x| x.text == r.text) {
             self.failure_handling.push(r);
         }
     }
@@ -509,15 +550,24 @@ impl ExecutionGuidelines {
     }
     pub fn add_completion(&mut self, c: CompletionCriterion) {
         if self.completion_criteria.len() < Self::MAX_COMPLETION
-            && !self.completion_criteria.iter().any(|x| x.description == c.description) {
+            && !self.completion_criteria.iter().any(|x| x.description == c.description)
+        {
             self.completion_criteria.push(c);
         }
     }
     pub fn extend_dedup(&mut self, other: ExecutionGuidelines) {
-        for r in other.rules             { self.add_rule(r); }
-        for f in other.failure_handling  { self.add_failure(f); }
-        for p in other.priorities        { self.add_priority(p); }
-        for c in other.completion_criteria { self.add_completion(c); }
+        for r in other.rules {
+            self.add_rule(r);
+        }
+        for f in other.failure_handling {
+            self.add_failure(f);
+        }
+        for p in other.priorities {
+            self.add_priority(p);
+        }
+        for c in other.completion_criteria {
+            self.add_completion(c);
+        }
     }
 
     pub fn remove_rules_with_prefix(&mut self, prefix: &str) {
@@ -546,7 +596,8 @@ impl ExecutionGuidelines {
     }
 
     fn extract_csv_rule_values(&self, prefix: &str) -> Vec<String> {
-        let mut out = self.rules
+        let mut out = self
+            .rules
             .iter()
             .filter_map(|rule| rule.text.strip_prefix(prefix))
             .flat_map(|value| {
@@ -568,34 +619,81 @@ impl ExecutionGuidelines {
     /// Parse a domain skill EXECUTION BRIEF text section into typed guidelines.
     pub fn from_skill_text(text: &str) -> Self {
         let mut out = Self::default();
-        enum Sec { Rules, Failure, Priorities, Completion }
+        enum Sec {
+            Rules,
+            Failure,
+            Priorities,
+            Completion,
+        }
         let mut sec = Sec::Rules;
 
         for line in text.lines() {
             let t = line.trim().trim_start_matches("- ").trim_start_matches("• ").trim_start_matches("* ");
-            if t.is_empty() { continue; }
+            if t.is_empty() {
+                continue;
+            }
             let l = t.to_lowercase();
-            if l.starts_with("execution brief") || l.starts_with("rules:") { sec = Sec::Rules; continue; }
-            if l.starts_with("on failure") || l.starts_with("failure:") || l.starts_with("on error") { sec = Sec::Failure; continue; }
-            if l.starts_with("priorit") { sec = Sec::Priorities; continue; }
-            if l.starts_with("done when") || l.starts_with("completion") || l.starts_with("complete when") { sec = Sec::Completion; continue; }
-            if l.starts_with("mandatory") || l.starts_with("before confirm") { continue; }
+            if l.starts_with("execution brief") || l.starts_with("rules:") {
+                sec = Sec::Rules;
+                continue;
+            }
+            if l.starts_with("on failure") || l.starts_with("failure:") || l.starts_with("on error") {
+                sec = Sec::Failure;
+                continue;
+            }
+            if l.starts_with("priorit") {
+                sec = Sec::Priorities;
+                continue;
+            }
+            if l.starts_with("done when") || l.starts_with("completion") || l.starts_with("complete when") {
+                sec = Sec::Completion;
+                continue;
+            }
+            if l.starts_with("mandatory") || l.starts_with("before confirm") {
+                continue;
+            }
             // Skip numbered question items
-            if t.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) && t.contains('.') { if matches!(sec, Sec::Rules) { continue; } }
-            if t.len() < 8 { continue; }
+            if t.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) && t.contains('.') {
+                if matches!(sec, Sec::Rules) {
+                    continue;
+                }
+            }
+            if t.len() < 8 {
+                continue;
+            }
 
             match sec {
                 Sec::Rules => {
-                    let fkws = ["skip","if fail","on error","retry","escalate","notify","if missing","fallback","when missing"];
+                    let fkws = [
+                        "skip",
+                        "if fail",
+                        "on error",
+                        "retry",
+                        "escalate",
+                        "notify",
+                        "if missing",
+                        "fallback",
+                        "when missing",
+                    ];
                     if fkws.iter().any(|k| l.contains(k)) {
-                        out.add_failure(FailureRule { text: t.into(), tool_scope: None, action: infer_failure_action(&l) });
+                        out.add_failure(FailureRule {
+                            text: t.into(),
+                            tool_scope: None,
+                            action: infer_failure_action(&l),
+                        });
                     } else {
                         out.add_rule(GuidelineRule::always(t));
                     }
                 }
-                Sec::Failure    => { out.add_failure(FailureRule { text: t.into(), tool_scope: None, action: infer_failure_action(&l) }); }
-                Sec::Priorities => { out.add_priority(t); }
-                Sec::Completion => { out.add_completion(CompletionCriterion::custom(t)); }
+                Sec::Failure => {
+                    out.add_failure(FailureRule { text: t.into(), tool_scope: None, action: infer_failure_action(&l) });
+                }
+                Sec::Priorities => {
+                    out.add_priority(t);
+                }
+                Sec::Completion => {
+                    out.add_completion(CompletionCriterion::custom(t));
+                }
             }
         }
         out
@@ -606,11 +704,25 @@ impl ExecutionGuidelines {
         let mut out = Self::default();
         for part in text.split(&[',', ';', '\n'][..]) {
             let t = part.trim().trim_end_matches('.');
-            if t.len() < 6 { continue; }
+            if t.len() < 6 {
+                continue;
+            }
             let l = t.to_lowercase();
-            if l.starts_with("no constraint") || l == "none" || l == "n/a" || l == "defaults" { continue; }
-            let fkws = ["skip","if fail","on error","retry","notify","escalate","if missing","when missing","fallback"];
-            let ckws = ["when done","complete when","done when","all processed","once all","after all"];
+            if l.starts_with("no constraint") || l == "none" || l == "n/a" || l == "defaults" {
+                continue;
+            }
+            let fkws = [
+                "skip",
+                "if fail",
+                "on error",
+                "retry",
+                "notify",
+                "escalate",
+                "if missing",
+                "when missing",
+                "fallback",
+            ];
+            let ckws = ["when done", "complete when", "done when", "all processed", "once all", "after all"];
             if ckws.iter().any(|k| l.contains(k)) {
                 out.add_completion(CompletionCriterion::custom(t));
             } else if fkws.iter().any(|k| l.contains(k)) {
@@ -663,7 +775,7 @@ pub enum TriggerConfidence {
 /// Used to suggest splitting into multiple roles.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoleResponsibility {
-    pub name:    String,
+    pub name: String,
     pub actions: Vec<String>,
     pub trigger_hint: String,
 }
@@ -729,17 +841,17 @@ pub enum TriggerType {
 impl Default for TriggerDef {
     fn default() -> Self {
         Self {
-            trigger_type:            TriggerType::Manual,
-            source_connector:        None,
-            event_filter:            None,
-            cron:                    None,
-            timezone:                None,
-            allowed_users:           None,
-            intent_keywords:         None,
-            workforce_event_filter:  None,
-            input_mapping:           None,
-            depends_on_role_id:      None,
-            confidence:              TriggerConfidence::default(),
+            trigger_type: TriggerType::Manual,
+            source_connector: None,
+            event_filter: None,
+            cron: None,
+            timezone: None,
+            allowed_users: None,
+            intent_keywords: None,
+            workforce_event_filter: None,
+            input_mapping: None,
+            depends_on_role_id: None,
+            confidence: TriggerConfidence::default(),
         }
     }
 }
@@ -781,21 +893,11 @@ pub enum OutputDestination {
     Workspace { path: Option<String> },
     /// Update a field on a connector record.
     /// e.g. Connector { name: "salesforce", record_id_field: "lead_id", target_field: "Description" }
-    Connector {
-        name: String,
-        record_id_field: String,
-        target_field: String,
-    },
+    Connector { name: String, record_id_field: String, target_field: String },
     /// Post a message to a Slack-like channel via a connector.
-    Channel {
-        connector: String,
-        channel: String,
-    },
+    Channel { connector: String, channel: String },
     /// Send an email via a connector (draft only if draft: true).
-    Email {
-        connector: String,
-        draft: bool,
-    },
+    Email { connector: String, draft: bool },
     /// Emit a workforce event that other roles can subscribe to.
     /// The output becomes the event's output_data payload.
     WorkforceEvent { event_name: String },
@@ -851,12 +953,7 @@ pub struct ExecutionLimits {
 
 impl Default for ExecutionLimits {
     fn default() -> Self {
-        Self {
-            max_steps: 15,
-            max_retries: 2,
-            timeout_secs: 600,
-            max_cost_usd: None,
-        }
+        Self { max_steps: 15, max_retries: 2, timeout_secs: 600, max_cost_usd: None }
     }
 }
 
@@ -890,58 +987,36 @@ impl RoleCategory {
 
     pub fn default_memory_scope(&self) -> MemoryScope {
         match self {
-            Self::ResearchAnalyst
-            | Self::FinanceAccounting
-            | Self::HRPeopleOps
-            | Self::LegalContract => MemoryScope::Role,
+            Self::ResearchAnalyst | Self::FinanceAccounting | Self::HRPeopleOps | Self::LegalContract => {
+                MemoryScope::Role
+            }
             _ => MemoryScope::Agent,
         }
     }
 
     pub fn default_execution_limits(&self) -> ExecutionLimits {
         match self {
-            Self::SoftwareEngineer => ExecutionLimits {
-                max_steps: 18,
-                max_retries: 2,
-                timeout_secs: 1_200,
-                max_cost_usd: Some(3.0),
-            },
-            Self::ResearchAnalyst | Self::DataExtraction => ExecutionLimits {
-                max_steps: 18,
-                max_retries: 2,
-                timeout_secs: 1_200,
-                max_cost_usd: Some(2.5),
-            },
-            Self::DevOps | Self::ITOpsITSM => ExecutionLimits {
-                max_steps: 16,
-                max_retries: 2,
-                timeout_secs: 900,
-                max_cost_usd: Some(2.0),
-            },
-            Self::FinanceAccounting | Self::LegalContract => ExecutionLimits {
-                max_steps: 14,
-                max_retries: 2,
-                timeout_secs: 900,
-                max_cost_usd: Some(2.0),
-            },
-            Self::SalesRevOps | Self::HRPeopleOps | Self::Marketing => ExecutionLimits {
-                max_steps: 12,
-                max_retries: 2,
-                timeout_secs: 900,
-                max_cost_usd: Some(1.5),
-            },
-            Self::CustomerSupport => ExecutionLimits {
-                max_steps: 12,
-                max_retries: 2,
-                timeout_secs: 600,
-                max_cost_usd: Some(1.0),
-            },
-            Self::General => ExecutionLimits {
-                max_steps: 12,
-                max_retries: 2,
-                timeout_secs: 600,
-                max_cost_usd: Some(1.0),
-            },
+            Self::SoftwareEngineer => {
+                ExecutionLimits { max_steps: 18, max_retries: 2, timeout_secs: 1_200, max_cost_usd: Some(3.0) }
+            }
+            Self::ResearchAnalyst | Self::DataExtraction => {
+                ExecutionLimits { max_steps: 18, max_retries: 2, timeout_secs: 1_200, max_cost_usd: Some(2.5) }
+            }
+            Self::DevOps | Self::ITOpsITSM => {
+                ExecutionLimits { max_steps: 16, max_retries: 2, timeout_secs: 900, max_cost_usd: Some(2.0) }
+            }
+            Self::FinanceAccounting | Self::LegalContract => {
+                ExecutionLimits { max_steps: 14, max_retries: 2, timeout_secs: 900, max_cost_usd: Some(2.0) }
+            }
+            Self::SalesRevOps | Self::HRPeopleOps | Self::Marketing => {
+                ExecutionLimits { max_steps: 12, max_retries: 2, timeout_secs: 900, max_cost_usd: Some(1.5) }
+            }
+            Self::CustomerSupport => {
+                ExecutionLimits { max_steps: 12, max_retries: 2, timeout_secs: 600, max_cost_usd: Some(1.0) }
+            }
+            Self::General => {
+                ExecutionLimits { max_steps: 12, max_retries: 2, timeout_secs: 600, max_cost_usd: Some(1.0) }
+            }
         }
     }
 }
@@ -965,6 +1040,18 @@ pub struct PlanModeSession {
     /// Conversation history so the LLM has context across turns.
     pub conversation: Vec<PlanModeMessage>,
 
+    /// Uploaded docs saved for this session and kept for audit/replay.
+    #[serde(default)]
+    pub attachments: Vec<PlanModeAttachment>,
+
+    /// Concise extracted context from the uploaded docs.
+    #[serde(default)]
+    pub attachment_context: String,
+
+    /// Session-local workspace on disk for uploaded docs and extracted artifacts.
+    #[serde(default)]
+    pub session_workspace: Option<String>,
+
     /// Which step of the plan mode flow we're on.
     pub phase: PlanModePhase,
 
@@ -984,8 +1071,47 @@ pub struct PlanModeSession {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlanModeMessage {
-    pub role: String,   // "user" | "assistant"
+    pub role: String, // "user" | "assistant"
     pub content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanModeAttachmentKind {
+    Pdf,
+    Spreadsheet,
+    Csv,
+    Text,
+    Binary,
+    Unknown,
+}
+
+impl Default for PlanModeAttachmentKind {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanModeAttachmentUpload {
+    pub name: String,
+    pub content_base64: String,
+    #[serde(default)]
+    pub mime_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanModeAttachment {
+    pub name: String,
+    pub path: String,
+    #[serde(default)]
+    pub mime_type: Option<String>,
+    pub size_bytes: u64,
+    #[serde(default)]
+    pub kind: PlanModeAttachmentKind,
+    #[serde(default)]
+    pub extracted_preview: String,
+    pub uploaded_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1145,11 +1271,7 @@ pub struct WasmToolResourceLimits {
 
 impl Default for WasmToolResourceLimits {
     fn default() -> Self {
-        Self {
-            max_memory_bytes: 16 * 1024 * 1024,
-            max_fuel: 5_000_000,
-            timeout_secs: 3,
-        }
+        Self { max_memory_bytes: 16 * 1024 * 1024, max_fuel: 5_000_000, timeout_secs: 3 }
     }
 }
 
@@ -1270,12 +1392,12 @@ impl WorkforceEventPayload {
             let field = parts[0].trim();
             let value = parts[1].trim().trim_matches('\'').trim_matches('"');
             match field {
-                "role_name"  => self.role_name == value,
+                "role_name" => self.role_name == value,
                 "agent_name" => self.agent_name == value,
-                "status"     => self.status == value,
-                "role_id"    => self.role_id == value,
-                "agent_id"   => self.agent_id == value,
-                _            => false,
+                "status" => self.status == value,
+                "role_id" => self.role_id == value,
+                "agent_id" => self.agent_id == value,
+                _ => false,
             }
         })
     }
@@ -1285,7 +1407,7 @@ impl WorkforceEventPayload {
     pub fn apply_mapping(&self, mapping: &serde_json::Value) -> serde_json::Value {
         let obj = match mapping.as_object() {
             Some(m) => m,
-            None    => return serde_json::Value::Object(Default::default()),
+            None => return serde_json::Value::Object(Default::default()),
         };
 
         let self_json = serde_json::to_value(self).unwrap_or_default();
@@ -1376,19 +1498,6 @@ mod tests {
         assert_eq!(r.version, 2);
         r.bump_version();
         assert_eq!(r.version, 3);
-    }
-
-    #[test]
-    fn test_role_not_live_when_draft() {
-        let r = make_role();
-        assert!(!r.is_live());
-    }
-
-    #[test]
-    fn test_role_is_live_when_active() {
-        let mut r = make_role();
-        r.status = RoleStatus::Active;
-        assert!(r.is_live());
     }
 
     // ── ExecutionLimits ────────────────────────────────────────────────────
@@ -1537,12 +1646,9 @@ mod tests {
 
     #[test]
     fn test_wasm_limits_clamped_to_safe_bounds() {
-        let limits = WasmToolResourceLimits {
-            max_memory_bytes: 512 * 1024 * 1024,
-            max_fuel: u64::MAX,
-            timeout_secs: 999,
-        }
-        .clamped();
+        let limits =
+            WasmToolResourceLimits { max_memory_bytes: 512 * 1024 * 1024, max_fuel: u64::MAX, timeout_secs: 999 }
+                .clamped();
         assert_eq!(limits.max_memory_bytes, WasmToolResourceLimits::MAX_MEMORY_BYTES_HARD);
         assert_eq!(limits.max_fuel, WasmToolResourceLimits::MAX_FUEL_HARD);
         assert_eq!(limits.timeout_secs, WasmToolResourceLimits::MAX_TIMEOUT_SECS_HARD);

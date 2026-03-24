@@ -22,7 +22,6 @@ use axum::{
     Json,
 };
 use serde::Deserialize;
-use std::sync::Arc;
 
 use crate::api::routes::AppState;
 use crate::tenant::model::AuthenticatedTenant;

@@ -13,7 +13,6 @@
 
 use anyhow::Result;
 use chrono::Utc;
-use sqlx::PgPool;
 use std::sync::Arc;
 
 use crate::{
@@ -269,7 +268,7 @@ impl ConnectorPoller {
         http: &reqwest::Client,
         token: &str,
         settings: &serde_json::Value,
-        since: chrono::DateTime<Utc>,
+        _since: chrono::DateTime<Utc>,
     ) -> Result<Vec<String>> {
         let subdomain = settings["subdomain"].as_str().unwrap_or("");
         if subdomain.is_empty() {

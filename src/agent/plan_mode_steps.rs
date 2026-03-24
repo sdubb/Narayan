@@ -18,11 +18,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::agent::plan_mode::{intent_to_trigger, parse_trigger_from_text};
 use crate::agent::definition::{
-    AgentRole, CompletionCriterion, ExecutionGuidelines, FailureAction, FailureRule,
-    GuidelineRule, OutputDestination, OutputFormat, OutputSpec, RulePhase, TriggerConfidence,
-    TriggerDef, TriggerType,
+    AgentRole, CompletionCriterion, FailureRule, OutputDestination, OutputFormat, TriggerConfidence, TriggerDef,
+    TriggerType,
 };
 
 // ── Step field target ──────────────────────────────────────────────────────
@@ -63,25 +61,29 @@ pub enum StepField {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClarificationStep {
     /// Stable identifier, e.g. "trigger", "output_dest", "failure_slack".
-    pub id:       String,
+    pub id: String,
     /// The question shown to the user verbatim.
     pub question: String,
     /// Which field this step's answer writes to.
-    pub field:    StepField,
+    pub field: StepField,
     /// If true, the step can be skipped when the answer is already known.
     pub required: bool,
     /// Optional hint to the parser about what shape the answer takes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub hint:     Option<String>,
+    pub hint: Option<String>,
 }
 
 impl ClarificationStep {
     pub fn new(id: impl Into<String>, question: impl Into<String>, field: StepField) -> Self {
         Self { id: id.into(), question: question.into(), field, required: true, hint: None }
     }
-    pub fn optional(mut self) -> Self { self.required = false; self }
+    pub fn optional(mut self) -> Self {
+        self.required = false;
+        self
+    }
     pub fn with_hint(mut self, hint: impl Into<String>) -> Self {
-        self.hint = Some(hint.into()); self
+        self.hint = Some(hint.into());
+        self
     }
 }
 
@@ -90,9 +92,9 @@ impl ClarificationStep {
 /// Build the ordered step queue from the extracted intent.
 /// `existing_roles` — names of roles already on this agent (empty for new agents).
 pub fn generate_steps(
-    intent:         &serde_json::Value,
-    category:       &str,
-    installed:      &[String],
+    intent: &serde_json::Value,
+    category: &str,
+    _installed: &[String],
     existing_roles: &[String],
 ) -> Vec<ClarificationStep> {
     let mut steps: Vec<ClarificationStep> = Vec::new();
@@ -111,16 +113,18 @@ pub fn generate_steps(
                  **A) One role** — simpler, all in one\n\
                  **B) {} separate roles** (recommended) — easier to debug and monitor\n\n\
                  Which do you prefer? (A or B)",
-                names.len(), reason, names.len()
+                names.len(),
+                reason,
+                names.len()
             ),
             StepField::RoleSplit,
         ));
     }
 
     // ── Step 2: Trigger ────────────────────────────────────────────────
-    let trigger_hint       = intent["trigger_hint"].as_str().unwrap_or("manual");
+    let trigger_hint = intent["trigger_hint"].as_str().unwrap_or("manual");
     let trigger_confidence = intent["trigger_confidence"].as_str().unwrap_or("medium");
-    let is_workforce       = trigger_hint == "workforce_event" || trigger_hint == "after_role";
+    let is_workforce = trigger_hint == "workforce_event" || trigger_hint == "after_role";
 
     if is_workforce {
         // 2a: which role fires this?
@@ -132,11 +136,10 @@ pub fn generate_steps(
             )
         } else {
             "**Which role or event triggers this?** \
-             e.g. 'after the enrichment role completes' or 'when the previous role finishes'.".into()
+             e.g. 'after the enrichment role completes' or 'when the previous role finishes'."
+                .into()
         };
-        steps.push(ClarificationStep::new(
-            "workforce_filter", role_hint, StepField::WorkforceEventFilter,
-        ));
+        steps.push(ClarificationStep::new("workforce_filter", role_hint, StepField::WorkforceEventFilter));
 
         // 2b: what data to receive?
         steps.push(ClarificationStep::new(
@@ -160,13 +163,13 @@ pub fn generate_steps(
                         existing_roles.join(", ")
                     ),
                     StepField::DependsOnRole,
-                ).optional()
+                )
+                .optional(),
             );
         }
     } else if trigger_confidence != "high" {
-        let q = intent["trigger_confirmation"].as_str()
-            .map(String::from)
-            .unwrap_or_else(|| build_trigger_question(intent));
+        let q =
+            intent["trigger_confirmation"].as_str().map(String::from).unwrap_or_else(|| build_trigger_question(intent));
         steps.push(ClarificationStep::new("trigger", q, StepField::Trigger));
     }
 
@@ -188,8 +191,7 @@ pub fn generate_steps(
             _ =>
                 "Where should the output go, and in what format? e.g. 'workspace/output.md' or '#slack-channel'".into(),
         };
-        steps.push(ClarificationStep::new("output_dest", q, StepField::OutputDestination)
-            .with_hint(hint));
+        steps.push(ClarificationStep::new("output_dest", q, StepField::OutputDestination).with_hint(hint));
     }
 
     // ── Steps 4+: Domain steps ────────────────────────────────────────
@@ -206,7 +208,6 @@ pub fn generate_steps(
     steps
 }
 
-
 fn build_trigger_question(intent: &serde_json::Value) -> String {
     let hint = intent["trigger_hint"].as_str().unwrap_or("manual");
     let cron = intent["trigger_cron"].as_str();
@@ -216,9 +217,9 @@ fn build_trigger_question(intent: &serde_json::Value) -> String {
              (e.g. 'Every weekday at 8am New York time', 'First Monday of each month at 9am').",
             c
         ),
-        ("schedule", None) =>
-            "When exactly should this run? e.g. 'Every Monday at 9am', 'Daily at midnight UTC', \
-             'Every hour between 9am–6pm'.".into(),
+        ("schedule", None) => "When exactly should this run? e.g. 'Every Monday at 9am', 'Daily at midnight UTC', \
+             'Every hour between 9am–6pm'."
+            .into(),
         ("webhook", _) => {
             let src = intent["trigger_source"].as_str().unwrap_or("the connector");
             let evt = intent["trigger_event"].as_str().unwrap_or("an event");
@@ -232,7 +233,8 @@ fn build_trigger_question(intent: &serde_json::Value) -> String {
               - **Schedule**: 'Every Monday at 9am'\n\
               - **Webhook**: 'When a new Salesforce lead is created'\n\
               - **On-demand**: 'When I ask'\n\
-              - **After another role**: 'After the enrichment role finishes'".into(),
+              - **After another role**: 'After the enrichment role finishes'"
+            .into(),
     }
 }
 
@@ -241,11 +243,11 @@ fn build_trigger_question(intent: &serde_json::Value) -> String {
 /// Parse the user's answer for a given step and write the result to the role.
 /// Returns a summary of what was written (shown to the user as confirmation).
 pub fn parse_and_apply(
-    step:      &ClarificationStep,
-    answer:    &str,
-    role:      &mut AgentRole,
+    step: &ClarificationStep,
+    answer: &str,
+    role: &mut AgentRole,
     agent_constraints: &mut Vec<String>,
-    intent:    &serde_json::Value,
+    intent: &serde_json::Value,
     pending_roles_sink: &mut Option<Vec<serde_json::Value>>,
 ) -> String {
     let lower = answer.to_lowercase();
@@ -312,25 +314,32 @@ pub fn parse_and_apply(
         StepField::OutputDestination => {
             let (dest, desc) = parse_output_destination(answer, intent);
             role.output_spec.destination = dest;
-            if !desc.is_empty() { role.output_spec.description = desc.clone(); }
+            if !desc.is_empty() {
+                role.output_spec.description = desc.clone();
+            }
             format!("Output: {}", desc)
         }
 
         StepField::OutputFormat => {
-            role.output_spec.format = if lower.contains("json") { OutputFormat::Json }
-                else if lower.contains("html") { OutputFormat::Html }
-                else { OutputFormat::Markdown };
+            role.output_spec.format = if lower.contains("json") {
+                OutputFormat::Json
+            } else if lower.contains("html") {
+                OutputFormat::Html
+            } else {
+                OutputFormat::Markdown
+            };
             format!("Format: {:?}", role.output_spec.format)
         }
 
         StepField::RoleSplit => {
             let wants_split = lower.contains('b') && !lower.contains("best")
-                || lower.contains("split") || lower.contains("separate")
-                || lower.contains("two roles") || lower.contains("multiple");
+                || lower.contains("split")
+                || lower.contains("separate")
+                || lower.contains("two roles")
+                || lower.contains("multiple");
 
             if wants_split {
-                let responsibilities = intent["responsibilities"]
-                    .as_array().cloned().unwrap_or_default();
+                let responsibilities = intent["responsibilities"].as_array().cloned().unwrap_or_default();
                 if responsibilities.len() > 1 {
                     let mut remaining = responsibilities.clone();
                     remaining.remove(0); // first is being configured now
@@ -358,11 +367,7 @@ pub fn parse_and_apply(
 
         StepField::FailureHandling { tool_scope } => {
             let action = crate::agent::definition::infer_failure_action(&lower);
-            let rule = FailureRule {
-                text:       answer.trim().to_string(),
-                tool_scope: tool_scope.clone(),
-                action,
-            };
+            let rule = FailureRule { text: answer.trim().to_string(), tool_scope: tool_scope.clone(), action };
             role.execution_guidelines.add_failure(rule);
             "Failure handling saved.".into()
         }
@@ -372,7 +377,9 @@ pub fn parse_and_apply(
                 // Generate defaults from output spec + connectors
                 let defaults = default_completion_criteria(role);
                 let count = defaults.len();
-                for c in defaults { role.execution_guidelines.add_completion(c); }
+                for c in defaults {
+                    role.execution_guidelines.add_completion(c);
+                }
                 format!("Using {} default completion criteria.", count)
             } else {
                 let g = crate::agent::definition::ExecutionGuidelines::from_user_constraints(answer);
@@ -389,7 +396,8 @@ pub fn parse_and_apply(
         }
 
         StepField::AgentConstraint => {
-            let items: Vec<String> = answer.split(&[',', ';', '\n'][..])
+            let items: Vec<String> = answer
+                .split(&[',', ';', '\n'][..])
                 .map(|s| s.trim().trim_end_matches('.').to_string())
                 .filter(|s| s.len() > 5)
                 .collect();
@@ -409,16 +417,16 @@ pub fn parse_and_apply(
 
 // ── Trigger parsing ────────────────────────────────────────────────────────
 
-pub fn parse_trigger_answer(
-    answer: &str,
-    intent: &serde_json::Value,
-) -> (TriggerDef, TriggerConfidence) {
+pub fn parse_trigger_answer(answer: &str, intent: &serde_json::Value) -> (TriggerDef, TriggerConfidence) {
     use crate::agent::plan_mode::{intent_to_trigger, parse_trigger_from_text};
 
     // If user confirmed the auto-parsed trigger (yes/correct/right/looks good)
     let lower = answer.to_lowercase();
-    let is_confirmation = lower == "yes" || lower == "correct" || lower == "right"
-        || lower.contains("looks good") || lower.contains("that's right")
+    let is_confirmation = lower == "yes"
+        || lower == "correct"
+        || lower == "right"
+        || lower.contains("looks good")
+        || lower.contains("that's right")
         || lower.contains("that is right");
 
     if is_confirmation {
@@ -429,57 +437,74 @@ pub fn parse_trigger_answer(
     }
 
     let mut trigger = parse_trigger_from_text(answer);
-    let confidence = if trigger_answer_is_specific(answer) {
-        TriggerConfidence::High
-    } else {
-        TriggerConfidence::Medium
-    };
+    let confidence =
+        if trigger_answer_is_specific(answer) { TriggerConfidence::High } else { TriggerConfidence::Medium };
     trigger.confidence = confidence.clone();
     (trigger, confidence)
 }
 
 fn trigger_answer_is_specific(answer: &str) -> bool {
     let lower = answer.to_lowercase();
-    let has_day  = ["monday","tuesday","wednesday","thursday","friday","saturday","sunday",
-                    "daily","weekday","weekend","hourly","monthly"]
-        .iter().any(|d| lower.contains(d));
-    let has_time = lower.contains("am") || lower.contains("pm")
-        || lower.contains(":00") || lower.contains("midnight") || lower.contains("noon");
+    let has_day = [
+        "monday",
+        "tuesday",
+        "wednesday",
+        "thursday",
+        "friday",
+        "saturday",
+        "sunday",
+        "daily",
+        "weekday",
+        "weekend",
+        "hourly",
+        "monthly",
+    ]
+    .iter()
+    .any(|d| lower.contains(d));
+    let has_time = lower.contains("am")
+        || lower.contains("pm")
+        || lower.contains(":00")
+        || lower.contains("midnight")
+        || lower.contains("noon");
     let has_cron = lower.contains("cron") || (lower.contains("*") && lower.contains(" "));
-    let has_event = lower.contains("when") && (lower.contains("created") || lower.contains("opened")
-        || lower.contains("updated") || lower.contains("fired"));
+    let has_event = lower.contains("when")
+        && (lower.contains("created")
+            || lower.contains("opened")
+            || lower.contains("updated")
+            || lower.contains("fired"));
     (has_day && has_time) || has_cron || has_event
 }
 
 fn trigger_summary(t: &TriggerDef) -> String {
     match &t.trigger_type {
         TriggerType::Schedule => format!("Schedule {}", t.cron.as_deref().unwrap_or("(TBD)")),
-        TriggerType::Webhook  => format!("Webhook from {} / {}",
+        TriggerType::Webhook => format!(
+            "Webhook from {} / {}",
             t.source_connector.as_deref().unwrap_or("connector"),
-            t.event_filter.as_deref().unwrap_or("event")),
-        TriggerType::Manual       => "On-demand".into(),
-        TriggerType::UserMessage  => "On user message".into(),
+            t.event_filter.as_deref().unwrap_or("event")
+        ),
+        TriggerType::Manual => "On-demand".into(),
+        TriggerType::UserMessage => "On user message".into(),
         TriggerType::WorkforceEvent => "After another role".into(),
     }
 }
 
 // ── Output destination parsing ─────────────────────────────────────────────
 
-pub fn parse_output_destination(
-    answer: &str,
-    intent: &serde_json::Value,
-) -> (OutputDestination, String) {
-    let lower     = answer.to_lowercase();
+pub fn parse_output_destination(answer: &str, intent: &serde_json::Value) -> (OutputDestination, String) {
+    let lower = answer.to_lowercase();
     let dest_hint = intent["output_destination_hint"].as_str().unwrap_or("");
     let hint_lower = dest_hint.to_lowercase();
 
     // Slack / channel
-    if lower.contains("slack") || lower.contains("channel") || lower.starts_with('#')
-        || hint_lower.contains("slack") || hint_lower.starts_with('#')
+    if lower.contains("slack")
+        || lower.contains("channel")
+        || lower.starts_with('#')
+        || hint_lower.contains("slack")
+        || hint_lower.starts_with('#')
     {
-        let channel = extract_channel(&answer)
-            .or_else(|| extract_channel(dest_hint))
-            .unwrap_or_else(|| "#general".to_string());
+        let channel =
+            extract_channel(&answer).or_else(|| extract_channel(dest_hint)).unwrap_or_else(|| "#general".to_string());
         let connector = if lower.contains("teams") || hint_lower.contains("teams") { "outlook" } else { "slack" };
         let desc = format!("{} → {}", connector, channel);
         return (OutputDestination::Channel { connector: connector.into(), channel }, desc);
@@ -487,35 +512,47 @@ pub fn parse_output_destination(
 
     // Email
     if (lower.contains("email") || hint_lower.contains("email"))
-        && (lower.contains("send") || lower.contains("draft") || lower.contains("gmail")
-            || lower.contains("outlook") || hint_lower.contains("draft"))
+        && (lower.contains("send")
+            || lower.contains("draft")
+            || lower.contains("gmail")
+            || lower.contains("outlook")
+            || hint_lower.contains("draft"))
     {
         let connector = if lower.contains("outlook") || hint_lower.contains("outlook") { "outlook" } else { "gmail" };
-        let draft = !(lower.contains("send directly") || lower.contains("auto-send")
-            || lower.contains("send it now"));
+        let draft = !(lower.contains("send directly") || lower.contains("auto-send") || lower.contains("send it now"));
         let desc = format!("{} {} email", connector, if draft { "draft" } else { "send" });
         return (OutputDestination::Email { connector: connector.into(), draft }, desc);
     }
 
     // Connector record update
-    if lower.contains("salesforce") || lower.contains("hubspot") || lower.contains("crm record")
-        || hint_lower.contains("salesforce") || hint_lower.contains("hubspot")
+    if lower.contains("salesforce")
+        || lower.contains("hubspot")
+        || lower.contains("crm record")
+        || hint_lower.contains("salesforce")
+        || hint_lower.contains("hubspot")
     {
-        let connector = if lower.contains("hubspot") || hint_lower.contains("hubspot") { "hubspot" } else { "salesforce" };
-        let field = if lower.contains("description") || hint_lower.contains("description") { "Description" }
-            else if lower.contains("note") { "Notes__c" }
-            else { "Description" };
+        let connector =
+            if lower.contains("hubspot") || hint_lower.contains("hubspot") { "hubspot" } else { "salesforce" };
+        let field = if lower.contains("description") || hint_lower.contains("description") {
+            "Description"
+        } else if lower.contains("note") {
+            "Notes__c"
+        } else {
+            "Description"
+        };
         let desc = format!("{} → {} field", connector, field);
-        return (OutputDestination::Connector {
-            name: connector.into(),
-            record_id_field: "id".into(),
-            target_field: field.into(),
-        }, desc);
+        return (
+            OutputDestination::Connector {
+                name: connector.into(),
+                record_id_field: "id".into(),
+                target_field: field.into(),
+            },
+            desc,
+        );
     }
 
     // Workspace — extract path hint
-    let path = extract_workspace_path(&lower)
-        .or_else(|| extract_workspace_path(&hint_lower));
+    let path = extract_workspace_path(&lower).or_else(|| extract_workspace_path(&hint_lower));
     let desc = path.as_deref().unwrap_or("workspace").to_string();
     (OutputDestination::Workspace { path }, desc)
 }
@@ -529,20 +566,20 @@ fn infer_input_mapping(answer: &str) -> serde_json::Value {
 
     // Common field patterns
     let patterns: &[(&str, &str, &str)] = &[
-        ("lead id",      "lead_ids",     "$.output_data.lead_ids"),
-        ("lead",         "lead_ids",     "$.output_data.lead_ids"),
-        ("record id",    "record_ids",   "$.output_data.record_ids"),
-        ("record",       "record_ids",   "$.output_data.record_ids"),
-        ("file path",    "output_path",  "$.output_data.output_path"),
-        ("file",         "output_path",  "$.output_data.output_path"),
-        ("output",       "output",       "$.output_data"),
-        ("count",        "count",        "$.output_data.processed"),
-        ("error",        "errors",       "$.output_data.errors"),
-        ("ticket",       "ticket_ids",   "$.output_data.ticket_ids"),
-        ("contact",      "contact_ids",  "$.output_data.contact_ids"),
-        ("account",      "account_ids",  "$.output_data.account_ids"),
-        ("order",        "order_ids",    "$.output_data.order_ids"),
-        ("result",       "result",       "$.output_data"),
+        ("lead id", "lead_ids", "$.output_data.lead_ids"),
+        ("lead", "lead_ids", "$.output_data.lead_ids"),
+        ("record id", "record_ids", "$.output_data.record_ids"),
+        ("record", "record_ids", "$.output_data.record_ids"),
+        ("file path", "output_path", "$.output_data.output_path"),
+        ("file", "output_path", "$.output_data.output_path"),
+        ("output", "output", "$.output_data"),
+        ("count", "count", "$.output_data.processed"),
+        ("error", "errors", "$.output_data.errors"),
+        ("ticket", "ticket_ids", "$.output_data.ticket_ids"),
+        ("contact", "contact_ids", "$.output_data.contact_ids"),
+        ("account", "account_ids", "$.output_data.account_ids"),
+        ("order", "order_ids", "$.output_data.order_ids"),
+        ("result", "result", "$.output_data"),
     ];
 
     let mut matched = false;
@@ -565,9 +602,10 @@ fn infer_input_mapping(answer: &str) -> serde_json::Value {
 fn extract_channel(text: &str) -> Option<String> {
     if let Some(pos) = text.find('#') {
         let after = &text[pos..];
-        let end = after.find(|c: char| c.is_whitespace() || c == '\'' || c == '"')
-            .unwrap_or(after.len());
-        if end > 1 { return Some(after[..end].to_lowercase()); }
+        let end = after.find(|c: char| c.is_whitespace() || c == '\'' || c == '"').unwrap_or(after.len());
+        if end > 1 {
+            return Some(after[..end].to_lowercase());
+        }
     }
     // "the sales-ops channel" pattern
     if let Some(pos) = text.to_lowercase().find(" channel") {
@@ -582,11 +620,15 @@ fn extract_channel(text: &str) -> Option<String> {
 
 fn extract_workspace_path(lower: &str) -> Option<String> {
     for word in &["drafts/", "output/", "reports/", "results/", "emails/", "workspace/"] {
-        if lower.contains(*word) { return Some(word.to_string()); }
+        if lower.contains(*word) {
+            return Some(word.to_string());
+        }
     }
     // "save to drafts" → "drafts/"
     for word in &["drafts", "output", "reports", "results"] {
-        if lower.contains(word) { return Some(format!("{}/", word)); }
+        if lower.contains(word) {
+            return Some(format!("{}/", word));
+        }
     }
     None
 }
@@ -599,15 +641,13 @@ pub fn default_completion_criteria(role: &AgentRole) -> Vec<CompletionCriterion>
     // Based on connectors used
     for connector in &role.connectors {
         match connector.as_str() {
-            "salesforce" | "hubspot" =>
-                criteria.push(CompletionCriterion::all_items(
-                    "All queried records processed (skip invalid, don't abort)",
-                    format!("{} query results", connector),
-                )),
-            "zendesk" | "intercom" | "freshdesk" =>
-                criteria.push(CompletionCriterion::custom(
-                    "All triggered tickets responded to or escalated"
-                )),
+            "salesforce" | "hubspot" => criteria.push(CompletionCriterion::all_items(
+                "All queried records processed (skip invalid, don't abort)",
+                format!("{} query results", connector),
+            )),
+            "zendesk" | "intercom" | "freshdesk" => {
+                criteria.push(CompletionCriterion::custom("All triggered tickets responded to or escalated"))
+            }
             _ => {}
         }
     }
@@ -616,24 +656,18 @@ pub fn default_completion_criteria(role: &AgentRole) -> Vec<CompletionCriterion>
     match &role.output_spec.destination {
         OutputDestination::Workspace { path } => {
             let p = path.as_deref().unwrap_or("workspace/");
-            criteria.push(CompletionCriterion::output_exists(
-                format!("Output files written to {}", p), p,
-            ));
+            criteria.push(CompletionCriterion::output_exists(format!("Output files written to {}", p), p));
         }
         OutputDestination::Email { draft, connector } => {
             let label = if *draft { "draft saved" } else { "email sent" };
-            criteria.push(CompletionCriterion::custom(
-                format!("Email {} via {}", label, connector)
-            ));
+            criteria.push(CompletionCriterion::custom(format!("Email {} via {}", label, connector)));
         }
-        OutputDestination::Channel { connector, channel } =>
-            criteria.push(CompletionCriterion::custom(
-                format!("Message posted to {} via {}", channel, connector)
-            )),
-        OutputDestination::Connector { name, .. } =>
-            criteria.push(CompletionCriterion::record_updated(
-                format!("{} record updated", name), name,
-            )),
+        OutputDestination::Channel { connector, channel } => {
+            criteria.push(CompletionCriterion::custom(format!("Message posted to {} via {}", channel, connector)))
+        }
+        OutputDestination::Connector { name, .. } => {
+            criteria.push(CompletionCriterion::record_updated(format!("{} record updated", name), name))
+        }
         _ => {}
     }
 
@@ -810,7 +844,8 @@ pub fn domain_steps_for(category: &str) -> Vec<ClarificationStep> {
                  e.g. 'Never send without approval', 'Read-only', 'Skip missing records'. \
                  Or say 'none'.",
                 StepField::UserGuidelines,
-            ).optional(),
+            )
+            .optional(),
         ],
     }
 }

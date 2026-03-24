@@ -127,10 +127,10 @@ impl Worker {
                     state.goal.clone(),
                     "completed".into(),
                 );
-                if let Some(goal_instance_id) = state.metadata.get("goal_instance_id")
-                    .and_then(|v| v.as_str()).map(String::from)
+                if let Some(goal_instance_id) =
+                    state.metadata.get("goal_instance_id").and_then(|v| v.as_str()).map(String::from)
                 {
-                    let store  = Arc::clone(&self.store);
+                    let store = Arc::clone(&self.store);
                     let tenant = state.tenant_id.clone();
                     spawn_savings_estimation(store, tenant, goal_instance_id);
                 }
@@ -145,10 +145,10 @@ impl Worker {
                     "partially_complete".into(),
                 );
                 // Pro-rated savings estimation for partial runs
-                if let Some(goal_instance_id) = state.metadata.get("goal_instance_id")
-                    .and_then(|v| v.as_str()).map(String::from)
+                if let Some(goal_instance_id) =
+                    state.metadata.get("goal_instance_id").and_then(|v| v.as_str()).map(String::from)
                 {
-                    let store  = Arc::clone(&self.store);
+                    let store = Arc::clone(&self.store);
                     let tenant = state.tenant_id.clone();
                     spawn_savings_estimation(store, tenant, goal_instance_id);
                 }
@@ -232,11 +232,7 @@ impl Worker {
 
 /// Fire-and-forget savings estimation — spawned on every Complete outcome.
 /// Loads the GoalInstance + its AgentRole, runs the estimator, persists.
-fn spawn_savings_estimation(
-    store:            Arc<crate::storage::PostgresStore>,
-    tenant_id:        String,
-    goal_instance_id: String,
-) {
+fn spawn_savings_estimation(store: Arc<crate::storage::PostgresStore>, tenant_id: String, goal_instance_id: String) {
     tokio::spawn(async move {
         // Load goal instance
         let gi = match store.get_goal_instance(&tenant_id, &goal_instance_id).await {
@@ -244,7 +240,9 @@ fn spawn_savings_estimation(
             _ => return,
         };
         // Only estimate completed, non-test runs that haven't been estimated yet
-        if gi.human_hours_saved > 0.0 || gi.is_test { return; }
+        if gi.human_hours_saved > 0.0 || gi.is_test {
+            return;
+        }
 
         // Load the role
         let role = match store.get_agent_role(&tenant_id, &gi.role_id).await {

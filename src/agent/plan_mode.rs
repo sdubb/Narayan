@@ -20,16 +20,20 @@
 //!   Reviewing              → show the full config for user confirmation
 //!   Complete               → save and close
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use anyhow::Result;
+use base64::Engine as _;
 use chrono::Utc;
 use uuid::Uuid;
 
 use crate::{
     agent::definition::{
-        AgentDefinition, AgentDefinitionStatus, AgentRole, ConnectorAuthType, EndpointDef,
-        OutputDestination, OutputFormat, OutputSpec, PlanModeMessage, PlanModePhase,
+        AgentDefinition, AgentDefinitionStatus, AgentRole, PlanModeMessage, PlanModePhase,
         PlanModeSession, RoleCategory, RoleStatus, TenantConnector, TenantWasmTool, TriggerDef, TriggerType,
     },
     connectors::ConnectorInstallStore,
@@ -71,7 +75,8 @@ impl IntentExtractor {
             format!("\n\nCAPABILITY DIRECTORY:\n{}", capability_directory)
         };
 
-        let system = format!(r#"You are a business analyst helping configure an AI automation agent.
+        let system = format!(
+            r#"You are a business analyst helping configure an AI automation agent.
 Extract structured intent AND generate specific clarifying questions.
 
 Work in two stages internally:
@@ -123,7 +128,9 @@ Rules:
 - trigger_confidence low: trigger type itself unclear
 - output_questions: only ask what you cannot infer
 - multi_role_suggested: true only if 2+ clearly distinct responsibilities with different triggers or outputs
-- responsibilities: always list at least one entry"#, capability_section);
+- responsibilities: always list at least one entry"#,
+            capability_section
+        );
 
         let user = format!("Configure an agent to do:\n\n{}", description);
 
@@ -145,7 +152,8 @@ Rules:
         initial: &serde_json::Value,
         detailed_context: &str,
     ) -> Result<serde_json::Value> {
-        let refine_system = format!(r#"You are refining a previously inferred agent configuration.
+        let refine_system = format!(
+            r#"You are refining a previously inferred agent configuration.
 Use the detailed capability context below to keep what was right, correct what was vague,
 and choose exact tools/connectors where supported.
 
@@ -161,7 +169,9 @@ Rules:
 - Fill candidate_connectors with exact names only when the connector is clearly relevant
 - Keep missing_capabilities accurate if no installed/custom option satisfies the need
 - Keep workflow_outline ordered and practical
-"#, detailed_context);
+"#,
+            detailed_context
+        );
 
         let refine_user = format!(
             "Original request:\n{}\n\nPreliminary inference JSON:\n{}",
@@ -180,11 +190,7 @@ Rules:
     }
 
     fn parse_json_response(&self, raw: String) -> Result<serde_json::Value> {
-        let cleaned = raw.trim()
-            .trim_start_matches("```json")
-            .trim_start_matches("```")
-            .trim_end_matches("```")
-            .trim();
+        let cleaned = raw.trim().trim_start_matches("```json").trim_start_matches("```").trim_end_matches("```").trim();
 
         serde_json::from_str(cleaned).map_err(|e| {
             anyhow::anyhow!("intent extraction returned invalid JSON: {} — raw: {}", e, &raw[..raw.len().min(200)])
@@ -219,11 +225,8 @@ impl ConnectorResolver {
             .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_lowercase())).collect())
             .unwrap_or_default();
 
-        let all_terms: Vec<&str> = sources.iter()
-            .chain(writes.iter())
-            .chain(actions.iter())
-            .map(String::as_str)
-            .collect();
+        let all_terms: Vec<&str> =
+            sources.iter().chain(writes.iter()).chain(actions.iter()).map(String::as_str).collect();
         let candidate_connectors: Vec<String> = intent["candidate_connectors"]
             .as_array()
             .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
@@ -266,20 +269,19 @@ impl ConnectorResolver {
         }
 
         // ── Score built-in connectors ────────────────────────────────────
-        let mut scored: Vec<(usize, &crate::tools::connector_tool::ConnectorDef)> = {
-            let mut v: Vec<(usize, &crate::tools::connector_tool::ConnectorDef)> =
-                BUILTIN_CONNECTORS
-                    .iter()
-                    .map(|entry| {
-                        let score = entry.keywords.iter()
-                            .filter(|kw| all_terms.iter().any(|t| {
-                                t.contains(**kw) || kw.contains(t)
-                            }))
-                            .count();
-                        (score, entry)
-                    })
-                    .filter(|(score, _)| *score > 0)
-                    .collect();
+        let scored: Vec<(usize, &crate::tools::connector_tool::ConnectorDef)> = {
+            let mut v: Vec<(usize, &crate::tools::connector_tool::ConnectorDef)> = BUILTIN_CONNECTORS
+                .iter()
+                .map(|entry| {
+                    let score = entry
+                        .keywords
+                        .iter()
+                        .filter(|kw| all_terms.iter().any(|t| t.contains(**kw) || kw.contains(t)))
+                        .count();
+                    (score, entry)
+                })
+                .filter(|(score, _)| *score > 0)
+                .collect();
             v.sort_by(|a, b| b.0.cmp(&a.0));
             v
         };
@@ -289,7 +291,9 @@ impl ConnectorResolver {
         let mut resolved_categories: std::collections::HashSet<&str> = Default::default();
 
         for requested in &candidate_connectors {
-            if installed.iter().any(|name| name == requested) || tenant_connectors.iter().any(|tc| tc.name == *requested) {
+            if installed.iter().any(|name| name == requested)
+                || tenant_connectors.iter().any(|tc| tc.name == *requested)
+            {
                 resolved.push(requested.clone());
                 if let Some(entry) = BUILTIN_CONNECTORS.iter().find(|entry| entry.name == requested.as_str()) {
                     resolved_categories.insert(entry.category);
@@ -299,7 +303,9 @@ impl ConnectorResolver {
 
         for (_, entry) in &scored {
             let is_installed = installed.iter().any(|i| i == entry.name);
-            if !is_installed { continue; }
+            if !is_installed {
+                continue;
+            }
 
             if resolved_categories.contains(entry.category) {
                 if let Some(cat_entry) = ambiguous_categories.iter_mut().find(|(c, _)| *c == entry.category) {
@@ -314,7 +320,9 @@ impl ConnectorResolver {
 
         // Add matching tenant custom connectors (non-database ones)
         for tc in tenant_connectors {
-            if tc.category == "connector/database" { continue; } // handled as tool_override above
+            if tc.category == "connector/database" {
+                continue;
+            } // handled as tool_override above
             if terms_match_connector(&all_terms, tc) && !resolved.contains(&tc.name) {
                 resolved.push(tc.name.clone());
             }
@@ -332,12 +340,14 @@ impl ConnectorResolver {
                     names.join(", ")
                 )
             })
-            .or_else(|| build_missing_connector_question(
-                &needed_connector_categories,
-                &missing_capabilities,
-                installed,
-                tenant_connectors,
-            ));
+            .or_else(|| {
+                build_missing_connector_question(
+                    &needed_connector_categories,
+                    &missing_capabilities,
+                    installed,
+                    tenant_connectors,
+                )
+            });
 
         resolved.sort();
         resolved.dedup();
@@ -356,27 +366,27 @@ fn build_missing_connector_question(
 ) -> Option<String> {
     for category in needed_connector_categories {
         let full_category = format!("connector/{}", category);
-        let installed_builtin: Vec<&str> = BUILTIN_CONNECTORS.iter()
+        let installed_builtin: Vec<&str> = BUILTIN_CONNECTORS
+            .iter()
             .filter(|entry| entry.category == full_category)
             .filter(|entry| installed.iter().any(|name| name == entry.name))
             .map(|entry| entry.name)
             .collect();
-        let installed_tenant: Vec<&str> = tenant_connectors.iter()
+        let installed_tenant: Vec<&str> = tenant_connectors
+            .iter()
             .filter(|connector| connector.category == full_category)
             .map(|connector| connector.name.as_str())
             .collect();
 
         if installed_builtin.is_empty() && installed_tenant.is_empty() {
-            let suggestions: Vec<&str> = BUILTIN_CONNECTORS.iter()
+            let suggestions: Vec<&str> = BUILTIN_CONNECTORS
+                .iter()
                 .filter(|entry| entry.category == full_category)
                 .map(|entry| entry.name)
                 .take(3)
                 .collect();
-            let suggestion_text = if suggestions.is_empty() {
-                "a custom connector".to_string()
-            } else {
-                suggestions.join(", ")
-            };
+            let suggestion_text =
+                if suggestions.is_empty() { "a custom connector".to_string() } else { suggestions.join(", ") };
             return Some(format!(
                 "This sounds like it needs a {} connector, but none is installed. Should we use a custom database/API, or should you connect {}?",
                 category,
@@ -403,11 +413,8 @@ fn build_missing_connector_question(
 /// Uses proper tokenization (split on non-alphanumeric) rather than whitespace.
 fn terms_match_connector(all_terms: &[&str], tc: &TenantConnector) -> bool {
     // Tokenize the summary into words
-    let summary_words: Vec<String> = tc.summary
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|s| s.len() > 2)
-        .map(|s| s.to_lowercase())
-        .collect();
+    let summary_words: Vec<String> =
+        tc.summary.split(|c: char| !c.is_alphanumeric()).filter(|s| s.len() > 2).map(|s| s.to_lowercase()).collect();
 
     // Also include the connector name itself
     let name_lower = tc.name.to_lowercase();
@@ -427,9 +434,7 @@ fn terms_match_connector(all_terms: &[&str], tc: &TenantConnector) -> bool {
 
 fn contains_connector_name(answer_lower: &str, connector_name: &str) -> bool {
     let name = connector_name.to_ascii_lowercase();
-    answer_lower
-        .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_' && ch != '-')
-        .any(|token| token == name)
+    answer_lower.split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_' && ch != '-').any(|token| token == name)
 }
 
 // ── PlanModeManager ────────────────────────────────────────────────────────
@@ -437,20 +442,20 @@ fn contains_connector_name(answer_lower: &str, connector_name: &str) -> bool {
 /// Manages the multi-turn plan mode conversation.
 /// Each turn advances the session through PlanModePhase states.
 pub struct PlanModeManager {
-    gateway:        Arc<dyn LlmGateway>,
-    store:          Arc<PostgresStore>,
-    installs:       Arc<ConnectorInstallStore>,
-    tools:          Arc<ToolRegistry>,
-    extractor:      IntentExtractor,
+    gateway: Arc<dyn LlmGateway>,
+    store: Arc<PostgresStore>,
+    installs: Arc<ConnectorInstallStore>,
+    tools: Arc<ToolRegistry>,
+    extractor: IntentExtractor,
     skill_registry: Option<Arc<tokio::sync::RwLock<crate::skills::registry::SkillRegistry>>>,
 }
 
 impl PlanModeManager {
     pub fn new(
-        gateway:  Arc<dyn LlmGateway>,
-        store:    Arc<PostgresStore>,
+        gateway: Arc<dyn LlmGateway>,
+        store: Arc<PostgresStore>,
         installs: Arc<ConnectorInstallStore>,
-        tools:    Arc<ToolRegistry>,
+        tools: Arc<ToolRegistry>,
     ) -> Self {
         let extractor = IntentExtractor::new(Arc::clone(&gateway));
         Self { gateway, store, installs, tools, extractor, skill_registry: None }
@@ -467,20 +472,22 @@ impl PlanModeManager {
     /// Build the clarification step queue for the given intent, store it in the
     /// session, and return the first question. Shared by handle_intent and
     /// handle_connector_clarification.
-    async fn build_step_queue_and_ask(
-        &self,
-        session: &mut PlanModeSession,
-        intent:  &serde_json::Value,
-    ) -> String {
-        let installed: Vec<String> = self.installs
-            .list_for_tenant(&session.tenant_id).await
+    async fn build_step_queue_and_ask(&self, session: &mut PlanModeSession, intent: &serde_json::Value) -> String {
+        let installed: Vec<String> = self
+            .installs
+            .list_for_tenant(&session.tenant_id)
+            .await
             .unwrap_or_default()
-            .into_iter().map(|c| c.connector_type).collect();
+            .into_iter()
+            .map(|c| c.connector_type)
+            .collect();
 
         // Load existing roles on this agent so the step pipeline can ask
         // about workforce event filters and depends_on ordering
-        let existing_role_names: Vec<String> = self.store
-            .list_roles_for_agent(&session.tenant_id, &session.draft_agent.id).await
+        let existing_role_names: Vec<String> = self
+            .store
+            .list_roles_for_agent(&session.tenant_id, &session.draft_agent.id)
+            .await
             .unwrap_or_default()
             .into_iter()
             .map(|r| r.name)
@@ -493,13 +500,9 @@ impl PlanModeManager {
             &existing_role_names,
         );
 
-        session.pending_steps = steps.iter()
-            .filter_map(|s| serde_json::to_value(s).ok())
-            .collect();
+        session.pending_steps = steps.iter().filter_map(|s| serde_json::to_value(s).ok()).collect();
 
-        steps.first()
-            .map(|s| s.question.clone())
-            .unwrap_or_else(|| "Any constraints or rules for this agent?".into())
+        steps.first().map(|s| s.question.clone()).unwrap_or_else(|| "Any constraints or rules for this agent?".into())
     }
 
     /// Look up the domain plan-mode skill for the given intent category.
@@ -508,59 +511,47 @@ impl PlanModeManager {
         // Domain skills are named "planmode:<category>"
         let key = format!("planmode:{}", category);
         if let Some(skill) = reg.get(&key) {
-            let text = skill.steps.iter()
-                .map(|s| s.description())
-                .collect::<Vec<_>>()
-                .join("\n\n");
+            let text = skill.steps.iter().map(|s| s.description()).collect::<Vec<_>>().join("\n\n");
             return Some(text);
         }
         // Fallback: fuzzy match via aliases
-        reg.find_matching(category).map(|skill| {
-            skill.steps.iter()
-                .map(|s| s.description())
-                .collect::<Vec<_>>()
-                .join("\n\n")
-        })
+        reg.find_matching(category)
+            .map(|skill| skill.steps.iter().map(|s| s.description()).collect::<Vec<_>>().join("\n\n"))
     }
 
     /// Create a new plan mode session for a tenant.
     pub fn new_session(&self, tenant_id: &str, agent_name: &str) -> PlanModeSession {
         let session_id = Uuid::new_v4().to_string();
-        let agent_id   = Uuid::new_v4().to_string();
-        let now        = Utc::now();
+        let agent_id = Uuid::new_v4().to_string();
+        let now = Utc::now();
+        let session_workspace = plan_mode_workspace_root(tenant_id, &session_id).display().to_string();
 
         let mut draft_agent = AgentDefinition::new(agent_id, tenant_id.to_string(), agent_name.to_string());
         draft_agent.memory_ref = format!("agent:{}", &draft_agent.id[..8]);
 
         PlanModeSession {
-            id:           session_id,
-            tenant_id:    tenant_id.to_string(),
+            id: session_id,
+            tenant_id: tenant_id.to_string(),
             draft_agent,
-            draft_role:   None,
+            draft_role: None,
             conversation: Vec::new(),
-            phase:        PlanModePhase::CapturingIntent,
+            attachments: Vec::new(),
+            attachment_context: String::new(),
+            session_workspace: Some(session_workspace),
+            phase: PlanModePhase::CapturingIntent,
             intent_cache: None,
             pending_steps: Vec::new(),
-            created_at:   now,
-            updated_at:   now,
+            created_at: now,
+            updated_at: now,
         }
     }
 
     /// Process one user turn.  Returns the assistant's reply and the updated session.
-    pub async fn turn(
-        &self,
-        mut session: PlanModeSession,
-        user_message: &str,
-    ) -> Result<(String, PlanModeSession)> {
-        session.conversation.push(PlanModeMessage {
-            role:    "user".into(),
-            content: user_message.to_string(),
-        });
+    pub async fn turn(&self, mut session: PlanModeSession, user_message: &str) -> Result<(String, PlanModeSession)> {
+        session.conversation.push(PlanModeMessage { role: "user".into(), content: user_message.to_string() });
 
         let reply = match session.phase {
-            PlanModePhase::CapturingIntent => {
-                self.handle_intent(&mut session, user_message).await?
-            }
+            PlanModePhase::CapturingIntent => self.handle_intent(&mut session, user_message).await?,
             PlanModePhase::ResolvingConnectors => {
                 // User answered the connector clarification question
                 self.handle_connector_clarification(&mut session, user_message).await?
@@ -574,33 +565,160 @@ impl PlanModeManager {
                 // constraints inside the clarification step pipeline.
                 self.handle_constraints(&mut session, user_message).await?
             }
-            PlanModePhase::Reviewing => {
-                self.handle_review(&mut session, user_message).await?
-            }
-            PlanModePhase::Complete => {
-                "This session is complete. The agent has been saved.".into()
-            }
+            PlanModePhase::Reviewing => self.handle_review(&mut session, user_message).await?,
+            PlanModePhase::Complete => "This session is complete. The agent has been saved.".into(),
         };
 
-        session.conversation.push(PlanModeMessage {
-            role:    "assistant".into(),
-            content: reply.clone(),
-        });
+        session.conversation.push(PlanModeMessage { role: "assistant".into(), content: reply.clone() });
         session.updated_at = Utc::now();
 
         Ok((reply, session))
     }
 
-    // ── Phase handlers ─────────────────────────────────────────────────────
-
-    async fn handle_intent(
+    /// Persist uploaded documents for this plan-mode session and build a short
+    /// extracted context block for the LLM.
+    pub async fn ingest_attachments(
         &self,
         session: &mut PlanModeSession,
-        description: &str,
+        uploads: Vec<crate::agent::definition::PlanModeAttachmentUpload>,
+    ) -> Result<Vec<crate::agent::definition::PlanModeAttachment>> {
+        let root = self.ensure_session_workspace(session).await?;
+        if uploads.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let files_root = root.join("files");
+        tokio::fs::create_dir_all(&files_root).await?;
+
+        let mut created = Vec::new();
+        let mut snippets = Vec::new();
+
+        for upload in uploads {
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(upload.content_base64.trim())
+                .map_err(|e| anyhow::anyhow!("failed to decode attachment '{}': {}", upload.name, e))?;
+
+            let name = sanitise_attachment_name(&upload.name);
+            let path = unique_session_attachment_path(&files_root, &name).await?;
+            tokio::fs::write(&path, &decoded).await?;
+
+            let kind = infer_plan_mode_attachment_kind(&path, upload.mime_type.as_deref());
+            let preview = self
+                .extract_attachment_preview(&path, &kind)
+                .await
+                .unwrap_or_else(|e| format!("extraction failed: {}", e));
+            let preview = crate::util::truncate(&preview, 4000).to_string();
+            let size_bytes = decoded.len() as u64;
+
+            let relative_path = path.strip_prefix(&root).unwrap_or(&path).to_string_lossy().to_string();
+
+            let attachment = crate::agent::definition::PlanModeAttachment {
+                name: name.clone(),
+                path: relative_path,
+                mime_type: upload.mime_type.clone(),
+                size_bytes,
+                kind: kind.clone(),
+                extracted_preview: preview.clone(),
+                uploaded_at: Utc::now(),
+            };
+
+            snippets.push(format!(
+                "Attachment: {} ({}, {} bytes)\n{}",
+                attachment.name,
+                attachment_kind_label(&attachment.kind),
+                attachment.size_bytes,
+                preview
+            ));
+
+            created.push(attachment);
+        }
+
+        session.attachments.extend(created.clone());
+        if !snippets.is_empty() {
+            if !session.attachment_context.is_empty() {
+                session.attachment_context.push_str("\n\n");
+            }
+            session.attachment_context.push_str(&snippets.join("\n\n"));
+        }
+
+        Ok(created)
+    }
+
+    async fn ensure_session_workspace(&self, session: &mut PlanModeSession) -> Result<PathBuf> {
+        let root = session
+            .session_workspace
+            .as_ref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| plan_mode_workspace_root(&session.tenant_id, &session.id));
+
+        tokio::fs::create_dir_all(root.join("files")).await?;
+        tokio::fs::create_dir_all(root.join("artifacts")).await?;
+        tokio::fs::create_dir_all(root.join("logs")).await?;
+
+        if session.session_workspace.is_none() {
+            session.session_workspace = Some(root.display().to_string());
+        }
+
+        Ok(root)
+    }
+
+    async fn extract_attachment_preview(
+        &self,
+        path: &Path,
+        kind: &crate::agent::definition::PlanModeAttachmentKind,
     ) -> Result<String> {
+        let path_str = path.display().to_string();
+        let tool_name = match kind {
+            crate::agent::definition::PlanModeAttachmentKind::Pdf => "pdf_read",
+            crate::agent::definition::PlanModeAttachmentKind::Spreadsheet => "spreadsheet_read",
+            crate::agent::definition::PlanModeAttachmentKind::Csv => "file_read",
+            crate::agent::definition::PlanModeAttachmentKind::Text => "file_read",
+            crate::agent::definition::PlanModeAttachmentKind::Binary => "",
+            crate::agent::definition::PlanModeAttachmentKind::Unknown => "file_read",
+        };
+
+        if tool_name.is_empty() {
+            return Ok(format!("binary attachment saved at {}", path_str));
+        }
+
+        let mut args = serde_json::json!({ "path": path_str });
+        if tool_name == "file_read" {
+            if matches!(kind, crate::agent::definition::PlanModeAttachmentKind::Csv) {
+                args["start_line"] = serde_json::json!(1);
+                args["end_line"] = serde_json::json!(60);
+            } else {
+                args["start_line"] = serde_json::json!(1);
+                args["end_line"] = serde_json::json!(200);
+            }
+        } else if tool_name == "spreadsheet_read" {
+            args["max_rows"] = serde_json::json!(50);
+            args["header_row"] = serde_json::json!(true);
+        }
+
+        let Some(tool) = self.tools.get(tool_name) else {
+            return Ok(format!("extraction tool '{}' is unavailable; file saved at {}", tool_name, path_str));
+        };
+
+        let result = tool.execute(args).await?;
+        if !result.success {
+            return Ok(format!(
+                "extraction tool '{}' failed for {}: {}",
+                tool_name,
+                path_str,
+                result.error.unwrap_or_else(|| "unknown error".into())
+            ));
+        }
+
+        Ok(serde_json::to_string_pretty(&result.output).unwrap_or_else(|_| result.output.to_string()))
+    }
+
+    // ── Phase handlers ─────────────────────────────────────────────────────
+
+    async fn handle_intent(&self, session: &mut PlanModeSession, description: &str) -> Result<String> {
         // Load tenant's custom connections upfront — used for both context injection
         // and connector resolution
-        let installed: Vec<String> = self.installs
+        let installed: Vec<String> = self
+            .installs
             .list_for_tenant(&session.tenant_id)
             .await
             .unwrap_or_default()
@@ -608,23 +726,18 @@ impl PlanModeManager {
             .map(|c| c.connector_type)
             .collect();
 
-        let tenant_connectors = self.store
-            .list_tenant_connectors(&session.tenant_id)
-            .await
-            .unwrap_or_default();
-        let tenant_wasm_tools = self.store
-            .list_tenant_wasm_tools(&session.tenant_id)
-            .await
-            .unwrap_or_default();
+        let user_description = description.trim().to_string();
+        let description = combine_user_message_with_attachment_context(description, &session.attachment_context);
+
+        let tenant_connectors = self.store.list_tenant_connectors(&session.tenant_id).await.unwrap_or_default();
+        let tenant_wasm_tools = self.store.list_tenant_wasm_tools(&session.tenant_id).await.unwrap_or_default();
 
         let capability_directory =
             build_capability_directory(&self.tools, &installed, &tenant_connectors, &tenant_wasm_tools);
-        let initial_intent = self.extractor.extract_initial(
-            &session.id,
-            &session.tenant_id,
-            description,
-            &capability_directory,
-        ).await?;
+        let initial_intent = self
+            .extractor
+            .extract_initial(&session.id, &session.tenant_id, &description, &capability_directory)
+            .await?;
         let detail_context = build_detailed_capability_context(
             &self.tools,
             &initial_intent,
@@ -635,27 +748,17 @@ impl PlanModeManager {
         let intent = if detail_context.trim().is_empty() {
             initial_intent
         } else {
-            self.extractor.refine(
-                &session.id,
-                &session.tenant_id,
-                description,
-                &initial_intent,
-                &detail_context,
-            ).await?
+            self.extractor
+                .refine(&session.id, &session.tenant_id, &description, &initial_intent, &detail_context)
+                .await?
         };
 
         // Store intent in the draft role
         let role_id = Uuid::new_v4().to_string();
-        let mut role = AgentRole::new(
-            role_id,
-            session.draft_agent.id.clone(),
-            session.tenant_id.clone(),
-            "Primary Role".into(),
-        );
-        role.purpose = description.to_string();
-        role.role_category = RoleCategory::from_slug(
-            intent["category"].as_str().unwrap_or("general"),
-        );
+        let mut role =
+            AgentRole::new(role_id, session.draft_agent.id.clone(), session.tenant_id.clone(), "Primary Role".into());
+        role.purpose = user_description;
+        role.role_category = RoleCategory::from_slug(intent["category"].as_str().unwrap_or("general"));
         apply_role_policy_defaults(&mut session.draft_agent, &mut role);
 
         // Resolve connectors and tool overrides
@@ -700,17 +803,13 @@ impl PlanModeManager {
                     db_name
                 ));
             } else if let Some(api_name) = override_spec.strip_prefix("external_api:") {
-                guidelines.push(format!(
-                    "Use tool external_api with api='{}' for all HTTP calls to this backend.",
-                    api_name
-                ));
+                guidelines
+                    .push(format!("Use tool external_api with api='{}' for all HTTP calls to this backend.", api_name));
             }
         }
         // Populate structured ExecutionGuidelines from extracted actions + tool overrides
         for item in guidelines {
-            role.execution_guidelines.add_rule(
-                crate::agent::definition::GuidelineRule::always(item)
-            );
+            role.execution_guidelines.add_rule(crate::agent::definition::GuidelineRule::always(item));
         }
         apply_execution_hints(&mut role, &intent);
 
@@ -771,11 +870,7 @@ Reply with one exact name: {}",
         session.phase = PlanModePhase::CapturingClarifications;
         Ok(self.build_step_queue_and_ask(session, &cached_intent).await)
     }
-    async fn handle_connector_clarification(
-        &self,
-        session: &mut PlanModeSession,
-        answer: &str,
-    ) -> Result<String> {
+    async fn handle_connector_clarification(&self, session: &mut PlanModeSession, answer: &str) -> Result<String> {
         let answer_lower = answer.to_lowercase();
         let mut pending_connector_resolution = false;
         let mut pending_custom_tool_categories: Vec<String> = Vec::new();
@@ -789,20 +884,14 @@ Reply with one exact name: {}",
 
         if let Some(role) = session.draft_role.as_mut() {
             if !pending_custom_tool_categories.is_empty() {
-                let tenant_wasm_tools = self
-                    .store
-                    .list_tenant_wasm_tools(&session.tenant_id)
-                    .await
-                    .unwrap_or_default();
+                let tenant_wasm_tools = self.store.list_tenant_wasm_tools(&session.tenant_id).await.unwrap_or_default();
                 let enabled_wasm_tools = enabled_wasm_tool_names(&tenant_wasm_tools);
 
                 if enabled_wasm_tools.is_empty() {
                     session.phase = PlanModePhase::ResolvingConnectors;
-                    return Ok(
-                        "I still don't see any enabled tenant WASM tools for this workspace. \
+                    return Ok("I still don't see any enabled tenant WASM tools for this workspace. \
 Please create and test one in plan mode settings, then reply 'done'."
-                            .into(),
-                    );
+                        .into());
                 }
 
                 let matched_wasm: Vec<String> = enabled_wasm_tools
@@ -886,23 +975,18 @@ Please create and test one in plan mode settings, then reply 'done'."
         }
 
         if !pending_custom_tool_categories.is_empty() || pending_connector_resolution {
-                session.phase = PlanModePhase::ResolvingConnectors;
+            session.phase = PlanModePhase::ResolvingConnectors;
             return Ok("Please confirm the pending connector/custom-tool setup first.".into());
         }
 
         // Regenerate the step queue now that the connector is confirmed
-        let intent = session.intent_cache.clone()
-            .unwrap_or_else(|| serde_json::json!({ "trigger_hint": "manual" }));
+        let intent = session.intent_cache.clone().unwrap_or_else(|| serde_json::json!({ "trigger_hint": "manual" }));
         session.phase = PlanModePhase::CapturingClarifications;
         Ok(self.build_step_queue_and_ask(session, &intent).await)
     }
 
-    async fn handle_clarifications(
-        &self,
-        session: &mut PlanModeSession,
-        answer: &str,
-    ) -> Result<String> {
-        use crate::agent::plan_mode_steps::{ClarificationStep, parse_and_apply};
+    async fn handle_clarifications(&self, session: &mut PlanModeSession, answer: &str) -> Result<String> {
+        use crate::agent::plan_mode_steps::{parse_and_apply, ClarificationStep};
 
         // Pop the front step — that's the one we're answering now
         let current_step: Option<ClarificationStep> = if !session.pending_steps.is_empty() {
@@ -936,10 +1020,8 @@ Please create and test one in plan mode settings, then reply 'done'."
             if let Some(remaining) = pending_roles {
                 if !session.draft_agent.memory_ref.contains("|pending_roles:") {
                     let meta = session.draft_agent.memory_ref.clone();
-                    session.draft_agent.memory_ref = format!(
-                        "{}|pending_roles:{}", meta,
-                        serde_json::to_string(&remaining).unwrap_or_default()
-                    );
+                    session.draft_agent.memory_ref =
+                        format!("{}|pending_roles:{}", meta, serde_json::to_string(&remaining).unwrap_or_default());
                 }
             }
 
@@ -952,14 +1034,11 @@ Please create and test one in plan mode settings, then reply 'done'."
             }
 
             // No more steps — inject domain skill execution brief then go to constraints
-            let category = session.intent_cache.as_ref()
-                .and_then(|i| i["category"].as_str())
-                .unwrap_or("general");
+            let category = session.intent_cache.as_ref().and_then(|i| i["category"].as_str()).unwrap_or("general");
 
             if let Some(skill_text) = self.domain_skill_text(category).await {
-                let brief: String = skill_text.lines()
-                    .skip_while(|l| !l.starts_with("EXECUTION BRIEF"))
-                    .collect::<Vec<_>>().join("\n");
+                let brief: String =
+                    skill_text.lines().skip_while(|l| !l.starts_with("EXECUTION BRIEF")).collect::<Vec<_>>().join("\n");
                 if !brief.is_empty() {
                     if let Some(role) = session.draft_role.as_mut() {
                         let parsed = crate::agent::definition::ExecutionGuidelines::from_skill_text(&brief);
@@ -970,7 +1049,9 @@ Please create and test one in plan mode settings, then reply 'done'."
                 if let Some(role) = session.draft_role.as_mut() {
                     if role.execution_guidelines.completion_criteria.is_empty() {
                         let defaults = crate::agent::plan_mode_steps::default_completion_criteria(role);
-                        for c in defaults { role.execution_guidelines.add_completion(c); }
+                        for c in defaults {
+                            role.execution_guidelines.add_completion(c);
+                        }
                     }
                 }
             }
@@ -983,14 +1064,13 @@ Please create and test one in plan mode settings, then reply 'done'."
         session.phase = PlanModePhase::Reviewing;
         Ok(self.build_review_summary(session))
     }
-    async fn handle_constraints(
-        &self,
-        session: &mut PlanModeSession,
-        answer: &str,
-    ) -> Result<String> {
+    async fn handle_constraints(&self, session: &mut PlanModeSession, answer: &str) -> Result<String> {
         let lower = answer.to_lowercase();
-        let is_empty = lower.contains("no constraint") || lower.contains("none")
-            || lower.contains("n/a") || lower.contains("defaults") || answer.trim().len() < 4;
+        let is_empty = lower.contains("no constraint")
+            || lower.contains("none")
+            || lower.contains("n/a")
+            || lower.contains("defaults")
+            || answer.trim().len() < 4;
 
         if !is_empty {
             // Parse domain skill answers + user constraints into structured guidelines
@@ -1007,8 +1087,7 @@ Please create and test one in plan mode settings, then reply 'done'."
                 .filter(|s| s.len() > 8)
                 .filter(|s| {
                     let l = s.to_lowercase();
-                    !l.starts_with("mandatory") && !l.starts_with("before confirm")
-                        && !l.starts_with("execution brief")
+                    !l.starts_with("mandatory") && !l.starts_with("before confirm") && !l.starts_with("execution brief")
                 })
                 .collect();
             session.draft_agent.constraints.extend(constraint_items);
@@ -1025,29 +1104,27 @@ Please create and test one in plan mode settings, then reply 'done'."
 
     fn build_review_summary(&self, session: &PlanModeSession) -> String {
         let agent = &session.draft_agent;
-        let role  = match session.draft_role.as_ref() {
+        let role = match session.draft_role.as_ref() {
             Some(r) => r,
-            None    => return "Configuration incomplete — no role defined.".into(),
+            None => return "Configuration incomplete — no role defined.".into(),
         };
 
         let trigger_desc = match &role.trigger.trigger_type {
-            TriggerType::Webhook  => format!(
+            TriggerType::Webhook => format!(
                 "triggered by {} {}",
                 role.trigger.source_connector.as_deref().unwrap_or("external event"),
                 role.trigger.event_filter.as_deref().unwrap_or("")
             ),
-            TriggerType::Schedule => format!(
-                "runs on schedule: {}",
-                role.trigger.cron.as_deref().unwrap_or("daily")
-            ),
-            TriggerType::UserMessage  => "runs when you ask it to".into(),
-            TriggerType::Manual       => "runs on-demand".into(),
+            TriggerType::Schedule => format!("runs on schedule: {}", role.trigger.cron.as_deref().unwrap_or("daily")),
+            TriggerType::UserMessage => "runs when you ask it to".into(),
+            TriggerType::Manual => "runs on-demand".into(),
             TriggerType::WorkforceEvent => {
                 match &role.trigger.workforce_event_filter {
                     Some(f) if f.contains("role_name") => {
                         // Extract the role name from the filter expression
                         let name = f
-                            .split("role_name == '").nth(1)
+                            .split("role_name == '")
+                            .nth(1)
                             .and_then(|s| s.split('\'').next())
                             .unwrap_or("another role");
                         format!("runs after '{}' completes", name)
@@ -1083,17 +1160,29 @@ Please create and test one in plan mode settings, then reply 'done'."
             format!("\n**Your connections:** {}", parts.join(", "))
         };
 
-        let constraints = if agent.constraints.is_empty() {
+        let constraints = if agent.constraints.is_empty() { "none".into() } else { agent.constraints.join("; ") };
+
+        let attachments = if session.attachments.is_empty() {
             "none".into()
         } else {
-            agent.constraints.join("; ")
+            session
+                .attachments
+                .iter()
+                .map(|attachment| {
+                    format!(
+                        "{} ({}, {} bytes)",
+                        attachment.name,
+                        attachment_kind_label(&attachment.kind),
+                        attachment.size_bytes
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
         };
 
         // Show which compliance services will be active for this category
         let services_line = {
-            let category = session.intent_cache.as_ref()
-                .and_then(|i| i["category"].as_str())
-                .unwrap_or("general");
+            let category = session.intent_cache.as_ref().and_then(|i| i["category"].as_str()).unwrap_or("general");
             let services = active_services_for_category(category);
             if services.is_empty() {
                 String::new()
@@ -1109,40 +1198,39 @@ Please create and test one in plan mode settings, then reply 'done'."
             **Trigger:** {trigger}\n\
             **Connectors:** {connectors}{tools}\n\
             **Output:** {output}\n\
+            **Uploaded docs:** {attachments}\n\
             **Constraints:** {constraints}{services}\n\n\
             Does this look right? Say **yes** to save, or tell me what to change.",
-            name        = agent.name,
-            purpose     = role.purpose,
-            trigger     = trigger_desc,
-            connectors  = connectors,
-            tools       = tools_section,
-            output      = role.output_spec.description,
+            name = agent.name,
+            purpose = role.purpose,
+            trigger = trigger_desc,
+            connectors = connectors,
+            tools = tools_section,
+            output = role.output_spec.description,
+            attachments = attachments,
             constraints = constraints,
-            services    = services_line,
+            services = services_line,
         )
     }
 
-    async fn handle_review(
-        &self,
-        session: &mut PlanModeSession,
-        answer: &str,
-    ) -> Result<String> {
+    async fn handle_review(&self, session: &mut PlanModeSession, answer: &str) -> Result<String> {
         let lower = answer.to_lowercase();
-        if lower.contains("yes") || lower.contains("save") || lower.contains("looks good")
-            || lower.contains("correct") || lower.contains("confirmed")
+        if lower.contains("yes")
+            || lower.contains("save")
+            || lower.contains("looks good")
+            || lower.contains("correct")
+            || lower.contains("confirmed")
         {
             session.phase = PlanModePhase::Complete;
             return Ok("✓ Agent saved. You can find it in your agent list. \
-                       Add more roles anytime from the agent settings page.".into());
+                       Add more roles anytime from the agent settings page."
+                .into());
         }
 
         // User wants to change something — re-extract from their correction
         session.phase = PlanModePhase::CapturingIntent;
         let reply = self.handle_intent(session, answer).await?;
-        Ok(format!(
-            "Updated. Let me reconfigure based on your correction.\n\n{}",
-            reply
-        ))
+        Ok(format!("Updated. Let me reconfigure based on your correction.\n\n{}", reply))
     }
 
     /// Finalise and save the session — creates AgentDefinition + AgentRole in DB.
@@ -1155,25 +1243,20 @@ Please create and test one in plan mode settings, then reply 'done'."
 
         let role = match session.draft_role.take() {
             Some(mut r) => {
-                r.status   = RoleStatus::Active;
+                r.status = RoleStatus::Active;
                 r.updated_at = Utc::now();
 
                 // Enrich workflow outline — map prose hints to tools + arg templates
                 // so the runtime can build a deterministic Plan without an LLM call.
-                let intent = session.intent_cache.as_ref()
-                    .cloned()
-                    .unwrap_or_else(|| serde_json::json!({}));
+                let intent = session.intent_cache.as_ref().cloned().unwrap_or_else(|| serde_json::json!({}));
                 enrich_workflow_outline(&mut r, &intent);
 
                 // Resolve "name:Role Name" hints in depends_on_role_id to actual IDs
                 if let Some(hint) = r.trigger.depends_on_role_id.clone() {
                     if let Some(name) = hint.strip_prefix("name:") {
-                        let existing = self.store
-                            .list_roles_for_agent(&agent.tenant_id, &agent.id).await
-                            .unwrap_or_default();
-                        if let Some(found) = existing.iter().find(|er| {
-                            er.name.to_lowercase() == name.to_lowercase()
-                        }) {
+                        let existing =
+                            self.store.list_roles_for_agent(&agent.tenant_id, &agent.id).await.unwrap_or_default();
+                        if let Some(found) = existing.iter().find(|er| er.name.to_lowercase() == name.to_lowercase()) {
                             r.trigger.depends_on_role_id = Some(found.id.clone());
                         } else {
                             // Named role not found — clear the hint rather than save a bad ref
@@ -1215,6 +1298,95 @@ fn apply_role_policy_defaults(agent: &mut AgentDefinition, role: &mut AgentRole)
     }
 }
 
+fn plan_mode_workspace_root(tenant_id: &str, session_id: &str) -> PathBuf {
+    std::env::temp_dir().join("narayan-plan-mode").join(tenant_id).join(session_id)
+}
+
+fn combine_user_message_with_attachment_context(message: &str, attachment_context: &str) -> String {
+    let trimmed = message.trim();
+    let ctx = attachment_context.trim();
+    if ctx.is_empty() {
+        trimmed.to_string()
+    } else {
+        format!("{}\n\nUPLOADED DOCUMENT CONTEXT:\n{}", trimmed, ctx)
+    }
+}
+
+fn sanitise_attachment_name(name: &str) -> String {
+    let fallback = "attachment";
+    let raw = Path::new(name).file_name().and_then(|s| s.to_str()).unwrap_or(fallback).trim();
+
+    let cleaned: String = raw
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') { ch } else { '_' })
+        .collect();
+
+    let cleaned = cleaned.trim_matches('_').to_string();
+    if cleaned.is_empty() {
+        fallback.to_string()
+    } else {
+        cleaned
+    }
+}
+
+async fn unique_session_attachment_path(root: &Path, file_name: &str) -> Result<PathBuf> {
+    let stem = Path::new(file_name).file_stem().and_then(|s| s.to_str()).unwrap_or("attachment");
+    let ext = Path::new(file_name).extension().and_then(|s| s.to_str()).unwrap_or("");
+
+    for index in 0usize.. {
+        let candidate = if index == 0 {
+            root.join(file_name)
+        } else if ext.is_empty() {
+            root.join(format!("{}-{}", stem, index))
+        } else {
+            root.join(format!("{}-{}.{}", stem, index, ext))
+        };
+
+        if tokio::fs::metadata(&candidate).await.is_err() {
+            return Ok(candidate);
+        }
+    }
+
+    unreachable!("attachment path generation should always terminate")
+}
+
+fn infer_plan_mode_attachment_kind(
+    path: &Path,
+    mime_type: Option<&str>,
+) -> crate::agent::definition::PlanModeAttachmentKind {
+    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("").to_ascii_lowercase();
+    let mime = mime_type.unwrap_or("").to_ascii_lowercase();
+
+    match ext.as_str() {
+        "pdf" => crate::agent::definition::PlanModeAttachmentKind::Pdf,
+        "xls" | "xlsx" | "ods" => crate::agent::definition::PlanModeAttachmentKind::Spreadsheet,
+        "csv" => crate::agent::definition::PlanModeAttachmentKind::Csv,
+        "txt" | "md" | "markdown" | "json" | "jsonl" | "log" | "html" | "htm" | "xml" | "yaml" | "yml" | "rst"
+        | "toml" => crate::agent::definition::PlanModeAttachmentKind::Text,
+        _ if mime.contains("pdf") => crate::agent::definition::PlanModeAttachmentKind::Pdf,
+        _ if mime.contains("csv") => crate::agent::definition::PlanModeAttachmentKind::Csv,
+        _ if mime.contains("sheet") || mime.contains("excel") || mime.contains("spreadsheet") => {
+            crate::agent::definition::PlanModeAttachmentKind::Spreadsheet
+        }
+        _ if mime.starts_with("text/") || mime.contains("json") || mime.contains("xml") || mime.contains("html") => {
+            crate::agent::definition::PlanModeAttachmentKind::Text
+        }
+        _ if mime.is_empty() => crate::agent::definition::PlanModeAttachmentKind::Unknown,
+        _ => crate::agent::definition::PlanModeAttachmentKind::Binary,
+    }
+}
+
+fn attachment_kind_label(kind: &crate::agent::definition::PlanModeAttachmentKind) -> &'static str {
+    match kind {
+        crate::agent::definition::PlanModeAttachmentKind::Pdf => "pdf",
+        crate::agent::definition::PlanModeAttachmentKind::Spreadsheet => "spreadsheet",
+        crate::agent::definition::PlanModeAttachmentKind::Csv => "csv",
+        crate::agent::definition::PlanModeAttachmentKind::Text => "text",
+        crate::agent::definition::PlanModeAttachmentKind::Binary => "binary",
+        crate::agent::definition::PlanModeAttachmentKind::Unknown => "unknown",
+    }
+}
+
 /// Build a human-readable summary of the tenant's custom connections
 /// to inject into the IntentExtractor prompt so the LLM knows what's available
 /// and can match user descriptions to registered names exactly.
@@ -1226,9 +1398,8 @@ fn build_custom_context(_installed: &[String], tenant_connectors: &[TenantConnec
     let mut lines: Vec<String> = Vec::new();
 
     // Databases (tool: external_db)
-    let dbs: Vec<&TenantConnector> = tenant_connectors.iter()
-        .filter(|tc| tc.category == "connector/database")
-        .collect();
+    let dbs: Vec<&TenantConnector> =
+        tenant_connectors.iter().filter(|tc| tc.category == "connector/database").collect();
     if !dbs.is_empty() {
         lines.push("Databases (use external_db tool, reference by name):".into());
         for db in &dbs {
@@ -1237,7 +1408,8 @@ fn build_custom_context(_installed: &[String], tenant_connectors: &[TenantConnec
     }
 
     // REST APIs (tool: external_api)
-    let apis: Vec<&TenantConnector> = tenant_connectors.iter()
+    let apis: Vec<&TenantConnector> = tenant_connectors
+        .iter()
         .filter(|tc| !tc.category.contains("database") && !tc.category.contains("mcp"))
         .collect();
     if !apis.is_empty() {
@@ -1248,9 +1420,7 @@ fn build_custom_context(_installed: &[String], tenant_connectors: &[TenantConnec
     }
 
     // MCP servers (use as named connector)
-    let mcps: Vec<&TenantConnector> = tenant_connectors.iter()
-        .filter(|tc| tc.category.contains("mcp"))
-        .collect();
+    let mcps: Vec<&TenantConnector> = tenant_connectors.iter().filter(|tc| tc.category.contains("mcp")).collect();
     if !mcps.is_empty() {
         lines.push("MCP servers (available as connector tools):".into());
         for mcp in &mcps {
@@ -1277,13 +1447,15 @@ fn build_capability_directory(
         "Tool category quick map 4: integration=mcp_session,search_mcp_registry,acp_session,api_call,register_api_tool; communication=email,notification,pushover,ask_user; security=crypto_tool,plane_guard,request_credential; automation=schedule,cron_add,cron_list,cron_remove,cron_run,delegate".into(),
     ];
 
-    let mut tool_categories: Vec<(String, Vec<String>)> = registry.by_category()
+    let mut tool_categories: Vec<(String, Vec<String>)> = registry
+        .by_category()
         .into_iter()
         .filter(|(category, _)| !category.starts_with("connector/"))
         .map(|(category, names)| {
             (
                 category.to_string(),
-                names.into_iter()
+                names
+                    .into_iter()
                     .filter(|name| {
                         !name.starts_with("request_more_")
                             && *name != "list_connectors_in_category"
@@ -1306,8 +1478,7 @@ fn build_capability_directory(
     for entry in BUILTIN_CONNECTORS {
         let cat = entry.category.strip_prefix("connector/").unwrap_or(entry.category);
         let status = if installed.iter().any(|name| name == entry.name) { "installed" } else { "available" };
-        connector_groups.entry(cat).or_default()
-            .push(format!("{} ({}, {})", entry.name, status, entry.summary));
+        connector_groups.entry(cat).or_default().push(format!("{} ({}, {})", entry.name, status, entry.summary));
     }
     lines.push("Built-in connector categories:".into());
     for (category, connectors) in connector_groups {
@@ -1327,11 +1498,7 @@ fn build_capability_directory(
         for tool in enabled_wasm_tools.iter().take(8) {
             lines.push(format!(
                 "  - {} (v{}, timeout={}s, memory={} bytes): {}",
-                tool.name,
-                tool.version,
-                tool.limits.timeout_secs,
-                tool.limits.max_memory_bytes,
-                tool.description
+                tool.name, tool.version, tool.limits.timeout_secs, tool.limits.max_memory_bytes, tool.description
             ));
         }
         lines.push(
@@ -1368,21 +1535,12 @@ fn build_detailed_capability_context(
         }
         lines.push(format!("Detailed tools for category '{}':", category));
         for spec in specs.into_iter().take(8) {
-            let params = spec.parameters["required"].as_array()
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                })
+            let params = spec.parameters["required"]
+                .as_array()
+                .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(", "))
                 .unwrap_or_default();
             let required = if params.is_empty() { "none".to_string() } else { params };
-            lines.push(format!(
-                "  - {}: {} | required args: {}",
-                spec.name,
-                spec.description,
-                required,
-            ));
+            lines.push(format!("  - {}: {} | required args: {}", spec.name, spec.description, required,));
         }
     }
 
@@ -1406,7 +1564,8 @@ fn build_detailed_capability_context(
 
     for connector_name in requested_connector_names {
         if let Some(entry) = BUILTIN_CONNECTORS.iter().find(|entry| entry.name == connector_name) {
-            let installed_status = if installed.iter().any(|name| name == entry.name) { "installed" } else { "not_installed" };
+            let installed_status =
+                if installed.iter().any(|name| name == entry.name) { "installed" } else { "not_installed" };
             lines.push(format!(
                 "Connector '{}': category={} status={} summary={} operations={}",
                 entry.name,
@@ -1416,21 +1575,13 @@ fn build_detailed_capability_context(
                 entry.operations.join("; "),
             ));
         } else if let Some(connector) = tenant_connectors.iter().find(|connector| connector.name == connector_name) {
-            let operations = connector.endpoints.iter()
-                .map(|endpoint| endpoint.path.as_str())
-                .take(6)
-                .collect::<Vec<_>>();
-            let operation_text = if operations.is_empty() {
-                "custom endpoints configured".to_string()
-            } else {
-                operations.join(", ")
-            };
+            let operations =
+                connector.endpoints.iter().map(|endpoint| endpoint.path.as_str()).take(6).collect::<Vec<_>>();
+            let operation_text =
+                if operations.is_empty() { "custom endpoints configured".to_string() } else { operations.join(", ") };
             lines.push(format!(
                 "Tenant connector '{}': category={} summary={} endpoints={}",
-                connector.name,
-                connector.category,
-                connector.summary,
-                operation_text,
+                connector.name, connector.category, connector.summary, operation_text,
             ));
         }
     }
@@ -1440,10 +1591,7 @@ fn build_detailed_capability_context(
         .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
         .unwrap_or_default();
     if !missing_capabilities.is_empty() {
-        lines.push(format!(
-            "Missing capability hints already inferred: {}",
-            missing_capabilities.join(", ")
-        ));
+        lines.push(format!("Missing capability hints already inferred: {}", missing_capabilities.join(", ")));
     }
 
     let requested_wasm_tools: Vec<String> = intent["candidate_wasm_tools"]
@@ -1481,11 +1629,8 @@ fn inferred_preferred_tools(registry: &ToolRegistry, intent: &serde_json::Value)
 }
 
 fn enabled_wasm_tool_names(tenant_wasm_tools: &[TenantWasmTool]) -> Vec<String> {
-    let mut out: Vec<String> = tenant_wasm_tools
-        .iter()
-        .filter(|tool| tool.enabled)
-        .map(|tool| tool.name.clone())
-        .collect();
+    let mut out: Vec<String> =
+        tenant_wasm_tools.iter().filter(|tool| tool.enabled).map(|tool| tool.name.clone()).collect();
     out.sort();
     out.dedup();
     out
@@ -1540,7 +1685,8 @@ fn apply_wasm_tool_scope(role: &mut AgentRole, wasm_tool_names: &[String]) {
     role.tools.sort();
     role.tools.dedup();
 
-    role.execution_guidelines.remove_rules_with_prefix("Use only these registered WASM tools when custom deterministic logic is needed:");
+    role.execution_guidelines
+        .remove_rules_with_prefix("Use only these registered WASM tools when custom deterministic logic is needed:");
     role.execution_guidelines.add_rule(crate::agent::definition::GuidelineRule::always(format!(
         "Use only these registered WASM tools when custom deterministic logic is needed: {}.",
         wasm_tool_names.join(", ")
@@ -1572,12 +1718,10 @@ fn apply_execution_hints(role: &mut AgentRole, intent: &serde_json::Value) {
         .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
         .unwrap_or_default();
     if !tool_categories.is_empty() {
-        role.execution_guidelines.add_rule(
-            crate::agent::definition::GuidelineRule::always(format!(
-                "Prefer these tool categories when relevant: {}.",
-                tool_categories.join(", ")
-            ))
-        );
+        role.execution_guidelines.add_rule(crate::agent::definition::GuidelineRule::always(format!(
+            "Prefer these tool categories when relevant: {}.",
+            tool_categories.join(", ")
+        )));
     }
 
     let connector_categories: Vec<String> = intent["needed_connector_categories"]
@@ -1585,22 +1729,17 @@ fn apply_execution_hints(role: &mut AgentRole, intent: &serde_json::Value) {
         .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
         .unwrap_or_default();
     if !connector_categories.is_empty() {
-        role.execution_guidelines.add_rule(
-            crate::agent::definition::GuidelineRule::always(format!(
-                "Prefer connectors from these categories when relevant: {}.",
-                connector_categories.join(", ")
-            ))
-        );
+        role.execution_guidelines.add_rule(crate::agent::definition::GuidelineRule::always(format!(
+            "Prefer connectors from these categories when relevant: {}.",
+            connector_categories.join(", ")
+        )));
     }
 }
 
 /// Build enriched `WorkflowStep`s from the intent's `workflow_outline` hints.
 /// Maps each prose hint to the best matching tool and builds an arg template.
 /// Called at save() time so the runtime can build a deterministic Plan.
-fn enrich_workflow_outline(
-    role: &mut AgentRole,
-    intent: &serde_json::Value,
-) {
+fn enrich_workflow_outline(role: &mut AgentRole, intent: &serde_json::Value) {
     role.execution_guidelines.workflow_outline.clear();
 
     let hints: Vec<String> = intent["workflow_outline"]
@@ -1617,14 +1756,12 @@ fn enrich_workflow_outline(
 
     for hint in hints.into_iter().take(12) {
         let (tool, args_template) = resolve_tool_for_hint(&hint, connectors, tools);
-        role.execution_guidelines.add_workflow_step(
-            crate::agent::definition::WorkflowStep {
-                description: hint,
-                tool,
-                args_template,
-                condition: None,
-            }
-        );
+        role.execution_guidelines.add_workflow_step(crate::agent::definition::WorkflowStep {
+            description: hint,
+            tool,
+            args_template,
+            condition: None,
+        });
     }
 }
 
@@ -1641,16 +1778,15 @@ fn resolve_tool_for_hint(
     for conn in connectors {
         if lower.contains(&conn.to_lowercase()) {
             let op = infer_connector_operation(&lower);
-            return (
-                Some(conn.clone()),
-                Some(serde_json::json!({ "operation": op })),
-            );
+            return (Some(conn.clone()), Some(serde_json::json!({ "operation": op })));
         }
     }
 
     // 2. Check for explicit role tool matches
     for tool in role_tools {
-        if tool.starts_with("wasm_tool:") { continue; }
+        if tool.starts_with("wasm_tool:") {
+            continue;
+        }
         if lower.contains(&tool.to_lowercase()) {
             return (Some(tool.clone()), None);
         }
@@ -1658,29 +1794,54 @@ fn resolve_tool_for_hint(
 
     // 3. Keyword-based tool matching
     let tool_keywords: &[(&[&str], &str, Option<serde_json::Value>)] = &[
-        (&["search", "find news", "look up", "research", "latest"], "web_search_tool",
-            Some(serde_json::json!({ "query": "{input.topic}" }))),
-        (&["fetch", "scrape", "download page", "get url", "crawl"], "web_fetch",
-            Some(serde_json::json!({ "url": "{input.url}" }))),
-        (&["email", "send email", "notify via email", "mail"], "email",
-            Some(serde_json::json!({ "to": "{input.recipient}", "subject": "{input.subject}", "body": "{input.body}" }))),
-        (&["notify", "alert", "send notification", "push"], "notification",
-            Some(serde_json::json!({ "message": "{input.message}" }))),
-        (&["write file", "save to file", "create file", "output file"], "file_write",
-            Some(serde_json::json!({ "path": "{input.output_path}" }))),
-        (&["read file", "load file", "open file"], "file_read",
-            Some(serde_json::json!({ "path": "{input.file_path}" }))),
-        (&["run code", "execute", "script", "calculate"], "code_run",
-            Some(serde_json::json!({ "language": "python" }))),
+        (
+            &["search", "find news", "look up", "research", "latest"],
+            "web_search_tool",
+            Some(serde_json::json!({ "query": "{input.topic}" })),
+        ),
+        (
+            &["fetch", "scrape", "download page", "get url", "crawl"],
+            "web_fetch",
+            Some(serde_json::json!({ "url": "{input.url}" })),
+        ),
+        (
+            &["email", "send email", "notify via email", "mail"],
+            "email",
+            Some(
+                serde_json::json!({ "to": "{input.recipient}", "subject": "{input.subject}", "body": "{input.body}" }),
+            ),
+        ),
+        (
+            &["notify", "alert", "send notification", "push"],
+            "notification",
+            Some(serde_json::json!({ "message": "{input.message}" })),
+        ),
+        (
+            &["write file", "save to file", "create file", "output file"],
+            "file_write",
+            Some(serde_json::json!({ "path": "{input.output_path}" })),
+        ),
+        (
+            &["read file", "load file", "open file"],
+            "file_read",
+            Some(serde_json::json!({ "path": "{input.file_path}" })),
+        ),
+        (
+            &["run code", "execute", "script", "calculate"],
+            "code_run",
+            Some(serde_json::json!({ "language": "python" })),
+        ),
         (&["extract", "parse", "pull data"], "data_extractor", None),
-        (&["read pdf", "pdf"], "pdf_read",
-            Some(serde_json::json!({ "path": "{input.file_path}" }))),
+        (&["read pdf", "pdf"], "pdf_read", Some(serde_json::json!({ "path": "{input.file_path}" }))),
         (&["create pdf", "generate pdf"], "pdf_create", None),
         (&["spreadsheet", "csv", "excel"], "spreadsheet_read", None),
         (&["remember", "store memory", "save context"], "memory_store", None),
         (&["recall", "retrieve memory", "past context"], "memory_recall", None),
-        (&["vector search", "similar", "semantic search"], "vector_search",
-            Some(serde_json::json!({ "query": "{input.query}" }))),
+        (
+            &["vector search", "similar", "semantic search"],
+            "vector_search",
+            Some(serde_json::json!({ "query": "{input.query}" })),
+        ),
         (&["delegate", "spawn", "paralleli"], "delegate", None),
         (&["api call", "http request", "rest api"], "http_request", None),
     ];
@@ -1719,55 +1880,101 @@ pub(crate) fn parse_trigger_from_text(answer: &str) -> TriggerDef {
     // Workforce event — "after another role", "when X finishes/completes"
     if lower.contains("after") && (lower.contains("role") || lower.contains("finish") || lower.contains("complet")) {
         return TriggerDef {
-            trigger_type:     TriggerType::WorkforceEvent,
-            cron:             None,
+            trigger_type: TriggerType::WorkforceEvent,
+            cron: None,
             source_connector: None,
-            event_filter:     None,
-            input_mapping:    None,
+            event_filter: None,
+            input_mapping: None,
             ..Default::default()
         };
     }
 
     // Schedule — contains time/day keywords
-    let schedule_keywords = ["every", "daily", "weekly", "monthly", "hourly",
-        "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
-        "midnight", "noon", "morning", "evening", "at ", "am", "pm", "cron"];
+    let schedule_keywords = [
+        "every",
+        "daily",
+        "weekly",
+        "monthly",
+        "hourly",
+        "monday",
+        "tuesday",
+        "wednesday",
+        "thursday",
+        "friday",
+        "saturday",
+        "sunday",
+        "midnight",
+        "noon",
+        "morning",
+        "evening",
+        "at ",
+        "am",
+        "pm",
+        "cron",
+    ];
     if schedule_keywords.iter().any(|kw| lower.contains(kw)) {
         let cron = natural_to_cron(&lower);
         return TriggerDef {
-            trigger_type:     TriggerType::Schedule,
-            cron:             Some(cron),
+            trigger_type: TriggerType::Schedule,
+            cron: Some(cron),
             source_connector: None,
-            event_filter:     None,
-            input_mapping:    None,
+            event_filter: None,
+            input_mapping: None,
             ..Default::default()
         };
     }
 
     // Webhook — "when X happens", "on new Y", connector name mentioned
-    let webhook_keywords = ["when ", "on new", "on a new", "webhook",
-        "salesforce", "hubspot", "github", "zendesk", "stripe",
-        "intercom", "freshdesk", "pagerduty", "created", "updated", "received"];
+    let webhook_keywords = [
+        "when ",
+        "on new",
+        "on a new",
+        "webhook",
+        "salesforce",
+        "hubspot",
+        "github",
+        "zendesk",
+        "stripe",
+        "intercom",
+        "freshdesk",
+        "pagerduty",
+        "created",
+        "updated",
+        "received",
+    ];
     if webhook_keywords.iter().any(|kw| lower.contains(kw)) {
         // Try to detect the source connector
         let connector_names = [
-            "salesforce", "hubspot", "github", "zendesk", "slack", "jira",
-            "notion", "gmail", "stripe", "intercom", "freshdesk", "pagerduty",
-            "servicenow", "greenhouse", "docusign", "quickbooks", "dbt_cloud", "outlook",
+            "salesforce",
+            "hubspot",
+            "github",
+            "zendesk",
+            "slack",
+            "jira",
+            "notion",
+            "gmail",
+            "stripe",
+            "intercom",
+            "freshdesk",
+            "pagerduty",
+            "servicenow",
+            "greenhouse",
+            "docusign",
+            "quickbooks",
+            "dbt_cloud",
+            "outlook",
         ];
-        let source_connector = connector_names.iter()
-            .find(|&&c| lower.contains(c))
-            .map(|&c| c.to_string());
+        let source_connector = connector_names.iter().find(|&&c| lower.contains(c)).map(|&c| c.to_string());
 
         // Extract event filter (e.g. "lead created" → "lead_created")
         let event_filter = extract_event_filter(&lower);
 
         return TriggerDef {
-            trigger_type:     TriggerType::Webhook,
-            cron:             None,
+            trigger_type: TriggerType::Webhook,
+            cron: None,
             source_connector,
             event_filter,
-            input_mapping:    None,
+            input_mapping: None,
             ..Default::default()
         };
     }
@@ -1775,22 +1982,22 @@ pub(crate) fn parse_trigger_from_text(answer: &str) -> TriggerDef {
     // User message / on-demand
     if lower.contains("ask") || lower.contains("message") || lower.contains("chat") {
         return TriggerDef {
-            trigger_type:     TriggerType::UserMessage,
-            cron:             None,
+            trigger_type: TriggerType::UserMessage,
+            cron: None,
             source_connector: None,
-            event_filter:     None,
-            input_mapping:    None,
+            event_filter: None,
+            input_mapping: None,
             ..Default::default()
         };
     }
 
     // Default: manual
     TriggerDef {
-        trigger_type:     TriggerType::Manual,
-        cron:             None,
+        trigger_type: TriggerType::Manual,
+        cron: None,
         source_connector: None,
-        event_filter:     None,
-        input_mapping:    None,
+        event_filter: None,
+        input_mapping: None,
         ..Default::default()
     }
 }
@@ -1806,9 +2013,15 @@ pub(crate) fn natural_to_cron(text: &str) -> String {
     if lower.contains("every min") || lower.contains("every minute") {
         return "* * * * *".into();
     }
-    if lower.contains("every 5 min")  { return "*/5 * * * *".into(); }
-    if lower.contains("every 10 min") { return "*/10 * * * *".into(); }
-    if lower.contains("every 15 min") { return "*/15 * * * *".into(); }
+    if lower.contains("every 5 min") {
+        return "*/5 * * * *".into();
+    }
+    if lower.contains("every 10 min") {
+        return "*/10 * * * *".into();
+    }
+    if lower.contains("every 15 min") {
+        return "*/15 * * * *".into();
+    }
 
     if lower.contains("every hour") || lower.contains("hourly") {
         return format!("0 * * * *");
@@ -1823,23 +2036,38 @@ pub(crate) fn natural_to_cron(text: &str) -> String {
         }
         return "* * * * *".into();
     }
-    if lower.contains("midnight") { return "0 0 * * *".into(); }
-    if lower.contains("noon")     { return "0 12 * * *".into(); }
+    if lower.contains("midnight") {
+        return "0 0 * * *".into();
+    }
+    if lower.contains("noon") {
+        return "0 12 * * *".into();
+    }
 
     // Day of week
-    let day = if lower.contains("monday")    { Some("1") }
-         else if lower.contains("tuesday")   { Some("2") }
-         else if lower.contains("wednesday") { Some("3") }
-         else if lower.contains("thursday")  { Some("4") }
-         else if lower.contains("friday")    { Some("5") }
-         else if lower.contains("saturday")  { Some("6") }
-         else if lower.contains("sunday")    { Some("0") }
-         else { None };
+    let day = if lower.contains("monday") {
+        Some("1")
+    } else if lower.contains("tuesday") {
+        Some("2")
+    } else if lower.contains("wednesday") {
+        Some("3")
+    } else if lower.contains("thursday") {
+        Some("4")
+    } else if lower.contains("friday") {
+        Some("5")
+    } else if lower.contains("saturday") {
+        Some("6")
+    } else if lower.contains("sunday") {
+        Some("0")
+    } else {
+        None
+    };
 
     if let Some(d) = day {
         return format!("0 {} * * {}", hour, d);
     }
-    if lower.contains("weekly") { return format!("0 {} * * 1", hour); }
+    if lower.contains("weekly") {
+        return format!("0 {} * * 1", hour);
+    }
     if lower.contains("daily") || lower.contains("every day") {
         return format!("0 {} * * *", hour);
     }
@@ -1868,14 +2096,19 @@ fn extract_hour(text: &str) -> Option<u32> {
     if let Some(cap) = re_12h.captures(text) {
         let h: u32 = cap[1].parse().ok()?;
         let is_pm = &cap[2] == "pm";
-        return Some(if is_pm && h != 12 { h + 12 } else if !is_pm && h == 12 { 0 } else { h });
+        return Some(if is_pm && h != 12 {
+            h + 12
+        } else if !is_pm && h == 12 {
+            0
+        } else {
+            h
+        });
     }
     None
 }
 
 fn extract_number(text: &str) -> Option<u32> {
-    text.split_whitespace()
-        .find_map(|w| w.parse::<u32>().ok())
+    text.split_whitespace().find_map(|w| w.parse::<u32>().ok())
 }
 
 fn extract_event_filter(text: &str) -> Option<String> {
@@ -1894,9 +2127,7 @@ fn extract_event_filter(text: &str) -> Option<String> {
         ("invoice failed", "invoice.payment_failed"),
         ("dispute", "charge.dispute.created"),
     ];
-    patterns.iter()
-        .find(|(pattern, _)| text.contains(pattern))
-        .map(|(_, filter)| filter.to_string())
+    patterns.iter().find(|(pattern, _)| text.contains(pattern)).map(|(_, filter)| filter.to_string())
 }
 
 // ── Intent-to-trigger converter ────────────────────────────────────────────
@@ -1909,16 +2140,16 @@ pub(crate) fn intent_to_trigger(
     use crate::agent::definition::TriggerConfidence;
 
     let confidence = match intent["trigger_confidence"].as_str().unwrap_or("medium") {
-        "high"   => TriggerConfidence::High,
-        "low"    => TriggerConfidence::Low,
-        _        => TriggerConfidence::Medium,
+        "high" => TriggerConfidence::High,
+        "low" => TriggerConfidence::Low,
+        _ => TriggerConfidence::Medium,
     };
 
     let trigger_type = match intent["trigger_hint"].as_str().unwrap_or("manual") {
-        "schedule"    => TriggerType::Schedule,
-        "webhook"     => TriggerType::Webhook,
+        "schedule" => TriggerType::Schedule,
+        "webhook" => TriggerType::Webhook,
         "user_message" => TriggerType::UserMessage,
-        _             => TriggerType::Manual,
+        _ => TriggerType::Manual,
     };
 
     let trigger = match trigger_type {
@@ -1957,8 +2188,6 @@ pub(crate) fn intent_to_trigger(
 /// Build the combined clarification question shown after intent extraction.
 /// Covers trigger confirmation (if needed), output questions, and multi-role suggestion.
 pub(crate) fn build_clarification_question(intent: &serde_json::Value) -> String {
-    use crate::agent::definition::TriggerConfidence;
-
     let mut parts: Vec<String> = Vec::new();
 
     // Multi-role suggestion
@@ -2034,12 +2263,14 @@ pub(crate) fn build_clarification_question(intent: &serde_json::Value) -> String
         let dest = intent["output_destination_hint"].as_str().unwrap_or("");
         if dest.is_empty() {
             let q = match hint {
-                "email_draft" | "email_send" => "Where should the emails go — drafts in workspace, or sent via Gmail/Outlook?",
-                "connector_record"           => "Which record should I update, and which field?",
-                "slack_message"              => "Which Slack channel?",
-                "report"                     => "Where should the report be saved? (e.g. workspace/reports/ or email to stakeholders)",
-                "notification"               => "Where should notifications go — Slack, email, or in-app?",
-                _                            => "Where should the output go, and in what format?",
+                "email_draft" | "email_send" => {
+                    "Where should the emails go — drafts in workspace, or sent via Gmail/Outlook?"
+                }
+                "connector_record" => "Which record should I update, and which field?",
+                "slack_message" => "Which Slack channel?",
+                "report" => "Where should the report be saved? (e.g. workspace/reports/ or email to stakeholders)",
+                "notification" => "Where should notifications go — Slack, email, or in-app?",
+                _ => "Where should the output go, and in what format?",
             };
             parts.push(format!("**Output:** {}", q));
         }
@@ -2058,49 +2289,18 @@ pub(crate) fn build_clarification_question(intent: &serde_json::Value) -> String
 /// what's running on their behalf.
 fn active_services_for_category(category: &str) -> Vec<&'static str> {
     match category {
-        "customer_support" => vec![
-            "SLA tracking (1hr first-response)",
-            "PII redaction",
-            "Citation recording",
-            "Human review queue",
-        ],
-        "sales_revops" => vec![
-            "PII redaction",
-            "Citation recording",
-            "Human review queue",
-        ],
-        "finance_accounting" => vec![
-            "PII redaction",
-            "Citation recording",
-            "Evidence packaging",
-            "Human review queue",
-        ],
-        "legal_contract" => vec![
-            "PII redaction",
-            "Citation recording",
-            "Evidence packaging",
-            "Human review queue",
-        ],
-        "hr_people_ops" => vec![
-            "PII redaction",
-            "Citation recording",
-            "Human review queue",
-        ],
-        "devops" | "it_ops_itsm" => vec![
-            "SLA tracking",
-            "Citation recording",
-            "Evidence packaging",
-            "Human review queue",
-        ],
-        "research_analyst" => vec![
-            "PII redaction",
-            "Citation recording",
-            "Evidence packaging",
-            "Human review queue",
-        ],
-        "software_engineer" => vec![
-            "Human review queue",
-        ],
+        "customer_support" => {
+            vec!["SLA tracking (1hr first-response)", "PII redaction", "Citation recording", "Human review queue"]
+        }
+        "sales_revops" => vec!["PII redaction", "Citation recording", "Human review queue"],
+        "finance_accounting" => vec!["PII redaction", "Citation recording", "Evidence packaging", "Human review queue"],
+        "legal_contract" => vec!["PII redaction", "Citation recording", "Evidence packaging", "Human review queue"],
+        "hr_people_ops" => vec!["PII redaction", "Citation recording", "Human review queue"],
+        "devops" | "it_ops_itsm" => {
+            vec!["SLA tracking", "Citation recording", "Evidence packaging", "Human review queue"]
+        }
+        "research_analyst" => vec!["PII redaction", "Citation recording", "Evidence packaging", "Human review queue"],
+        "software_engineer" => vec!["Human review queue"],
         _ => vec![],
     }
 }
@@ -2110,6 +2310,7 @@ fn active_services_for_category(category: &str) -> Vec<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::definition::ConnectorAuthType;
 
     #[test]
     fn test_connector_resolver_matches_salesforce() {
@@ -2120,9 +2321,7 @@ mod tests {
         });
         let installed = vec!["salesforce".into(), "slack".into()];
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let (resolved, _tools, clarifying) = rt.block_on(
-            ConnectorResolver::resolve(&intent, &installed, &[])
-        );
+        let (resolved, _tools, clarifying) = rt.block_on(ConnectorResolver::resolve(&intent, &installed, &[]));
         assert!(resolved.contains(&"salesforce".to_string()));
         assert!(clarifying.is_none());
     }
@@ -2136,9 +2335,7 @@ mod tests {
         });
         let installed: Vec<String> = vec!["slack".into()];
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let (resolved, _tools, _) = rt.block_on(
-            ConnectorResolver::resolve(&intent, &installed, &[])
-        );
+        let (resolved, _tools, _) = rt.block_on(ConnectorResolver::resolve(&intent, &installed, &[]));
         assert!(!resolved.contains(&"salesforce".to_string()));
     }
 
@@ -2151,24 +2348,22 @@ mod tests {
         });
         let installed: Vec<String> = vec![];
         let tc = TenantConnector {
-            id:                  "tc-1".into(),
-            tenant_id:           "t-1".into(),
-            name:                "acme_erp".into(),
-            category:            "connector/erp".into(),
-            base_url:            "https://erp.acme.com".into(),
-            auth_type:           ConnectorAuthType::Bearer,
+            id: "tc-1".into(),
+            tenant_id: "t-1".into(),
+            name: "acme_erp".into(),
+            category: "connector/erp".into(),
+            base_url: "https://erp.acme.com".into(),
+            auth_type: ConnectorAuthType::Bearer,
             auth_credential_key: None,
-            source:              crate::agent::definition::ConnectorSource::Manual,
-            source_docs:         None,
-            endpoints:           Vec::new(),
-            summary:             "Acme ERP: orders inventory customers".into(),
-            created_at:          Utc::now(),
-            updated_at:          Utc::now(),
+            source: crate::agent::definition::ConnectorSource::Manual,
+            source_docs: None,
+            endpoints: Vec::new(),
+            summary: "Acme ERP: orders inventory customers".into(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
         };
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let (resolved, _tools, _) = rt.block_on(
-            ConnectorResolver::resolve(&intent, &installed, &[tc])
-        );
+        let (resolved, _tools, _) = rt.block_on(ConnectorResolver::resolve(&intent, &installed, &[tc]));
         assert!(resolved.contains(&"acme_erp".to_string()));
     }
 
@@ -2181,9 +2376,7 @@ mod tests {
             "actions": ["query leads table"],
         });
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let (_resolved, tools, _) = rt.block_on(
-            ConnectorResolver::resolve(&intent, &[], &[])
-        );
+        let (_resolved, tools, _) = rt.block_on(ConnectorResolver::resolve(&intent, &[], &[]));
         assert!(tools.contains(&"external_db:prod_db".to_string()));
     }
 
@@ -2197,9 +2390,7 @@ mod tests {
         });
         let installed = vec!["hubspot".into()];
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let (resolved, _tools, clarifying) = rt.block_on(
-            ConnectorResolver::resolve(&intent, &installed, &[])
-        );
+        let (resolved, _tools, clarifying) = rt.block_on(ConnectorResolver::resolve(&intent, &installed, &[]));
         assert!(resolved.contains(&"hubspot".to_string()));
         assert!(clarifying.is_none());
     }
@@ -2214,11 +2405,33 @@ mod tests {
         });
         let installed: Vec<String> = vec!["slack".into()];
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let (_resolved, _tools, clarifying) = rt.block_on(
-            ConnectorResolver::resolve(&intent, &installed, &[])
-        );
+        let (_resolved, _tools, clarifying) = rt.block_on(ConnectorResolver::resolve(&intent, &installed, &[]));
         let question = clarifying.expect("should ask for missing crm connector");
         assert!(question.to_lowercase().contains("crm connector"));
+    }
+
+    #[test]
+    fn test_attachment_context_combines_message_and_documents() {
+        let message = "Analyze these files.";
+        let context = "Attachment: report.pdf (pdf, 1200 bytes)\n{\"text\":\"hello\"}";
+
+        let combined = combine_user_message_with_attachment_context(message, context);
+        assert!(combined.contains("Analyze these files."));
+        assert!(combined.contains("UPLOADED DOCUMENT CONTEXT"));
+        assert!(combined.contains("report.pdf"));
+    }
+
+    #[test]
+    fn test_attachment_kind_detection_prefers_extension() {
+        let pdf = infer_plan_mode_attachment_kind(Path::new("invoice.pdf"), None);
+        let sheet = infer_plan_mode_attachment_kind(Path::new("data.xlsx"), None);
+        let csv = infer_plan_mode_attachment_kind(Path::new("rows.csv"), None);
+        let text = infer_plan_mode_attachment_kind(Path::new("notes.md"), None);
+
+        assert_eq!(pdf, crate::agent::definition::PlanModeAttachmentKind::Pdf);
+        assert_eq!(sheet, crate::agent::definition::PlanModeAttachmentKind::Spreadsheet);
+        assert_eq!(csv, crate::agent::definition::PlanModeAttachmentKind::Csv);
+        assert_eq!(text, crate::agent::definition::PlanModeAttachmentKind::Text);
     }
 
     #[test]
@@ -2248,10 +2461,14 @@ mod tests {
     }
 
     #[test]
-    fn test_natural_to_cron_friday() { assert_eq!(natural_to_cron("every friday"), "0 9 * * 5"); }
+    fn test_natural_to_cron_friday() {
+        assert_eq!(natural_to_cron("every friday"), "0 9 * * 5");
+    }
 
     #[test]
-    fn test_natural_to_cron_midnight() { assert_eq!(natural_to_cron("daily at midnight"), "0 0 * * *"); }
+    fn test_natural_to_cron_midnight() {
+        assert_eq!(natural_to_cron("daily at midnight"), "0 0 * * *");
+    }
 
     #[test]
     fn test_every_minute_cron() {
@@ -2281,17 +2498,12 @@ mod tests {
 
     #[test]
     fn test_apply_execution_hints_replaces_old_category_rules_and_round_trips() {
-        let mut role = AgentRole::new(
-            "role-1".into(),
-            "agent-1".into(),
-            "tenant-1".into(),
-            "Primary Role".into(),
-        );
+        let mut role = AgentRole::new("role-1".into(), "agent-1".into(), "tenant-1".into(), "Primary Role".into());
         role.execution_guidelines.add_rule(crate::agent::definition::GuidelineRule::always(
-            "Prefer these tool categories when relevant: web."
+            "Prefer these tool categories when relevant: web.",
         ));
         role.execution_guidelines.add_rule(crate::agent::definition::GuidelineRule::always(
-            "Prefer connectors from these categories when relevant: crm."
+            "Prefer connectors from these categories when relevant: crm.",
         ));
         role.execution_guidelines.add_priority("step: old sequencing".into());
 
@@ -2302,21 +2514,14 @@ mod tests {
         });
         apply_execution_hints(&mut role, &intent);
 
-        assert_eq!(
-            role.execution_guidelines.preferred_tool_categories(),
-            vec!["data".to_string(), "web".to_string()]
-        );
+        assert_eq!(role.execution_guidelines.preferred_tool_categories(), vec!["data".to_string(), "web".to_string()]);
         assert_eq!(
             role.execution_guidelines.preferred_connector_categories(),
             vec!["crm".to_string(), "support".to_string()]
         );
         assert_eq!(
             role.execution_guidelines.workflow_hints(),
-            vec![
-                "fetch source records".to_string(),
-                "transform".to_string(),
-                "write destination".to_string(),
-            ]
+            vec!["fetch source records".to_string(), "transform".to_string(), "write destination".to_string(),]
         );
     }
 }

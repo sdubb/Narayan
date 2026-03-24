@@ -74,7 +74,6 @@ fn do_compress(output: &str, paths: &[String], fmt: &str, level: u32) -> anyhow:
 
     let start = std::time::Instant::now();
     let mut total_files = 0usize;
-    let mut total_bytes = 0u64;
 
     match fmt {
         "zip" => {
@@ -97,7 +96,6 @@ fn do_compress(output: &str, paths: &[String], fmt: &str, level: u32) -> anyhow:
                             );
                             zip.start_file(&name, opts)?;
                             let data = std::fs::read(entry.path())?;
-                            total_bytes += data.len() as u64;
                             zip.write_all(&data)?;
                             total_files += 1;
                         }
@@ -106,7 +104,6 @@ fn do_compress(output: &str, paths: &[String], fmt: &str, level: u32) -> anyhow:
                     let name = src_path.file_name().unwrap_or_default().to_string_lossy();
                     zip.start_file(name.as_ref(), opts)?;
                     let data = std::fs::read(src_path)?;
-                    total_bytes += data.len() as u64;
                     zip.write_all(&data)?;
                     total_files += 1;
                 }

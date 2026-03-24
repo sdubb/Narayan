@@ -31,9 +31,21 @@ pub const TOOL_NAME: &str = "external_db";
 
 // Statements blocked in read-only mode (checked case-insensitively)
 const WRITE_KEYWORDS: &[&str] = &[
-    "insert ", "update ", "delete ", "drop ", "truncate ", "alter ",
-    "create ", "grant ", "revoke ", "replace ", "merge ", "upsert ",
-    "call ", "exec ", "execute ",
+    "insert ",
+    "update ",
+    "delete ",
+    "drop ",
+    "truncate ",
+    "alter ",
+    "create ",
+    "grant ",
+    "revoke ",
+    "replace ",
+    "merge ",
+    "upsert ",
+    "call ",
+    "exec ",
+    "execute ",
 ];
 
 pub struct ExternalDbTool {
@@ -41,33 +53,26 @@ pub struct ExternalDbTool {
 }
 
 impl ExternalDbTool {
-    pub fn new() -> Self { Self { install_store: None } }
+    pub fn new() -> Self {
+        Self { install_store: None }
+    }
 
     pub fn with_install_store(store: std::sync::Arc<crate::connectors::ConnectorInstallStore>) -> Self {
         Self { install_store: Some(store) }
     }
 
-    async fn load_connection(
-        &self,
-        tenant_id: &str,
-        db_name: &str,
-    ) -> Result<(String, bool), String> {
-        let store = self.install_store.as_ref()
-            .ok_or_else(|| "No install store configured".to_string())?;
+    async fn load_connection(&self, tenant_id: &str, db_name: &str) -> Result<(String, bool), String> {
+        let store = self.install_store.as_ref().ok_or_else(|| "No install store configured".to_string())?;
 
-        let install = store.get(tenant_id, db_name).await
-            .map_err(|e| format!("DB lookup failed: {e}"))?
-            .ok_or_else(|| format!(
-                "No database '{db_name}' connected. Add it in Settings → Connections → Databases."
-            ))?;
+        let install =
+            store.get(tenant_id, db_name).await.map_err(|e| format!("DB lookup failed: {e}"))?.ok_or_else(|| {
+                format!("No database '{db_name}' connected. Add it in Settings → Connections → Databases.")
+            })?;
 
-        let conn_str = store.decrypt_token(&install)
-            .ok_or_else(|| "Failed to decrypt connection string".to_string())?;
+        let conn_str =
+            store.decrypt_token(&install).ok_or_else(|| "Failed to decrypt connection string".to_string())?;
 
-        let allow_writes = install.settings
-            .get("allow_writes")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        let allow_writes = install.settings.get("allow_writes").and_then(|v| v.as_bool()).unwrap_or(false);
 
         Ok((conn_str, allow_writes))
     }
@@ -80,7 +85,9 @@ fn is_write_statement(sql: &str) -> bool {
 
 #[async_trait]
 impl Tool for ExternalDbTool {
-    fn name(&self) -> &str { TOOL_NAME }
+    fn name(&self) -> &str {
+        TOOL_NAME
+    }
 
     fn description(&self) -> &str {
         "Query or inspect an external database (Postgres, MySQL) connected by the tenant. \
@@ -89,7 +96,9 @@ impl Tool for ExternalDbTool {
          Always run schema first if you don't know the table structure."
     }
 
-    fn category(&self) -> &'static str { "integration" }
+    fn category(&self) -> &'static str {
+        "integration"
+    }
 
     fn parameters_schema(&self) -> Vec<ParameterSchema> {
         vec![
@@ -109,11 +118,7 @@ impl Tool for ExternalDbTool {
                 "string",
                 "SQL to execute. Required for 'query', 'execute', and 'explain' operations.",
             ),
-            ParameterSchema::optional(
-                "table",
-                "string",
-                "Table name. Required for 'table_preview'.",
-            ),
+            ParameterSchema::optional("table", "string", "Table name. Required for 'table_preview'."),
             ParameterSchema::optional(
                 "schema",
                 "string",
@@ -124,20 +129,16 @@ impl Tool for ExternalDbTool {
                 "integer",
                 "Maximum rows to return for query/preview (default: 100, max: 1000).",
             ),
-            ParameterSchema::optional(
-                "tenant_id",
-                "string",
-                "Injected by executor — tenant for credential lookup.",
-            ),
+            ParameterSchema::optional("tenant_id", "string", "Injected by executor — tenant for credential lookup."),
         ]
     }
 
     async fn execute(&self, args: Value) -> anyhow::Result<ToolResult> {
-        let db        = args["db"].as_str().unwrap_or("").to_string();
+        let db = args["db"].as_str().unwrap_or("").to_string();
         let operation = args["operation"].as_str().unwrap_or("").to_string();
         let tenant_id = args["tenant_id"].as_str().unwrap_or("").to_string();
-        let max_rows  = args["max_rows"].as_u64().unwrap_or(100).min(1000) as usize;
-        let schema    = args["schema"].as_str().unwrap_or("public");
+        let max_rows = args["max_rows"].as_u64().unwrap_or(100).min(1000) as usize;
+        let schema = args["schema"].as_str().unwrap_or("public");
 
         if db.is_empty() {
             return Ok(ToolResult::err("'db' is required — name of the connected database"));
@@ -159,18 +160,18 @@ impl Tool for ExternalDbTool {
         .unwrap_or_else(|_| Err(anyhow::anyhow!("Query timed out after 60 seconds")));
 
         match result {
-            Ok(v)  => Ok(ToolResult::ok(v)),
+            Ok(v) => Ok(ToolResult::ok(v)),
             Err(e) => Ok(ToolResult::err(format!("{e}"))),
         }
     }
 }
 
 async fn do_operation(
-    conn_str:     &str,
-    operation:    &str,
-    args:         &Value,
-    schema:       &str,
-    max_rows:     usize,
+    conn_str: &str,
+    operation: &str,
+    args: &Value,
+    schema: &str,
+    max_rows: usize,
     allow_writes: bool,
 ) -> anyhow::Result<Value> {
     // Detect DB type from connection string
@@ -184,11 +185,11 @@ async fn do_operation(
 }
 
 async fn pg_operation(
-    conn_str:     &str,
-    operation:    &str,
-    args:         &Value,
-    schema_name:  &str,
-    max_rows:     usize,
+    conn_str: &str,
+    operation: &str,
+    args: &Value,
+    schema_name: &str,
+    max_rows: usize,
     allow_writes: bool,
 ) -> anyhow::Result<Value> {
     use sqlx::postgres::PgPoolOptions;
@@ -234,12 +235,12 @@ async fn pg_operation(
             // Group by table
             let mut tables: std::collections::BTreeMap<String, Vec<Value>> = Default::default();
             for row in rows {
-                let table_name: String      = row.get("table_name");
-                let col_name: String        = row.get("column_name");
-                let data_type: String       = row.get("data_type");
-                let nullable: String        = row.get("is_nullable");
+                let table_name: String = row.get("table_name");
+                let col_name: String = row.get("column_name");
+                let data_type: String = row.get("data_type");
+                let nullable: String = row.get("is_nullable");
                 let default: Option<String> = row.get("column_default");
-                let is_pk: bool             = row.try_get("is_primary_key").unwrap_or(false);
+                let is_pk: bool = row.try_get("is_primary_key").unwrap_or(false);
 
                 tables.entry(table_name).or_default().push(serde_json::json!({
                     "column":   col_name,
@@ -253,12 +254,10 @@ async fn pg_operation(
             // Also get row counts for each table
             let mut schema_out: Vec<Value> = Vec::new();
             for (table, columns) in &tables {
-                let count: i64 = sqlx::query_scalar(
-                    &format!("SELECT COUNT(*)::bigint FROM {schema_name}.{table}")
-                )
-                .fetch_one(&pool)
-                .await
-                .unwrap_or(0);
+                let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*)::bigint FROM {schema_name}.{table}"))
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap_or(0);
 
                 schema_out.push(serde_json::json!({
                     "table":   table,
@@ -276,8 +275,7 @@ async fn pg_operation(
 
         // ── Table preview ────────────────────────────────────────────────
         "table_preview" => {
-            let table = args["table"].as_str()
-                .ok_or_else(|| anyhow::anyhow!("'table' required for table_preview"))?;
+            let table = args["table"].as_str().ok_or_else(|| anyhow::anyhow!("'table' required for table_preview"))?;
             // Sanitise: only allow alphanumeric + underscore
             if !table.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.') {
                 anyhow::bail!("Invalid table name '{table}'");
@@ -287,8 +285,7 @@ async fn pg_operation(
 
         // ── Query ────────────────────────────────────────────────────────
         "query" => {
-            let sql = args["sql"].as_str()
-                .ok_or_else(|| anyhow::anyhow!("'sql' required for query operation"))?;
+            let sql = args["sql"].as_str().ok_or_else(|| anyhow::anyhow!("'sql' required for query operation"))?;
             // Enforce read-only
             if is_write_statement(sql) {
                 anyhow::bail!(
@@ -296,11 +293,8 @@ async fn pg_operation(
                      To enable writes, set allow_writes=true in Settings → Connections."
                 );
             }
-            let limited_sql = if sql.to_lowercase().contains("limit ") {
-                sql.to_string()
-            } else {
-                format!("{sql} LIMIT {max_rows}")
-            };
+            let limited_sql =
+                if sql.to_lowercase().contains("limit ") { sql.to_string() } else { format!("{sql} LIMIT {max_rows}") };
             pg_query_rows(&pool, &limited_sql, &[], max_rows).await
         }
 
@@ -312,11 +306,9 @@ async fn pg_operation(
                      Enable them in Settings → Connections → Edit → Allow writes."
                 );
             }
-            let sql = args["sql"].as_str()
-                .ok_or_else(|| anyhow::anyhow!("'sql' required for execute operation"))?;
+            let sql = args["sql"].as_str().ok_or_else(|| anyhow::anyhow!("'sql' required for execute operation"))?;
 
-            let result = sqlx::query(sql).execute(&pool).await
-                .map_err(|e| anyhow::anyhow!("Execute failed: {e}"))?;
+            let result = sqlx::query(sql).execute(&pool).await.map_err(|e| anyhow::anyhow!("Execute failed: {e}"))?;
 
             Ok(serde_json::json!({
                 "rows_affected": result.rows_affected(),
@@ -326,49 +318,50 @@ async fn pg_operation(
 
         // ── EXPLAIN ──────────────────────────────────────────────────────
         "explain" => {
-            let sql = args["sql"].as_str()
-                .ok_or_else(|| anyhow::anyhow!("'sql' required for explain operation"))?;
+            let sql = args["sql"].as_str().ok_or_else(|| anyhow::anyhow!("'sql' required for explain operation"))?;
             pg_query_rows(&pool, &format!("EXPLAIN (FORMAT JSON) {sql}"), &[], 10).await
         }
 
-        _ => Err(anyhow::anyhow!("Unknown operation '{}'. Use: schema | query | execute | table_preview | explain", operation)),
+        _ => Err(anyhow::anyhow!(
+            "Unknown operation '{}'. Use: schema | query | execute | table_preview | explain",
+            operation
+        )),
     }
 }
 
 /// Execute a query and return rows as JSON array.
-async fn pg_query_rows(
-    pool:     &sqlx::PgPool,
-    sql:      &str,
-    _params:  &[&str],
-    max_rows: usize,
-) -> anyhow::Result<Value> {
-    use sqlx::Row;
+async fn pg_query_rows(pool: &sqlx::PgPool, sql: &str, _params: &[&str], max_rows: usize) -> anyhow::Result<Value> {
     use sqlx::Column;
+    use sqlx::Row;
 
-    let rows = sqlx::query(sql)
-        .fetch_all(pool)
-        .await
-        .map_err(|e| anyhow::anyhow!("Query failed: {e}"))?;
+    let rows = sqlx::query(sql).fetch_all(pool).await.map_err(|e| anyhow::anyhow!("Query failed: {e}"))?;
 
     let truncated = rows.len() > max_rows;
     let rows = &rows[..rows.len().min(max_rows)];
 
-    let json_rows: Vec<Value> = rows.iter().map(|row| {
-        let mut obj = serde_json::Map::new();
-        for col in row.columns() {
-            let name = col.name().to_string();
-            // Try common types in order
-            let val = row.try_get::<String, _>(col.ordinal())
-                .map(Value::String)
-                .or_else(|_| row.try_get::<i64, _>(col.ordinal()).map(|v| Value::Number(v.into())))
-                .or_else(|_| row.try_get::<f64, _>(col.ordinal()).map(|v| serde_json::Number::from_f64(v).map(Value::Number).unwrap_or(Value::Null)))
-                .or_else(|_| row.try_get::<bool, _>(col.ordinal()).map(Value::Bool))
-                .or_else(|_| row.try_get::<serde_json::Value, _>(col.ordinal()))
-                .unwrap_or(Value::Null);
-            obj.insert(name, val);
-        }
-        Value::Object(obj)
-    }).collect();
+    let json_rows: Vec<Value> = rows
+        .iter()
+        .map(|row| {
+            let mut obj = serde_json::Map::new();
+            for col in row.columns() {
+                let name = col.name().to_string();
+                // Try common types in order
+                let val = row
+                    .try_get::<String, _>(col.ordinal())
+                    .map(Value::String)
+                    .or_else(|_| row.try_get::<i64, _>(col.ordinal()).map(|v| Value::Number(v.into())))
+                    .or_else(|_| {
+                        row.try_get::<f64, _>(col.ordinal())
+                            .map(|v| serde_json::Number::from_f64(v).map(Value::Number).unwrap_or(Value::Null))
+                    })
+                    .or_else(|_| row.try_get::<bool, _>(col.ordinal()).map(Value::Bool))
+                    .or_else(|_| row.try_get::<serde_json::Value, _>(col.ordinal()))
+                    .unwrap_or(Value::Null);
+                obj.insert(name, val);
+            }
+            Value::Object(obj)
+        })
+        .collect();
 
     Ok(serde_json::json!({
         "rows":      json_rows,

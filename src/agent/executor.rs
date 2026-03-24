@@ -9,12 +9,14 @@
 //! All three checks are opt-in via AgentServices — if a service is None the step
 //! is skipped with zero overhead (no Arc dereference cost either).
 
-use std::{collections::{HashMap, HashSet}, path::Path};
 use std::sync::Arc;
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+};
 
 use anyhow::Result;
 use async_trait::async_trait;
-use uuid::Uuid;
 
 use crate::{
     agent::{
@@ -23,11 +25,7 @@ use crate::{
     },
     events::{AgentEvent, EventBus},
     gateway::{GatewayRequest, LlmGateway, TaskComplexity},
-    policy::{
-        engine::PolicyContext,
-        rules::PolicyRuleSet,
-        PolicyDecision,
-    },
+    policy::{engine::PolicyContext, rules::PolicyRuleSet, PolicyDecision},
     providers::{Message, ToolCall},
     segments::AgentServices,
     state::AgentState,
@@ -234,11 +232,7 @@ fn normalize_workspace_tool_name(raw_name: &str) -> Option<String> {
     if collapsed.is_empty() {
         return None;
     }
-    let trimmed = if collapsed.len() > 48 {
-        collapsed[..48].trim_end_matches('_').to_string()
-    } else {
-        collapsed
-    };
+    let trimmed = if collapsed.len() > 48 { collapsed[..48].trim_end_matches('_').to_string() } else { collapsed };
     if trimmed.is_empty() {
         return None;
     }
@@ -307,10 +301,7 @@ fn build_workspace_tool_spec(tool: &WorkspaceGeneratedTool) -> crate::providers:
 
     crate::providers::ToolSpec {
         name: tool.name.clone(),
-        description: format!(
-            "{} (workspace custom tool, language={})",
-            tool.description, tool.language
-        ),
+        description: format!("{} (workspace custom tool, language={})", tool.description, tool.language),
         parameters: serde_json::json!({
             "type": "object",
             "properties": properties,
@@ -328,31 +319,28 @@ fn make_planned_tool_call(step: &PlannedStep) -> Option<ToolCall> {
 }
 
 pub(crate) fn step_outputs_from_state(state: &AgentState) -> Vec<serde_json::Value> {
-    state
-        .metadata
-        .get("step_outputs")
-        .and_then(|value| value.as_array())
-        .cloned()
-        .unwrap_or_default()
+    state.metadata.get("step_outputs").and_then(|value| value.as_array()).cloned().unwrap_or_default()
 }
 
-pub(crate) fn resolve_tool_arguments(args: &serde_json::Value, state: &AgentState) -> Result<serde_json::Value, String> {
+pub(crate) fn resolve_tool_arguments(
+    args: &serde_json::Value,
+    state: &AgentState,
+) -> Result<serde_json::Value, String> {
     let step_outputs = step_outputs_from_state(state);
     resolve_template_value(args, &step_outputs)
 }
 
 pub(crate) fn resolve_reference_from_state(reference: &str, state: &AgentState) -> Result<serde_json::Value, String> {
     let trimmed = reference.trim();
-    let expr = trimmed
-        .strip_prefix("{{")
-        .and_then(|value| value.strip_suffix("}}"))
-        .map(str::trim)
-        .unwrap_or(trimmed);
+    let expr = trimmed.strip_prefix("{{").and_then(|value| value.strip_suffix("}}")).map(str::trim).unwrap_or(trimmed);
     let step_outputs = step_outputs_from_state(state);
     resolve_template_expression(expr, &step_outputs)
 }
 
-fn resolve_template_value(value: &serde_json::Value, step_outputs: &[serde_json::Value]) -> Result<serde_json::Value, String> {
+fn resolve_template_value(
+    value: &serde_json::Value,
+    step_outputs: &[serde_json::Value],
+) -> Result<serde_json::Value, String> {
     match value {
         serde_json::Value::String(text) => resolve_template_string(text, step_outputs),
         serde_json::Value::Array(items) => items
@@ -424,26 +412,19 @@ fn resolve_template_expression(expr: &str, step_outputs: &[serde_json::Value]) -
     }
 
     let step_index: usize = rest[..digit_len].parse().map_err(|_| format!("invalid step reference '{trimmed}'"))?;
-    let mut current = step_outputs
-        .get(step_index)
-        .cloned()
-        .ok_or_else(|| format!("step output {} is not available", step_index))?;
+    let mut current =
+        step_outputs.get(step_index).cloned().ok_or_else(|| format!("step output {} is not available", step_index))?;
     let mut remaining = &rest[digit_len..];
 
     while !remaining.is_empty() {
         if let Some(next) = remaining.strip_prefix('.') {
-            let field_len = next
-                .chars()
-                .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
-                .count();
+            let field_len = next.chars().take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_').count();
             if field_len == 0 {
                 return Err(format!("invalid field access in '{trimmed}'"));
             }
             let field = &next[..field_len];
-            current = current
-                .get(field)
-                .cloned()
-                .ok_or_else(|| format!("field '{}' not found in '{}'", field, trimmed))?;
+            current =
+                current.get(field).cloned().ok_or_else(|| format!("field '{}' not found in '{}'", field, trimmed))?;
             remaining = &next[field_len..];
             continue;
         }
@@ -453,11 +434,10 @@ fn resolve_template_expression(expr: &str, step_outputs: &[serde_json::Value]) -
                 return Err(format!("unterminated index access in '{trimmed}'"));
             };
             let index_str = next[..close_index].trim();
-            let index: usize = index_str.parse().map_err(|_| format!("invalid index '{}' in '{}'", index_str, trimmed))?;
-            current = current
-                .get(index)
-                .cloned()
-                .ok_or_else(|| format!("index {} not found in '{}'", index, trimmed))?;
+            let index: usize =
+                index_str.parse().map_err(|_| format!("invalid index '{}' in '{}'", index_str, trimmed))?;
+            current =
+                current.get(index).cloned().ok_or_else(|| format!("index {} not found in '{}'", index, trimmed))?;
             remaining = &next[close_index + 1..];
             continue;
         }
@@ -516,10 +496,9 @@ fn placeholder_path(value: &serde_json::Value) -> Option<String> {
     fn walk(value: &serde_json::Value, path: &str) -> Option<String> {
         match value {
             serde_json::Value::String(text) if is_placeholder_string(text) => Some(path.to_string()),
-            serde_json::Value::Array(items) => items
-                .iter()
-                .enumerate()
-                .find_map(|(index, item)| walk(item, &format!("{}[{}]", path, index))),
+            serde_json::Value::Array(items) => {
+                items.iter().enumerate().find_map(|(index, item)| walk(item, &format!("{}[{}]", path, index)))
+            }
             serde_json::Value::Object(map) => map.iter().find_map(|(key, item)| {
                 let next = if path.is_empty() { key.clone() } else { format!("{path}.{key}") };
                 walk(item, &next)
@@ -600,7 +579,8 @@ fn path_within_workspace(path: &str, workspace_path: &str) -> bool {
             Some(Path::new(workspace_path).join(maybe_path))
         }
     });
-    let workspace = std::fs::canonicalize(workspace_path).ok().or_else(|| Some(Path::new(workspace_path).to_path_buf()));
+    let workspace =
+        std::fs::canonicalize(workspace_path).ok().or_else(|| Some(Path::new(workspace_path).to_path_buf()));
 
     match (candidate, workspace) {
         (Some(candidate), Some(workspace)) => candidate.starts_with(workspace),
@@ -673,7 +653,11 @@ fn filter_glob_search_output(output: &serde_json::Value, state: &AgentState, ste
     annotate_relevance_filter(filtered, "workspace_path_rerank", &keywords, original_count, kept_count, dropped_count)
 }
 
-fn filter_content_search_output(output: &serde_json::Value, state: &AgentState, step: &PlannedStep) -> serde_json::Value {
+fn filter_content_search_output(
+    output: &serde_json::Value,
+    state: &AgentState,
+    step: &PlannedStep,
+) -> serde_json::Value {
     let keywords = result_relevance_keywords(state, step);
     let matches = output.get("matches").and_then(|value| value.as_array()).cloned().unwrap_or_default();
     let original_count = matches.len();
@@ -699,7 +683,14 @@ fn filter_content_search_output(output: &serde_json::Value, state: &AgentState, 
         object.insert("count".into(), serde_json::json!(kept_count));
         object.insert("matches".into(), serde_json::Value::Array(kept));
     }
-    annotate_relevance_filter(filtered, "workspace_content_rerank", &keywords, original_count, kept_count, dropped_count)
+    annotate_relevance_filter(
+        filtered,
+        "workspace_content_rerank",
+        &keywords,
+        original_count,
+        kept_count,
+        dropped_count,
+    )
 }
 
 fn filter_web_search_output(output: &serde_json::Value, state: &AgentState, step: &PlannedStep) -> serde_json::Value {
@@ -712,7 +703,8 @@ fn filter_web_search_output(output: &serde_json::Value, state: &AgentState, step
         let title = result.get("title").and_then(|value| value.as_str()).unwrap_or_default();
         let snippet = result.get("snippet").and_then(|value| value.as_str()).unwrap_or_default();
         let url = result.get("url").and_then(|value| value.as_str()).unwrap_or_default();
-        let score = keyword_score(title, &keywords) * 4 + keyword_score(snippet, &keywords) * 3 + keyword_score(url, &keywords);
+        let score =
+            keyword_score(title, &keywords) * 4 + keyword_score(snippet, &keywords) * 3 + keyword_score(url, &keywords);
         scored.push((score, result));
     }
 
@@ -734,7 +726,11 @@ fn filter_web_search_output(output: &serde_json::Value, state: &AgentState, step
     )
 }
 
-fn filter_vector_search_output(output: &serde_json::Value, state: &AgentState, step: &PlannedStep) -> serde_json::Value {
+fn filter_vector_search_output(
+    output: &serde_json::Value,
+    state: &AgentState,
+    step: &PlannedStep,
+) -> serde_json::Value {
     let keywords = result_relevance_keywords(state, step);
     let results = output.get("results").and_then(|value| value.as_array()).cloned().unwrap_or_default();
     let original_count = results.len();
@@ -742,10 +738,8 @@ fn filter_vector_search_output(output: &serde_json::Value, state: &AgentState, s
 
     for result in results {
         let content = result.get("content").and_then(|value| value.as_str()).unwrap_or_default();
-        let metadata = result
-            .get("metadata")
-            .map(|value| serde_json::to_string(value).unwrap_or_default())
-            .unwrap_or_default();
+        let metadata =
+            result.get("metadata").map(|value| serde_json::to_string(value).unwrap_or_default()).unwrap_or_default();
         let semantic_score = result.get("score").and_then(|value| value.as_f64()).unwrap_or_default();
         let keyword_bonus = (keyword_score(content, &keywords) * 4 + keyword_score(&metadata, &keywords) * 2) as f64;
         scored.push((semantic_score + keyword_bonus, result));
@@ -769,7 +763,12 @@ fn filter_vector_search_output(output: &serde_json::Value, state: &AgentState, s
     )
 }
 
-fn apply_result_relevance_filter(tool_name: &str, result: ToolResult, state: &AgentState, step: &PlannedStep) -> ToolResult {
+fn apply_result_relevance_filter(
+    tool_name: &str,
+    result: ToolResult,
+    state: &AgentState,
+    step: &PlannedStep,
+) -> ToolResult {
     if !result.success {
         return result;
     }
@@ -839,21 +838,12 @@ fn builtin_connector_catalogue() -> impl Iterator<Item = (&'static str, &'static
 /// Build a ToolSpec for a TenantConnector so it can be injected into the executor's
 /// live toolset during the connector expansion loop.
 fn build_tenant_connector_spec(tc: &crate::agent::definition::TenantConnector) -> crate::providers::ToolSpec {
-    let ops: Vec<String> = tc.endpoints.iter()
-        .map(|e| format!("{} {} — {}", e.method, e.path, e.description))
-        .collect();
+    let ops: Vec<String> =
+        tc.endpoints.iter().map(|e| format!("{} {} — {}", e.method, e.path, e.description)).collect();
 
-    let ops_hint = if ops.is_empty() {
-        format!("Custom connector at {}", tc.base_url)
-    } else {
-        ops.join("; ")
-    };
+    let ops_hint = if ops.is_empty() { format!("Custom connector at {}", tc.base_url) } else { ops.join("; ") };
 
-    let description = format!(
-        "{}. Operations: {}",
-        tc.summary,
-        &ops_hint[..ops_hint.len().min(500)],
-    );
+    let description = format!("{}. Operations: {}", tc.summary, &ops_hint[..ops_hint.len().min(500)],);
 
     crate::providers::ToolSpec {
         name: tc.name.clone(),
@@ -970,10 +960,7 @@ impl LlmExecutor {
                 role.execution_limits.max_steps,
                 role.execution_limits.max_retries,
                 role.execution_limits.timeout_secs,
-                role.execution_limits
-                    .max_cost_usd
-                    .map(|value| format!("{value:.2}"))
-                    .unwrap_or_else(|| "none".into())
+                role.execution_limits.max_cost_usd.map(|value| format!("{value:.2}")).unwrap_or_else(|| "none".into())
             ),
         ];
 
@@ -981,34 +968,19 @@ impl LlmExecutor {
             parts.push(format!("Execution guidelines:\n{}", role.execution_guidelines.to_prompt()));
         }
         if !workflow_hints.is_empty() {
-            parts.push(format!(
-                "Preferred execution sequence:\n- {}",
-                workflow_hints.join("\n- ")
-            ));
+            parts.push(format!("Preferred execution sequence:\n- {}", workflow_hints.join("\n- ")));
         }
         if !preferred_tool_categories.is_empty() {
-            parts.push(format!(
-                "Preferred tool categories: {}",
-                preferred_tool_categories.join(", ")
-            ));
+            parts.push(format!("Preferred tool categories: {}", preferred_tool_categories.join(", ")));
         }
         if !preferred_connector_categories.is_empty() {
-            parts.push(format!(
-                "Preferred connector categories: {}",
-                preferred_connector_categories.join(", ")
-            ));
+            parts.push(format!("Preferred connector categories: {}", preferred_connector_categories.join(", ")));
         }
         if let Ok(tenant_wasm_tools) = store.list_tenant_wasm_tools(&state.tenant_id).await {
-            let names: Vec<String> = tenant_wasm_tools
-                .into_iter()
-                .filter(|tool| tool.enabled)
-                .map(|tool| tool.name)
-                .collect();
+            let names: Vec<String> =
+                tenant_wasm_tools.into_iter().filter(|tool| tool.enabled).map(|tool| tool.name).collect();
             if !names.is_empty() {
-                parts.push(format!(
-                    "Registered tenant WASM tools (strictly sandboxed): {}",
-                    names.join(", ")
-                ));
+                parts.push(format!("Registered tenant WASM tools (strictly sandboxed): {}", names.join(", ")));
             }
         }
         if !role.connectors.is_empty() {
@@ -1032,10 +1004,7 @@ impl LlmExecutor {
             parts.push(format!("Preferred tools for this role: {}", preferred_tools.join(", ")));
         }
         if !allowed_wasm_tools.is_empty() {
-            parts.push(format!(
-                "Allowed registered WASM tools for this role: {}",
-                allowed_wasm_tools.join(", ")
-            ));
+            parts.push(format!("Allowed registered WASM tools for this role: {}", allowed_wasm_tools.join(", ")));
         }
         if !role.output_spec.description.is_empty() {
             parts.push(format!("Expected output: {}", role.output_spec.description));
@@ -1142,11 +1111,7 @@ impl LlmExecutor {
             "script_path": tool.script_path,
             "result": result.output,
         });
-        Ok(ToolResult {
-            success: result.success,
-            output,
-            error: result.error,
-        })
+        Ok(ToolResult { success: result.success, output, error: result.error })
     }
 
     /// Handle a connector meta-tool call inline, before it reaches the registry.
@@ -1161,7 +1126,7 @@ impl LlmExecutor {
         args: &serde_json::Value,
         state: &AgentState,
         tool_specs: &mut Vec<crate::providers::ToolSpec>,
-        workspace_tools: &mut HashMap<String, WorkspaceGeneratedTool>,
+        _workspace_tools: &mut HashMap<String, WorkspaceGeneratedTool>,
     ) -> serde_json::Value {
         match tool_name {
             "list_connectors_in_category" => {
@@ -1185,9 +1150,7 @@ impl LlmExecutor {
                         store.list_tenant_connectors(&state.tenant_id).await.unwrap_or_default()
                     } else {
                         let cat = format!("connector/{}", category);
-                        store.list_tenant_connectors_by_category(&state.tenant_id, &cat)
-                            .await
-                            .unwrap_or_default()
+                        store.list_tenant_connectors_by_category(&state.tenant_id, &cat).await.unwrap_or_default()
                     };
                     for tc in &tenant_conns {
                         connectors.push(serde_json::json!({
@@ -1211,9 +1174,8 @@ impl LlmExecutor {
                     if let Some(name) = connector_json["name"].as_str() {
                         if !current_names.contains(name) {
                             if let Some(spec) = self.tools.get(name) {
-                                use crate::tools::Tool;
                                 tool_specs.push(crate::providers::ToolSpec {
-                                    name:        spec.name().to_string(),
+                                    name: spec.name().to_string(),
                                     description: spec.description().to_string(),
                                     parameters: serde_json::json!({
                                         "type": "object",
@@ -1248,19 +1210,21 @@ impl LlmExecutor {
 
             "request_more_connectors" => {
                 let category = args["category"].as_str().unwrap_or("");
-                let reason   = args["reason"].as_str().unwrap_or("");
+                let reason = args["reason"].as_str().unwrap_or("");
 
                 // Check if there are any tenant connectors in this category not yet in tool_specs
                 let current_names: std::collections::HashSet<String> =
                     tool_specs.iter().map(|s| s.name.clone()).collect();
                 let full_cat = format!("connector/{}", category);
                 let more_available = if let Some(store) = &self.store {
-                    store.list_tenant_connectors_by_category(&state.tenant_id, &full_cat)
+                    store
+                        .list_tenant_connectors_by_category(&state.tenant_id, &full_cat)
                         .await
                         .unwrap_or_default()
                         .into_iter()
                         .filter(|tc| !current_names.contains(&tc.name))
-                        .count() > 0
+                        .count()
+                        > 0
                 } else {
                     false
                 };
@@ -1298,11 +1262,11 @@ impl LlmExecutor {
                 } else {
                     format!("connector/{}", category_raw)
                 };
-                let base_url      = args["base_url"].as_str().unwrap_or("").to_string();
+                let base_url = args["base_url"].as_str().unwrap_or("").to_string();
                 let auth_type_str = args["auth_type"].as_str().unwrap_or("bearer");
-                let cred_key      = args["auth_credential_key"].as_str().map(String::from);
-                let summary       = args["summary"].as_str().unwrap_or(&name).to_string();
-                let source_docs   = args["api_docs"].as_str().map(String::from);
+                let cred_key = args["auth_credential_key"].as_str().map(String::from);
+                let summary = args["summary"].as_str().unwrap_or(&name).to_string();
+                let source_docs = args["api_docs"].as_str().map(String::from);
                 let creation_path = args["creation_path"].as_str().unwrap_or("manual");
 
                 if name.is_empty() || base_url.is_empty() {
@@ -1314,13 +1278,11 @@ impl LlmExecutor {
                 let auth_type = match auth_type_str {
                     "api_key_header" => {
                         let hname = args["auth_header_name"].as_str().unwrap_or("X-API-Key");
-                        crate::agent::definition::ConnectorAuthType::ApiKeyHeader {
-                            header_name: hname.to_string(),
-                        }
+                        crate::agent::definition::ConnectorAuthType::ApiKeyHeader { header_name: hname.to_string() }
                     }
                     "basic" => crate::agent::definition::ConnectorAuthType::Basic,
-                    "none"  => crate::agent::definition::ConnectorAuthType::None,
-                    _       => crate::agent::definition::ConnectorAuthType::Bearer,
+                    "none" => crate::agent::definition::ConnectorAuthType::None,
+                    _ => crate::agent::definition::ConnectorAuthType::Bearer,
                 };
 
                 let source = match creation_path {
@@ -1329,38 +1291,40 @@ impl LlmExecutor {
                         crate::agent::definition::ConnectorSource::KnownSaas { product_name: product }
                     }
                     "api_docs" => crate::agent::definition::ConnectorSource::ApiDocs,
-                    _          => crate::agent::definition::ConnectorSource::Manual,
+                    _ => crate::agent::definition::ConnectorSource::Manual,
                 };
 
                 // Parse endpoints from args if provided
                 let endpoints: Vec<crate::agent::definition::EndpointDef> = args["endpoints"]
                     .as_array()
                     .map(|arr| {
-                        arr.iter().filter_map(|e| {
-                            Some(crate::agent::definition::EndpointDef {
-                                method:      e["method"].as_str().unwrap_or("GET").to_string(),
-                                path:        e["path"].as_str().unwrap_or("").to_string(),
-                                description: e["description"].as_str().unwrap_or("").to_string(),
-                                params:      Vec::new(),
+                        arr.iter()
+                            .filter_map(|e| {
+                                Some(crate::agent::definition::EndpointDef {
+                                    method: e["method"].as_str().unwrap_or("GET").to_string(),
+                                    path: e["path"].as_str().unwrap_or("").to_string(),
+                                    description: e["description"].as_str().unwrap_or("").to_string(),
+                                    params: Vec::new(),
+                                })
                             })
-                        }).collect()
+                            .collect()
                     })
                     .unwrap_or_default();
 
                 let tc = crate::agent::definition::TenantConnector {
-                    id:                  uuid::Uuid::new_v4().to_string(),
-                    tenant_id:           state.tenant_id.clone(),
-                    name:                name.clone(),
-                    category:            category.clone(),
-                    base_url:            base_url.clone(),
+                    id: uuid::Uuid::new_v4().to_string(),
+                    tenant_id: state.tenant_id.clone(),
+                    name: name.clone(),
+                    category: category.clone(),
+                    base_url: base_url.clone(),
                     auth_type,
                     auth_credential_key: cred_key,
                     source,
                     source_docs,
                     endpoints,
-                    summary:             summary.clone(),
-                    created_at:          chrono::Utc::now(),
-                    updated_at:          chrono::Utc::now(),
+                    summary: summary.clone(),
+                    created_at: chrono::Utc::now(),
+                    updated_at: chrono::Utc::now(),
                 };
 
                 // Save to DB
@@ -1397,10 +1361,8 @@ impl LlmExecutor {
                 // Expand core tool categories — distinct from connector expansion.
                 let categories_value: Vec<serde_json::Value> =
                     args["categories"].as_array().cloned().unwrap_or_default();
-                let categories: Vec<String> = categories_value
-                    .iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect();
+                let categories: Vec<String> =
+                    categories_value.iter().filter_map(|v| v.as_str().map(String::from)).collect();
 
                 if categories.is_empty() {
                     return serde_json::json!({
@@ -1423,13 +1385,11 @@ impl LlmExecutor {
                     }
                 }
 
-                let mut category_names: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+                let mut category_names: std::collections::BTreeMap<String, Vec<String>> =
+                    std::collections::BTreeMap::new();
                 for spec in tool_specs.iter() {
                     if let Some(tool) = self.tools.get(&spec.name) {
-                        category_names
-                            .entry(tool.category().to_string())
-                            .or_default()
-                            .push(spec.name.clone());
+                        category_names.entry(tool.category().to_string()).or_default().push(spec.name.clone());
                     }
                 }
                 for tools in category_names.values_mut() {
@@ -1532,27 +1492,18 @@ impl Executor for LlmExecutor {
         history: &StepHistory,
     ) -> Result<StepResult> {
         let role_policy = self.load_role_execution_policy(state).await;
-        let job_type = role_policy
-            .as_ref()
-            .map(|policy| policy.job_type.clone())
-            .unwrap_or_else(|| JobType::detect(&state.goal));
-        let allowed_wasm_tools = role_policy
-            .as_ref()
-            .map(|policy| policy.allowed_wasm_tools.clone())
-            .unwrap_or_default();
+        let job_type =
+            role_policy.as_ref().map(|policy| policy.job_type.clone()).unwrap_or_else(|| JobType::detect(&state.goal));
+        let allowed_wasm_tools =
+            role_policy.as_ref().map(|policy| policy.allowed_wasm_tools.clone()).unwrap_or_default();
         let direct_response_mode = is_direct_response_goal(&state.goal) && plan.steps.len() == 1 && step.tool.is_none();
         let answer_only_step = !direct_response_mode && is_answer_only_step(step);
         let mut tool_specs = if direct_response_mode || answer_only_step {
             Vec::new()
         } else {
-            let role_tools = role_policy
-                .as_ref()
-                .map(|policy| policy.tool_preferences.clone())
-                .unwrap_or_default();
-            let role_tool_categories = role_policy
-                .as_ref()
-                .map(|policy| policy.preferred_tool_categories.clone())
-                .unwrap_or_default();
+            let role_tools = role_policy.as_ref().map(|policy| policy.tool_preferences.clone()).unwrap_or_default();
+            let role_tool_categories =
+                role_policy.as_ref().map(|policy| policy.preferred_tool_categories.clone()).unwrap_or_default();
             select_tools_for_step(&self.tools, step, &job_type, &role_tools, &role_tool_categories)
         };
         let mut workspace_tools: HashMap<String, WorkspaceGeneratedTool> = HashMap::new();
@@ -1610,7 +1561,7 @@ impl Executor for LlmExecutor {
         .with_tools(tool_specs.clone())
         .no_cache();
 
-        let mut resp = loop {
+        let resp = loop {
             let r = self.gateway.chat(request.clone()).await?;
 
             // Check if the LLM called a connector meta-tool
@@ -1629,13 +1580,15 @@ impl Executor for LlmExecutor {
                 "executor: intercepting connector meta-tool call"
             );
 
-            let meta_result = self.handle_connector_meta_tool(
-                call.name.as_str(),
-                &call.arguments,
-                state,
-                &mut tool_specs,
-                &mut workspace_tools,
-            ).await;
+            let meta_result = self
+                .handle_connector_meta_tool(
+                    call.name.as_str(),
+                    &call.arguments,
+                    state,
+                    &mut tool_specs,
+                    &mut workspace_tools,
+                )
+                .await;
 
             // Inject the meta-tool result as a tool_result message and rebuild request
             let result_content = serde_json::to_string(&meta_result).unwrap_or_default();
@@ -1643,18 +1596,13 @@ impl Executor for LlmExecutor {
             // Append assistant turn with tool call + tool result
             messages.push(Message::user(format!(
                 "[tool:{name}] → {result}",
-                name   = call.name,
+                name = call.name,
                 result = &result_content[..result_content.len().min(2000)],
             )));
 
-            request = GatewayRequest::new(
-                state.id.clone(),
-                state.tenant_id.clone(),
-                complexity.clone(),
-                messages,
-            )
-            .with_tools(tool_specs.clone())
-            .no_cache();
+            request = GatewayRequest::new(state.id.clone(), state.tenant_id.clone(), complexity.clone(), messages)
+                .with_tools(tool_specs.clone())
+                .no_cache();
         };
         tracing::info!(
             agent_id = %state.id,
@@ -1720,35 +1668,29 @@ impl Executor for LlmExecutor {
             // external_db, external_api, and named connector tools all look up
             // stored tokens by tenant_id — inject it so they don't need it from the LLM.
             {
-                let needs_tenant = matches!(
-                    tool_call.name.as_str(),
-                    "external_db" | "external_api" | "run_registered_wasm"
-                ) || crate::tools::connector_tool::ALL_CONNECTORS
-                    .iter()
-                    .any(|c| c.name == tool_call.name.as_str());
+                let needs_tenant =
+                    matches!(tool_call.name.as_str(), "external_db" | "external_api" | "run_registered_wasm")
+                        || crate::tools::connector_tool::ALL_CONNECTORS
+                            .iter()
+                            .any(|c| c.name == tool_call.name.as_str());
 
                 if needs_tenant {
                     if let Some(obj) = tool_call.arguments.as_object_mut() {
-                        obj.entry("tenant_id")
-                            .or_insert_with(|| serde_json::json!(state.tenant_id));
+                        obj.entry("tenant_id").or_insert_with(|| serde_json::json!(state.tenant_id));
                     }
                 }
 
                 if tool_call.name == "run_registered_wasm" {
                     if let Some(obj) = tool_call.arguments.as_object_mut() {
-                        obj.entry("workspace")
-                            .or_insert_with(|| serde_json::json!(state.workspace_path));
-                        obj.entry("agent_id")
-                            .or_insert_with(|| serde_json::json!(state.id));
+                        obj.entry("workspace").or_insert_with(|| serde_json::json!(state.workspace_path));
+                        obj.entry("agent_id").or_insert_with(|| serde_json::json!(state.id));
                         if let Some(role_id) = state.metadata.get("role_id").and_then(|value| value.as_str()) {
-                            obj.entry("role_id")
-                                .or_insert_with(|| serde_json::json!(role_id));
+                            obj.entry("role_id").or_insert_with(|| serde_json::json!(role_id));
                         }
                         if let Some(goal_instance_id) =
                             state.metadata.get("goal_instance_id").and_then(|value| value.as_str())
                         {
-                            obj.entry("goal_instance_id")
-                                .or_insert_with(|| serde_json::json!(goal_instance_id));
+                            obj.entry("goal_instance_id").or_insert_with(|| serde_json::json!(goal_instance_id));
                         }
                     }
                 }
@@ -1763,7 +1705,8 @@ impl Executor for LlmExecutor {
             }
 
             if tool_call.name == "run_registered_wasm" {
-                let requested_tool = tool_call.arguments
+                let requested_tool = tool_call
+                    .arguments
                     .get("tool_name")
                     .and_then(|value| value.as_str())
                     .map(str::trim)
@@ -1809,11 +1752,7 @@ impl Executor for LlmExecutor {
 
             // ── 1. PII redaction — scrub args before they leave the process ──────
             let workspace_tool = workspace_tools.get(&tool_call.name).cloned();
-            let builtin_tool = if workspace_tool.is_none() {
-                self.tools.get(&tool_call.name)
-            } else {
-                None
-            };
+            let builtin_tool = if workspace_tool.is_none() { self.tools.get(&tool_call.name) } else { None };
             if workspace_tool.is_none() && builtin_tool.is_none() {
                 tool_results.push(ToolResult::err(format!(
                     "tool '{}' not found in registry or workspace custom tools",
@@ -2014,7 +1953,11 @@ impl Executor for LlmExecutor {
         let is_final_step = plan.is_complete(step.index + 1);
         let mut final_answer_candidate = sanitize_final_answer_candidate(&output);
 
-        if !direct_response_mode && is_final_step && !output.contains("STEP FAILED") && (!tool_results.is_empty() || final_answer_candidate.is_none()) {
+        if !direct_response_mode
+            && is_final_step
+            && !output.contains("STEP FAILED")
+            && (!tool_results.is_empty() || final_answer_candidate.is_none())
+        {
             if let Some(synthesized) = self.synthesize_final_answer(state, step, history, &tool_results).await? {
                 output = synthesized.clone();
                 final_answer_candidate = Some(synthesized);
@@ -2026,10 +1969,13 @@ impl Executor for LlmExecutor {
         // ── Extract items_processed from tool outputs ─────────────────────
         // Returned in StepResult so loop.rs can write it to state.metadata
         // where CompletionCriteria checks and the savings estimator can read it.
-        let items_processed: u64 = tool_results.iter()
+        let items_processed: u64 = tool_results
+            .iter()
             .filter(|r| r.success)
             .filter_map(|r| {
-                r.output.get("count").or_else(|| r.output.get("processed"))
+                r.output
+                    .get("count")
+                    .or_else(|| r.output.get("processed"))
                     .or_else(|| r.output.get("total"))
                     .or_else(|| r.output.get("rows"))
                     .and_then(|v| v.as_u64())
@@ -2037,7 +1983,8 @@ impl Executor for LlmExecutor {
             .sum();
 
         // Capture which connectors wrote successfully (for RecordUpdated criterion)
-        let connector_writes: Vec<String> = tool_results.iter()
+        let connector_writes: Vec<String> = tool_results
+            .iter()
             .filter(|r| r.success)
             .filter_map(|r| r.output.get("connector")?.as_str().map(String::from))
             .collect();
@@ -2084,12 +2031,37 @@ fn plane_guard_risk(tool_name: &str) -> &'static str {
         | "process_monitor"
         | "sql_query" => "low",
 
-        "file_write" | "file_edit" | "memory_store" | "memory_forget" | "git_operations" | "api_call" | "pushover"
-        | "schedule" | "cron_add" | "cron_update" | "cron_remove" | "wasm_exec" | "wasm_compile" | "wasm_call"
+        "file_write"
+        | "file_edit"
+        | "memory_store"
+        | "memory_forget"
+        | "git_operations"
+        | "api_call"
+        | "pushover"
+        | "schedule"
+        | "cron_add"
+        | "cron_update"
+        | "cron_remove"
+        | "wasm_exec"
+        | "wasm_compile"
+        | "wasm_call"
         | "run_registered_wasm"
-        | "code_run" | "compress" | "decompress" | "image_process" | "pdf_create" | "spreadsheet_write" | "email"
-        | "notification" | "vector_store" | "vector_delete" | "crypto_tool" | "screenshot" | "browser_interact"
-        | "browser_pdf" | "browser_network" | "ssh_exec" => "medium",
+        | "code_run"
+        | "compress"
+        | "decompress"
+        | "image_process"
+        | "pdf_create"
+        | "spreadsheet_write"
+        | "email"
+        | "notification"
+        | "vector_store"
+        | "vector_delete"
+        | "crypto_tool"
+        | "screenshot"
+        | "browser_interact"
+        | "browser_pdf"
+        | "browser_network"
+        | "ssh_exec" => "medium",
 
         "docker"
         | "kubernetes"
@@ -2138,12 +2110,7 @@ mod tests {
         async fn chat(&self, _req: GatewayRequest) -> Result<ChatResponse> {
             let mut queue = self.responses.lock().unwrap();
             if queue.is_empty() {
-                Ok(ChatResponse {
-                    content: Some("{}".into()),
-                    tool_calls: vec![],
-                    input_tokens: 0,
-                    output_tokens: 0,
-                })
+                Ok(ChatResponse { content: Some("{}".into()), tool_calls: vec![], input_tokens: 0, output_tokens: 0 })
             } else {
                 Ok(queue.remove(0))
             }

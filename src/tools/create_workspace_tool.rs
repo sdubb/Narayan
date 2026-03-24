@@ -53,9 +53,7 @@ impl Tool for CreateWorkspaceToolTool {
         let language = args["language"].as_str().unwrap_or("").trim();
         let code = args["code"].as_str().unwrap_or("").trim();
         if name.is_empty() || language.is_empty() || code.is_empty() {
-            return Ok(ToolResult::err(
-                "name, language, and code are required for create_workspace_tool",
-            ));
+            return Ok(ToolResult::err("name, language, and code are required for create_workspace_tool"));
         }
 
         Ok(ToolResult::ok(serde_json::json!({

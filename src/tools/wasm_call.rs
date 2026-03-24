@@ -67,14 +67,8 @@ impl Tool for WasmCallTool {
             None => return Ok(ToolResult::err("'function' is required")),
         };
 
-        let fuel = args["fuel"]
-            .as_u64()
-            .unwrap_or(DEFAULT_FUEL)
-            .clamp(100_000, MAX_FUEL);
-        let timeout_secs = args["timeout_secs"]
-            .as_u64()
-            .unwrap_or(DEFAULT_TIMEOUT_SECS)
-            .clamp(1, MAX_TIMEOUT_SECS);
+        let fuel = args["fuel"].as_u64().unwrap_or(DEFAULT_FUEL).clamp(100_000, MAX_FUEL);
+        let timeout_secs = args["timeout_secs"].as_u64().unwrap_or(DEFAULT_TIMEOUT_SECS).clamp(1, MAX_TIMEOUT_SECS);
         let memory_limit_bytes = args["memory_limit_bytes"]
             .as_u64()
             .unwrap_or(DEFAULT_MEMORY_LIMIT_BYTES)

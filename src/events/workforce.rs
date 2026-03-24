@@ -36,7 +36,7 @@ use uuid::Uuid;
 
 use crate::{
     agent::definition::{WorkforceEventPayload, WorkforceEventSubscription},
-    state::{GoalInstance, GoalInstanceStatus, TriggerSource},
+    state::{GoalInstance, TriggerSource},
     storage::PostgresStore,
 };
 
@@ -45,14 +45,8 @@ use crate::{
 /// Loads all active subscriptions for the tenant, evaluates filters,
 /// and creates new GoalInstances for matching subscribers.
 /// Returns the number of new GoalInstances created.
-pub async fn dispatch(
-    event: &WorkforceEventPayload,
-    store: &Arc<PostgresStore>,
-) -> Result<usize> {
-    let subscriptions = store
-        .list_active_workforce_subscriptions(&event.tenant_id)
-        .await
-        .unwrap_or_default();
+pub async fn dispatch(event: &WorkforceEventPayload, store: &Arc<PostgresStore>) -> Result<usize> {
+    let subscriptions = store.list_active_workforce_subscriptions(&event.tenant_id).await.unwrap_or_default();
 
     if subscriptions.is_empty() {
         return Ok(0);
@@ -109,7 +103,7 @@ pub async fn dispatch(
             input_data,
             TriggerSource::WorkforceEvent {
                 source_goal_instance_id: event.goal_instance_id.clone(),
-                source_role_name:        event.role_name.clone(),
+                source_role_name: event.role_name.clone(),
             },
             false, // is_test — inherit from role status in future
         );
@@ -158,11 +152,7 @@ pub async fn sync_subscriptions_for_role(
     );
 
     if is_workforce_trigger && is_deployable {
-        let filter = role
-            .trigger
-            .workforce_event_filter
-            .clone()
-            .unwrap_or_default();
+        let filter = role.trigger.workforce_event_filter.clone().unwrap_or_default();
 
         if filter.is_empty() {
             tracing::warn!(
@@ -172,24 +162,20 @@ pub async fn sync_subscriptions_for_role(
             return Ok(());
         }
 
-        let mapping = role
-            .trigger
-            .input_mapping
-            .clone()
-            .unwrap_or(serde_json::Value::Object(Default::default()));
+        let mapping = role.trigger.input_mapping.clone().unwrap_or(serde_json::Value::Object(Default::default()));
 
         // Stable subscription ID derived from role ID so upsert is idempotent.
         let sub_id = format!("wfsub-{}", &role.id);
 
         let sub = WorkforceEventSubscription {
-            id:                  sub_id,
-            tenant_id:           role.tenant_id.clone(),
-            subscriber_role_id:  role.id.clone(),
+            id: sub_id,
+            tenant_id: role.tenant_id.clone(),
+            subscriber_role_id: role.id.clone(),
             subscriber_agent_id: role.agent_id.clone(),
-            event_filter:        filter,
-            input_mapping:       mapping,
-            active:              true,
-            created_at:          Utc::now(),
+            event_filter: filter,
+            input_mapping: mapping,
+            active: true,
+            created_at: Utc::now(),
         };
 
         store.upsert_workforce_subscription(&sub).await?;
@@ -210,21 +196,12 @@ pub async fn sync_subscriptions_for_role(
 
 /// Build the workforce event payload from a completed/failed GoalInstance.
 /// Requires the agent name and role name which are not stored on the instance.
-pub async fn build_event(
-    gi: &GoalInstance,
-    store: &Arc<PostgresStore>,
-) -> Option<WorkforceEventPayload> {
+pub async fn build_event(gi: &GoalInstance, store: &Arc<PostgresStore>) -> Option<WorkforceEventPayload> {
     // Load agent definition for agent_name
-    let agent_def = store
-        .get_agent_definition(&gi.tenant_id, &gi.agent_id)
-        .await
-        .ok()??;
+    let agent_def = store.get_agent_definition(&gi.tenant_id, &gi.agent_id).await.ok()??;
 
     // Load role for role_name
-    let role = store
-        .get_agent_role(&gi.tenant_id, &gi.role_id)
-        .await
-        .ok()??;
+    let role = store.get_agent_role(&gi.tenant_id, &gi.role_id).await.ok()??;
 
     Some(gi.to_workforce_event(&agent_def.name, &role.name))
 }
@@ -236,63 +213,63 @@ mod tests {
 
     fn make_event(role_name: &str, status: &str) -> WorkforceEventPayload {
         WorkforceEventPayload {
-            tenant_id:          "t-1".into(),
-            agent_id:           "ag-1".into(),
-            agent_name:         "Sales Agent".into(),
-            role_id:            "role-src".into(),
-            role_name:          role_name.into(),
-            goal_instance_id:   "gi-src".into(),
-            status:             status.into(),
-            output_data:        serde_json::json!({ "lead_id": "L-999" }),
-            failure_reason:     None,
-            emitted_at:         Utc::now(),
+            tenant_id: "t-1".into(),
+            agent_id: "ag-1".into(),
+            agent_name: "Sales Agent".into(),
+            role_id: "role-src".into(),
+            role_name: role_name.into(),
+            goal_instance_id: "gi-src".into(),
+            status: status.into(),
+            output_data: serde_json::json!({ "lead_id": "L-999" }),
+            failure_reason: None,
+            emitted_at: Utc::now(),
         }
     }
 
     fn make_subscription(filter: &str) -> WorkforceEventSubscription {
         WorkforceEventSubscription {
-            id:                  "sub-1".into(),
-            tenant_id:           "t-1".into(),
-            subscriber_role_id:  "role-sub".into(),
+            id: "sub-1".into(),
+            tenant_id: "t-1".into(),
+            subscriber_role_id: "role-sub".into(),
             subscriber_agent_id: "ag-2".into(),
-            event_filter:        filter.into(),
-            input_mapping:       serde_json::json!({ "lead_id": "$.output_data.lead_id" }),
-            active:              true,
-            created_at:          Utc::now(),
+            event_filter: filter.into(),
+            input_mapping: serde_json::json!({ "lead_id": "$.output_data.lead_id" }),
+            active: true,
+            created_at: Utc::now(),
         }
     }
 
     #[test]
     fn test_filter_single_match() {
-        let ev  = make_event("Lead Enrichment", "completed");
+        let ev = make_event("Lead Enrichment", "completed");
         let sub = make_subscription("role_name == 'Lead Enrichment'");
         assert!(ev.matches_filter(&sub.event_filter));
     }
 
     #[test]
     fn test_filter_no_match() {
-        let ev  = make_event("Lead Enrichment", "completed");
+        let ev = make_event("Lead Enrichment", "completed");
         let sub = make_subscription("role_name == 'Weekly Report'");
         assert!(!ev.matches_filter(&sub.event_filter));
     }
 
     #[test]
     fn test_filter_and_both_match() {
-        let ev  = make_event("Lead Enrichment", "completed");
+        let ev = make_event("Lead Enrichment", "completed");
         let sub = make_subscription("role_name == 'Lead Enrichment' AND status == 'completed'");
         assert!(ev.matches_filter(&sub.event_filter));
     }
 
     #[test]
     fn test_filter_and_partial_match() {
-        let ev  = make_event("Lead Enrichment", "failed");
+        let ev = make_event("Lead Enrichment", "failed");
         let sub = make_subscription("role_name == 'Lead Enrichment' AND status == 'completed'");
         assert!(!ev.matches_filter(&sub.event_filter));
     }
 
     #[test]
     fn test_input_mapping_applied() {
-        let ev  = make_event("Lead Enrichment", "completed");
+        let ev = make_event("Lead Enrichment", "completed");
         let sub = make_subscription("role_name == 'Lead Enrichment'");
         let mapped = ev.apply_mapping(&sub.input_mapping);
         assert_eq!(mapped["lead_id"], "L-999");
@@ -306,7 +283,7 @@ mod tests {
         let ev = make_event("Lead Enrichment", "completed");
         let mut sub = make_subscription("role_name == 'Lead Enrichment'");
         sub.subscriber_role_id = "role-src".into(); // same as event.role_id
-        // Filter matches — the loop guard in dispatch() is what prevents creation
+                                                    // Filter matches — the loop guard in dispatch() is what prevents creation
         assert!(ev.matches_filter(&sub.event_filter));
     }
 }

@@ -110,8 +110,8 @@ impl Tool for CreateCustomConnectorTool {
 
     /// Fallback — executor intercepts in production, parses docs, saves to DB.
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
-        let name          = args["name"].as_str().unwrap_or("");
-        let category      = args["category"].as_str().unwrap_or("");
+        let name = args["name"].as_str().unwrap_or("");
+        let category = args["category"].as_str().unwrap_or("");
         let creation_path = args["creation_path"].as_str().unwrap_or("manual");
 
         if name.is_empty() {
@@ -123,9 +123,7 @@ impl Tool for CreateCustomConnectorTool {
 
         // Validate name format
         if !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
-            return Ok(ToolResult::err(
-                "connector name must contain only lowercase letters, numbers, and underscores",
-            ));
+            return Ok(ToolResult::err("connector name must contain only lowercase letters, numbers, and underscores"));
         }
 
         Ok(ToolResult::ok(serde_json::json!({

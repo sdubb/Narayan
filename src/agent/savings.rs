@@ -25,7 +25,7 @@ use chrono::Utc;
 
 use crate::{
     agent::definition::{AgentRole, CompletionCheck},
-    state::{GoalInstance, GoalInstanceStatus},
+    state::GoalInstance,
     storage::PostgresStore,
 };
 
@@ -35,16 +35,16 @@ use crate::{
 
 pub fn hourly_rate_for_category(category: &str) -> f64 {
     match category {
-        "customer_support"    => 28.0,
-        "sales_revops"        => 48.0,
-        "finance_accounting"  => 58.0,
+        "customer_support" => 28.0,
+        "sales_revops" => 48.0,
+        "finance_accounting" => 58.0,
         "devops" | "it_ops_itsm" => 90.0,
-        "hr_people_ops"       => 42.0,
-        "legal_contract"      => 180.0,
-        "research_analyst"    => 52.0,
-        "software_engineer"   => 105.0,
-        "marketing"           => 45.0,
-        _                     => 35.0,   // general knowledge worker
+        "hr_people_ops" => 42.0,
+        "legal_contract" => 180.0,
+        "research_analyst" => 52.0,
+        "software_engineer" => 105.0,
+        "marketing" => 45.0,
+        _ => 35.0, // general knowledge worker
     }
 }
 
@@ -57,34 +57,34 @@ fn minutes_per_item(actions: &[&str]) -> f64 {
     let joined = actions.join(" ").to_lowercase();
 
     if joined.contains("contract") || joined.contains("legal") || joined.contains("nda") {
-        return 45.0;   // contract review: ~45 min/contract
+        return 45.0; // contract review: ~45 min/contract
     }
     if joined.contains("research") && joined.contains("report") {
-        return 90.0;   // research report: ~90 min
+        return 90.0; // research report: ~90 min
     }
     if joined.contains("code review") || joined.contains("pr review") {
-        return 15.0;   // code review pass: ~15 min/PR
+        return 15.0; // code review pass: ~15 min/PR
     }
     if joined.contains("invoice") || joined.contains("reconcil") {
-        return 12.0;   // accounting item: ~12 min
+        return 12.0; // accounting item: ~12 min
     }
     if joined.contains("candidate") || joined.contains("screen") || joined.contains("recruit") {
-        return 20.0;   // candidate screening: ~20 min
+        return 20.0; // candidate screening: ~20 min
     }
     if joined.contains("ticket") || joined.contains("support") || joined.contains("respond") {
-        return 6.0;    // support ticket response: ~6 min
+        return 6.0; // support ticket response: ~6 min
     }
     if joined.contains("enrich") || joined.contains("prospect") || joined.contains("lead") {
-        return 8.0;    // lead enrichment: ~8 min
+        return 8.0; // lead enrichment: ~8 min
     }
     if joined.contains("report") || joined.contains("summarise") || joined.contains("summarize") {
-        return 25.0;   // report generation: ~25 min
+        return 25.0; // report generation: ~25 min
     }
     if joined.contains("deploy") || joined.contains("monitor") || joined.contains("incident") {
-        return 18.0;   // DevOps task: ~18 min
+        return 18.0; // DevOps task: ~18 min
     }
 
-    5.0  // default: general record/item processing
+    5.0 // default: general record/item processing
 }
 
 // ── Estimator ─────────────────────────────────────────────────────────────
@@ -100,22 +100,19 @@ impl WorkSavingsEstimator {
 
     /// Calculate and persist savings for a completed or partially complete GoalInstance.
     /// Idempotent — safe to call multiple times.
-    pub async fn estimate_and_persist(
-        &self,
-        gi:   &mut GoalInstance,
-        role: &AgentRole,
-    ) -> Result<()> {
+    pub async fn estimate_and_persist(&self, gi: &mut GoalInstance, role: &AgentRole) -> Result<()> {
         use crate::state::GoalInstanceStatus;
 
         // Only estimate on completed or partially-complete runs
-        let is_estimable = matches!(
-            gi.status,
-            GoalInstanceStatus::Completed | GoalInstanceStatus::PartiallyComplete
-        );
-        if !is_estimable { return Ok(()); }
+        let is_estimable = matches!(gi.status, GoalInstanceStatus::Completed | GoalInstanceStatus::PartiallyComplete);
+        if !is_estimable {
+            return Ok(());
+        }
 
         // Already estimated
-        if gi.human_hours_saved > 0.0 { return Ok(()); }
+        if gi.human_hours_saved > 0.0 {
+            return Ok(());
+        }
 
         // ── Quality gate: check result is non-empty ───────────────────────
         // A run that completed but produced no output (0 items, empty workspace)
@@ -134,19 +131,19 @@ impl WorkSavingsEstimator {
         // Pro-rate for partial completion
         let (hours, cost_usd) = if gi.status == GoalInstanceStatus::PartiallyComplete {
             let partial_fraction = self.partial_completion_fraction(gi, role);
-            (round2(raw_hours * partial_fraction * quality_factor),
-             round2(raw_cost  * partial_fraction * quality_factor))
+            (
+                round2(raw_hours * partial_fraction * quality_factor),
+                round2(raw_cost * partial_fraction * quality_factor),
+            )
         } else {
             (round2(raw_hours * quality_factor), round2(raw_cost * quality_factor))
         };
 
-        gi.human_hours_saved    = hours;
+        gi.human_hours_saved = hours;
         gi.human_cost_saved_usd = cost_usd;
-        gi.updated_at           = Utc::now();
+        gi.updated_at = Utc::now();
 
-        self.store.update_goal_instance_savings(
-            &gi.tenant_id, &gi.id, hours, cost_usd,
-        ).await?;
+        self.store.update_goal_instance_savings(&gi.tenant_id, &gi.id, hours, cost_usd).await?;
 
         tracing::info!(
             goal_instance_id = %gi.id,
@@ -168,7 +165,9 @@ impl WorkSavingsEstimator {
             // Explicit count fields
             for key in &["processed", "count", "total", "items", "rows"] {
                 if let Some(n) = result[key].as_u64() {
-                    if n > 0 { return 1.0; }
+                    if n > 0 {
+                        return 1.0;
+                    }
                 }
             }
             // Non-null, non-empty result object with any keys
@@ -188,7 +187,9 @@ impl WorkSavingsEstimator {
     /// For partially complete runs, estimate what fraction of the work was done.
     fn partial_completion_fraction(&self, gi: &GoalInstance, role: &AgentRole) -> f64 {
         // Try to read items_processed from result
-        let processed = gi.result.as_ref()
+        let processed = gi
+            .result
+            .as_ref()
             .and_then(|r| r.get("processed").or_else(|| r.get("count")))
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
@@ -205,24 +206,22 @@ impl WorkSavingsEstimator {
     /// Pure estimate — does not write to DB.
     pub fn estimate(&self, gi: &GoalInstance, role: &AgentRole) -> (f64, f64) {
         let category = role.purpose_category();
-        let rate     = hourly_rate_for_category(&category);
+        let rate = hourly_rate_for_category(&category);
 
         // Extract item count from completion criteria
         let item_count = self.extract_item_count(gi, role);
 
         // Get action keywords from role guidelines
-        let action_keywords: Vec<&str> = role.execution_guidelines.rules.iter()
-            .map(|r| r.text.as_str())
-            .collect();
+        let action_keywords: Vec<&str> = role.execution_guidelines.rules.iter().map(|r| r.text.as_str()).collect();
         let mins = minutes_per_item(&action_keywords);
 
         let human_hours = (item_count as f64 * mins) / 60.0;
-        let human_cost  = human_hours * rate;
+        let human_cost = human_hours * rate;
 
         // Floor: even a single run saves at least the setup time
-        let min_hours = 0.1;  // 6 minutes minimum
+        let min_hours = 0.1; // 6 minutes minimum
         let hours = human_hours.max(min_hours);
-        let cost  = human_cost.max(min_hours * rate);
+        let cost = human_cost.max(min_hours * rate);
 
         (round2(hours), round2(cost))
     }
@@ -231,7 +230,9 @@ impl WorkSavingsEstimator {
         // 1. Check GoalInstance result for item counts
         if let Some(result) = &gi.result {
             for key in &["processed", "count", "total", "items", "records"] {
-                if let Some(n) = result[key].as_u64() { return n.max(1); }
+                if let Some(n) = result[key].as_u64() {
+                    return n.max(1);
+                }
             }
         }
 
@@ -245,7 +246,9 @@ impl WorkSavingsEstimator {
                 }
             }
             if let CompletionCheck::CountMatches { source, .. } = &criterion.check {
-                if let Some(n) = extract_number_from_str(source) { return n; }
+                if let Some(n) = extract_number_from_str(source) {
+                    return n;
+                }
             }
         }
 
@@ -259,37 +262,37 @@ fn round2(x: f64) -> f64 {
 }
 
 fn extract_number_from_str(s: &str) -> Option<u64> {
-    s.split_whitespace()
-        .find_map(|w| w.parse::<u64>().ok())
-        .filter(|&n| n > 0)
+    s.split_whitespace().find_map(|w| w.parse::<u64>().ok()).filter(|&n| n > 0)
 }
 
 // ── Tenant aggregate ──────────────────────────────────────────────────────
 
 #[derive(Debug, serde::Serialize)]
 pub struct TenantSavingsSummary {
-    pub total_runs:             u64,
-    pub total_human_hours:      f64,
-    pub total_human_cost_usd:   f64,
-    pub total_ai_cost_usd:      f64,
-    pub roi_multiple:           f64,
+    pub total_runs: u64,
+    pub total_human_hours: f64,
+    pub total_human_cost_usd: f64,
+    pub total_ai_cost_usd: f64,
+    pub roi_multiple: f64,
     /// Breakdown by agent role
     pub by_role: Vec<RoleSavings>,
 }
 
 #[derive(Debug, serde::Serialize)]
 pub struct RoleSavings {
-    pub role_id:              String,
-    pub role_name:            String,
-    pub runs:                 u64,
-    pub human_hours_saved:    f64,
+    pub role_id: String,
+    pub role_name: String,
+    pub runs: u64,
+    pub human_hours_saved: f64,
     pub human_cost_saved_usd: f64,
-    pub ai_cost_usd:          f64,
+    pub ai_cost_usd: f64,
 }
 
 impl TenantSavingsSummary {
     pub fn roi_multiple(human: f64, ai: f64) -> f64 {
-        if ai <= 0.0 { return 0.0; }
+        if ai <= 0.0 {
+            return 0.0;
+        }
         round2(human / ai)
     }
 }

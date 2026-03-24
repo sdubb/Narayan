@@ -28,6 +28,7 @@ pub mod marketing_growth;
 pub mod research_intelligence;
 pub mod sales_revops;
 
+#[allow(unused_imports)]
 pub use registry::{AgentServices, SegmentPlugin, SegmentRegistry, SegmentRegistryBuilder, SharedDeps};
 mod registry;
 

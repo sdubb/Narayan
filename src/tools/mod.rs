@@ -140,9 +140,13 @@ impl Default for ToolRegistry {
 // ── Sub-modules ────────────────────────────────────────────────────────────
 
 pub mod connector_meta {
+    #[allow(unused_imports)]
     pub use super::create_custom_connector::CreateCustomConnectorTool;
+    #[allow(unused_imports)]
     pub use super::list_connectors_in_category::ListConnectorsInCategoryTool;
+    #[allow(unused_imports)]
     pub use super::request_more_connectors::RequestMoreConnectorsTool;
+    #[allow(unused_imports)]
     pub use super::request_more_tools::RequestMoreToolsTool;
 }
 
@@ -174,12 +178,12 @@ pub mod delegate;
 pub mod diff_patch;
 pub mod docker;
 pub mod email;
+pub mod external_api;
+pub mod external_db;
 pub mod file_edit;
 pub mod file_read;
 pub mod file_write;
 pub mod git_operations;
-pub mod external_api;
-pub mod external_db;
 pub mod glob_search;
 pub mod hardware;
 pub mod http_request;
@@ -200,6 +204,7 @@ pub mod proxy_config;
 pub mod pushover;
 pub mod register_api_tool;
 pub mod request_credential;
+pub mod run_registered_wasm;
 pub mod schedule;
 pub mod screenshot;
 pub mod search_mcp_registry;
@@ -211,7 +216,6 @@ pub mod ssh_exec;
 pub mod suggest_connectors;
 pub mod tool_output;
 pub mod tool_validation;
-pub mod run_registered_wasm;
 pub mod vector_delete;
 pub mod vector_search;
 pub mod vector_store;

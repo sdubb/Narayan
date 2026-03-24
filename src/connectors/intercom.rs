@@ -22,20 +22,23 @@ pub struct IntercomConnector {
 
 impl IntercomConnector {
     pub fn new() -> Self {
-        Self { http: reqwest::Client::builder()
-            .default_headers({
-                let mut h = reqwest::header::HeaderMap::new();
-                h.insert("Accept", "application/json".parse().unwrap());
-                h.insert("Intercom-Version", "2.10".parse().unwrap());
-                h
-            })
-            .build()
-            .unwrap_or_default()
+        Self {
+            http: reqwest::Client::builder()
+                .default_headers({
+                    let mut h = reqwest::header::HeaderMap::new();
+                    h.insert("Accept", "application/json".parse().unwrap());
+                    h.insert("Intercom-Version", "2.10".parse().unwrap());
+                    h
+                })
+                .build()
+                .unwrap_or_default(),
         }
     }
 
     fn token(config: &ConnectorConfig) -> Option<String> {
-        config.credentials.get("access_token")
+        config
+            .credentials
+            .get("access_token")
             .or_else(|| config.credentials.get("api_key"))
             .or_else(|| config.credentials.get("token"))
             .and_then(|v| v.as_str())
@@ -45,18 +48,20 @@ impl IntercomConnector {
 
 #[async_trait]
 impl Connector for IntercomConnector {
-    fn connector_type(&self) -> &str { "intercom" }
+    fn connector_type(&self) -> &str {
+        "intercom"
+    }
 
     async fn handle_inbound(&self, event: &ConnectorEvent, _config: &ConnectorConfig) -> Result<Option<String>> {
         let payload = &event.payload;
 
         match event.event_type.as_str() {
             "conversation.created" => {
-                let conv_id   = payload["data"]["item"]["id"].as_str().unwrap_or("unknown");
-                let subject   = payload["data"]["item"]["source"]["subject"].as_str().unwrap_or("(no subject)");
-                let body      = payload["data"]["item"]["source"]["body"].as_str().unwrap_or("");
-                let author    = payload["data"]["item"]["source"]["author"]["name"].as_str().unwrap_or("customer");
-                let email     = payload["data"]["item"]["source"]["author"]["email"].as_str().unwrap_or("");
+                let conv_id = payload["data"]["item"]["id"].as_str().unwrap_or("unknown");
+                let subject = payload["data"]["item"]["source"]["subject"].as_str().unwrap_or("(no subject)");
+                let body = payload["data"]["item"]["source"]["body"].as_str().unwrap_or("");
+                let author = payload["data"]["item"]["source"]["author"]["name"].as_str().unwrap_or("customer");
+                let email = payload["data"]["item"]["source"]["author"]["email"].as_str().unwrap_or("");
 
                 Ok(Some(format!(
                     "New Intercom conversation #{conv_id} from {author} ({email}). \
@@ -69,12 +74,12 @@ impl Connector for IntercomConnector {
 
             "conversation.replied" => {
                 let conv_id = payload["data"]["item"]["id"].as_str().unwrap_or("unknown");
-                let body    = payload["data"]["item"]["conversation_parts"]["conversation_parts"]
+                let body = payload["data"]["item"]["conversation_parts"]["conversation_parts"]
                     .as_array()
                     .and_then(|arr| arr.last())
                     .and_then(|p| p["body"].as_str())
                     .unwrap_or("");
-                let author  = payload["data"]["item"]["conversation_parts"]["conversation_parts"]
+                let author = payload["data"]["item"]["conversation_parts"]["conversation_parts"]
                     .as_array()
                     .and_then(|arr| arr.last())
                     .and_then(|p| p["author"]["name"].as_str())
@@ -109,8 +114,7 @@ impl Connector for IntercomConnector {
         output: &str,
         metadata: &serde_json::Value,
     ) -> Result<()> {
-        let token = Self::token(config)
-            .ok_or_else(|| anyhow::anyhow!("missing Intercom access_token"))?;
+        let token = Self::token(config).ok_or_else(|| anyhow::anyhow!("missing Intercom access_token"))?;
 
         let msg_type = metadata.get("message_type").and_then(|v| v.as_str()).unwrap_or("comment");
         // "comment" = internal note, "reply" = customer-visible reply
@@ -124,12 +128,7 @@ impl Connector for IntercomConnector {
             "body":         output,
         });
 
-        let resp = self.http
-            .post(&url)
-            .bearer_auth(&token)
-            .json(&body)
-            .send()
-            .await?;
+        let resp = self.http.post(&url).bearer_auth(&token).json(&body).send().await?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -140,14 +139,10 @@ impl Connector for IntercomConnector {
     }
 
     async fn validate_config(&self, config: &ConnectorConfig) -> Result<()> {
-        let token = Self::token(config)
-            .ok_or_else(|| anyhow::anyhow!("missing 'access_token' or 'api_key' in credentials"))?;
+        let token =
+            Self::token(config).ok_or_else(|| anyhow::anyhow!("missing 'access_token' or 'api_key' in credentials"))?;
 
-        let resp = self.http
-            .get("https://api.intercom.io/me")
-            .bearer_auth(&token)
-            .send()
-            .await?;
+        let resp = self.http.get("https://api.intercom.io/me").bearer_auth(&token).send().await?;
 
         if !resp.status().is_success() {
             anyhow::bail!("Intercom auth validation failed: {}", resp.status());

@@ -173,12 +173,7 @@ impl Default for SkillRegistry {
 impl Plan {
     /// Build a Plan directly from a Skill — no LLM call needed.
     pub fn from_skill(skill: &Skill) -> Self {
-        let steps = skill
-            .steps
-            .iter()
-            .enumerate()
-            .map(|(i, step)| step.to_planned_step(i))
-            .collect();
+        let steps = skill.steps.iter().enumerate().map(|(i, step)| step.to_planned_step(i)).collect();
         Plan {
             goal: skill.description.clone(),
             job_type: Some("skill".into()),

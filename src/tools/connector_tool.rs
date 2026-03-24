@@ -31,19 +31,19 @@ use crate::tools::{mcp_session::McpSessionTool, ParameterSchema, Tool, ToolResul
 /// Static definition of one external connector integration.
 pub struct ConnectorDef {
     /// Tool name exposed to the LLM — also the credential provider name.
-    pub name:        &'static str,
+    pub name: &'static str,
     /// Slash-namespaced category, e.g. "connector/crm".
-    pub category:    &'static str,
+    pub category: &'static str,
     /// MCP server URL the tool routes through.
-    pub mcp_url:     &'static str,
+    pub mcp_url: &'static str,
     /// One-line summary shown in the connector directory manifest.
-    pub summary:     &'static str,
+    pub summary: &'static str,
     /// Detailed description shown when the LLM receives the full ToolSpec.
     pub description: &'static str,
     /// Available operations — shown to the LLM to guide correct usage.
-    pub operations:  &'static [&'static str],
+    pub operations: &'static [&'static str],
     /// Keywords used by ConnectorResolver in plan_mode to match user intent.
-    pub keywords:    &'static [&'static str],
+    pub keywords: &'static [&'static str],
 }
 
 /// All built-in connector definitions — the single source of truth.
@@ -57,13 +57,12 @@ pub struct ConnectorDef {
 ///
 /// To add a new connector: add one entry here. Nothing else changes.
 pub static ALL_CONNECTORS: &[ConnectorDef] = &[
-
     // ── CRM ────────────────────────────────────────────────────────────────
     ConnectorDef {
-        name:     "salesforce",
+        name: "salesforce",
         category: "connector/crm",
-        mcp_url:  "https://mcp.salesforce.com/sse",
-        summary:  "Salesforce CRM: query leads/contacts/opportunities, update records",
+        mcp_url: "https://mcp.salesforce.com/sse",
+        summary: "Salesforce CRM: query leads/contacts/opportunities, update records",
         description: "Interact with Salesforce CRM. Supports SOQL queries on any object \
                        (Lead, Contact, Account, Opportunity, Case), creating and updating \
                        records, logging activity notes, and creating follow-up tasks.",
@@ -74,13 +73,13 @@ pub static ALL_CONNECTORS: &[ConnectorDef] = &[
             "update_record  — update fields on an existing record",
             "log_note       — create a Chatter note or activity on a record",
         ],
-        keywords: &["crm","lead","contact","opportunity","account","salesforce","deal","pipeline"],
+        keywords: &["crm", "lead", "contact", "opportunity", "account", "salesforce", "deal", "pipeline"],
     },
     ConnectorDef {
-        name:     "hubspot",
+        name: "hubspot",
         category: "connector/crm",
-        mcp_url:  "https://mcp.hubapi.com/sse",
-        summary:  "HubSpot CRM: contacts, deals, companies, activities",
+        mcp_url: "https://mcp.hubapi.com/sse",
+        summary: "HubSpot CRM: contacts, deals, companies, activities",
         description: "Interact with HubSpot CRM. Create or update contacts, companies, \
                        and deals; add notes and activities; search by any property.",
         operations: &[
@@ -89,15 +88,14 @@ pub static ALL_CONNECTORS: &[ConnectorDef] = &[
             "update_deal     — update deal stage or properties",
             "add_note        — add a note to a contact or deal",
         ],
-        keywords: &["crm","hubspot","contact","deal","company","marketing","inbound"],
+        keywords: &["crm", "hubspot", "contact", "deal", "company", "marketing", "inbound"],
     },
-
     // ── Customer support ───────────────────────────────────────────────────
     ConnectorDef {
-        name:     "zendesk",
+        name: "zendesk",
         category: "connector/support",
-        mcp_url:  "https://mcp.zendesk.com/sse",
-        summary:  "Zendesk: tickets, agents, customers, macros",
+        mcp_url: "https://mcp.zendesk.com/sse",
+        summary: "Zendesk: tickets, agents, customers, macros",
         description: "Interact with Zendesk Support. Query and update tickets, add comments, \
                        assign agents, apply macros, look up customers.",
         operations: &[
@@ -107,13 +105,13 @@ pub static ALL_CONNECTORS: &[ConnectorDef] = &[
             "update_ticket   — update status, assignee, priority, or fields",
             "add_comment     — add a public or internal comment to a ticket",
         ],
-        keywords: &["zendesk","ticket","support","helpdesk","customer service","agent","issue"],
+        keywords: &["zendesk", "ticket", "support", "helpdesk", "customer service", "agent", "issue"],
     },
     ConnectorDef {
-        name:     "intercom",
+        name: "intercom",
         category: "connector/support",
-        mcp_url:  "https://api.intercom.io/mcp/sse",
-        summary:  "Intercom: conversations, contacts, articles",
+        mcp_url: "https://api.intercom.io/mcp/sse",
+        summary: "Intercom: conversations, contacts, articles",
         description: "Interact with Intercom. Query and reply to conversations, look up contacts, \
                        add notes, create tickets, search the help centre.",
         operations: &[
@@ -123,13 +121,13 @@ pub static ALL_CONNECTORS: &[ConnectorDef] = &[
             "create_note        — add an internal note to a conversation",
             "search_contacts    — find contacts by email or name",
         ],
-        keywords: &["intercom","conversation","support","chat","customer","helpdesk","ticket","inbox"],
+        keywords: &["intercom", "conversation", "support", "chat", "customer", "helpdesk", "ticket", "inbox"],
     },
     ConnectorDef {
-        name:     "freshdesk",
+        name: "freshdesk",
         category: "connector/support",
-        mcp_url:  "https://mcp.freshdesk.com/sse",
-        summary:  "Freshdesk: tickets, agents, contacts",
+        mcp_url: "https://mcp.freshdesk.com/sse",
+        summary: "Freshdesk: tickets, agents, contacts",
         description: "Interact with Freshdesk. Create and update tickets, add notes, \
                        assign agents, look up contacts and companies.",
         operations: &[
@@ -139,15 +137,14 @@ pub static ALL_CONNECTORS: &[ConnectorDef] = &[
             "add_note       — add a private or public note",
             "get_contact    — look up a contact by email",
         ],
-        keywords: &["freshdesk","ticket","support","helpdesk","fresh","customer service"],
+        keywords: &["freshdesk", "ticket", "support", "helpdesk", "fresh", "customer service"],
     },
-
     // ── Developer tools ─────────────────────────────────────────────────────
     ConnectorDef {
-        name:     "github",
+        name: "github",
         category: "connector/devtools",
-        mcp_url:  "https://api.githubcopilot.com/mcp/sse",
-        summary:  "GitHub: repos, PRs, issues, commits, CI workflows",
+        mcp_url: "https://api.githubcopilot.com/mcp/sse",
+        summary: "GitHub: repos, PRs, issues, commits, CI workflows",
         description: "Interact with GitHub. Read file contents, list/create/update issues, \
                        open/review/merge pull requests, push commits, trigger workflows.",
         operations: &[
@@ -159,15 +156,14 @@ pub static ALL_CONNECTORS: &[ConnectorDef] = &[
             "push_commit    — push file changes as a commit",
             "run_workflow   — trigger a GitHub Actions workflow",
         ],
-        keywords: &["github","pr","pull request","issue","code","repo","commit","ci","git"],
+        keywords: &["github", "pr", "pull request", "issue", "code", "repo", "commit", "ci", "git"],
     },
-
     // ── Project management ──────────────────────────────────────────────────
     ConnectorDef {
-        name:     "jira",
+        name: "jira",
         category: "connector/project_management",
-        mcp_url:  "https://mcp.atlassian.com/sse",
-        summary:  "Jira: issues, sprints, boards, comments",
+        mcp_url: "https://mcp.atlassian.com/sse",
+        summary: "Jira: issues, sprints, boards, comments",
         description: "Interact with Jira. Search issues with JQL, create bugs/stories/tasks, \
                        update status/assignee/priority, add comments, manage sprints.",
         operations: &[
@@ -177,13 +173,13 @@ pub static ALL_CONNECTORS: &[ConnectorDef] = &[
             "update_issue   — change status, assignee, priority, or fields",
             "add_comment    — add a comment to an issue",
         ],
-        keywords: &["jira","ticket","issue","sprint","board","task","bug","story","atlassian"],
+        keywords: &["jira", "ticket", "issue", "sprint", "board", "task", "bug", "story", "atlassian"],
     },
     ConnectorDef {
-        name:     "notion",
+        name: "notion",
         category: "connector/project_management",
-        mcp_url:  "https://mcp.notion.com/sse",
-        summary:  "Notion: pages, databases, wiki",
+        mcp_url: "https://mcp.notion.com/sse",
+        summary: "Notion: pages, databases, wiki",
         description: "Interact with Notion. Search pages, read and append content, \
                        create database entries, update page properties.",
         operations: &[
@@ -193,13 +189,13 @@ pub static ALL_CONNECTORS: &[ConnectorDef] = &[
             "append_block   — append content blocks to a page",
             "update_props   — update database entry properties",
         ],
-        keywords: &["notion","page","database","wiki","doc","knowledge","workspace"],
+        keywords: &["notion", "page", "database", "wiki", "doc", "knowledge", "workspace"],
     },
     ConnectorDef {
-        name:     "asana",
+        name: "asana",
         category: "connector/project_management",
-        mcp_url:  "https://mcp.asana.com/sse",
-        summary:  "Asana: tasks, projects, sections",
+        mcp_url: "https://mcp.asana.com/sse",
+        summary: "Asana: tasks, projects, sections",
         description: "Interact with Asana. List, create and update tasks; add comments; \
                        manage project sections and due dates.",
         operations: &[
@@ -208,15 +204,14 @@ pub static ALL_CONNECTORS: &[ConnectorDef] = &[
             "update_task    — update status, assignee, or due date",
             "add_comment    — add a comment to a task",
         ],
-        keywords: &["asana","task","project","milestone","team","workflow"],
+        keywords: &["asana", "task", "project", "milestone", "team", "workflow"],
     },
-
     // ── Communication ───────────────────────────────────────────────────────
     ConnectorDef {
-        name:     "slack",
+        name: "slack",
         category: "connector/communication",
-        mcp_url:  "https://mcp.slack.com/sse",
-        summary:  "Slack: send messages, read channels, DMs",
+        mcp_url: "https://mcp.slack.com/sse",
+        summary: "Slack: send messages, read channels, DMs",
         description: "Interact with Slack. Send messages to channels or users, \
                        read recent messages, create threads, look up user info.",
         operations: &[
@@ -225,13 +220,13 @@ pub static ALL_CONNECTORS: &[ConnectorDef] = &[
             "reply_thread   — reply in a thread",
             "lookup_user    — find a user by name or email",
         ],
-        keywords: &["slack","message","channel","notify","alert","dm","chat","notification"],
+        keywords: &["slack", "message", "channel", "notify", "alert", "dm", "chat", "notification"],
     },
     ConnectorDef {
-        name:     "gmail",
+        name: "gmail",
         category: "connector/communication",
-        mcp_url:  "https://gmail.mcp.claude.com/mcp",
-        summary:  "Gmail: read, send, and organise email",
+        mcp_url: "https://gmail.mcp.claude.com/mcp",
+        summary: "Gmail: read, send, and organise email",
         description: "Interact with Gmail. Read inbox and threads, send emails, \
                        search messages, apply labels, manage drafts.",
         operations: &[
@@ -241,13 +236,13 @@ pub static ALL_CONNECTORS: &[ConnectorDef] = &[
             "create_draft   — create a draft without sending",
             "search         — search messages with Gmail query syntax",
         ],
-        keywords: &["gmail","email","inbox","send","draft","google mail"],
+        keywords: &["gmail", "email", "inbox", "send", "draft", "google mail"],
     },
     ConnectorDef {
-        name:     "outlook",
+        name: "outlook",
         category: "connector/communication",
-        mcp_url:  "https://graph.microsoft.com/mcp/sse",
-        summary:  "Outlook / Microsoft 365: email, calendar, contacts",
+        mcp_url: "https://graph.microsoft.com/mcp/sse",
+        summary: "Outlook / Microsoft 365: email, calendar, contacts",
         description: "Interact with Outlook via Microsoft Graph. Read and send email, \
                        manage calendar events, look up contacts.",
         operations: &[
@@ -257,15 +252,14 @@ pub static ALL_CONNECTORS: &[ConnectorDef] = &[
             "list_events    — list calendar events",
             "create_event   — create a calendar event",
         ],
-        keywords: &["outlook","email","microsoft","office 365","m365","exchange","calendar"],
+        keywords: &["outlook", "email", "microsoft", "office 365", "m365", "exchange", "calendar"],
     },
-
     // ── Finance ─────────────────────────────────────────────────────────────
     ConnectorDef {
-        name:     "quickbooks",
+        name: "quickbooks",
         category: "connector/finance",
-        mcp_url:  "https://mcp.intuit.com/quickbooks/sse",
-        summary:  "QuickBooks: invoices, expenses, P&L reports",
+        mcp_url: "https://mcp.intuit.com/quickbooks/sse",
+        summary: "QuickBooks: invoices, expenses, P&L reports",
         description: "Interact with QuickBooks Online. Query invoices, bills, expenses, \
                        and customers; create invoices; pull financial reports.",
         operations: &[
@@ -273,13 +267,13 @@ pub static ALL_CONNECTORS: &[ConnectorDef] = &[
             "create_invoice — create a new customer invoice",
             "get_report     — pull ProfitAndLoss, BalanceSheet, or CashFlow report",
         ],
-        keywords: &["quickbooks","invoice","expense","accounting","billing","payment","finance"],
+        keywords: &["quickbooks", "invoice", "expense", "accounting", "billing", "payment", "finance"],
     },
     ConnectorDef {
-        name:     "stripe",
+        name: "stripe",
         category: "connector/finance",
-        mcp_url:  "https://mcp.stripe.com/sse",
-        summary:  "Stripe: payments, customers, subscriptions, invoices",
+        mcp_url: "https://mcp.stripe.com/sse",
+        summary: "Stripe: payments, customers, subscriptions, invoices",
         description: "Interact with Stripe. Query charges, customers, subscriptions, \
                        and invoices; create payment links; look up failed payments.",
         operations: &[
@@ -289,15 +283,14 @@ pub static ALL_CONNECTORS: &[ConnectorDef] = &[
             "list_subscriptions— list active subscriptions",
             "create_payment_link— generate a payment link",
         ],
-        keywords: &["stripe","payment","charge","subscription","invoice","billing","revenue"],
+        keywords: &["stripe", "payment", "charge", "subscription", "invoice", "billing", "revenue"],
     },
-
     // ── IT service management ────────────────────────────────────────────────
     ConnectorDef {
-        name:     "servicenow",
+        name: "servicenow",
         category: "connector/itsm",
-        mcp_url:  "https://mcp.service-now.com/sse",
-        summary:  "ServiceNow: incidents, change requests, CMDB",
+        mcp_url: "https://mcp.service-now.com/sse",
+        summary: "ServiceNow: incidents, change requests, CMDB",
         description: "Interact with ServiceNow. Query incidents, changes, and config items; \
                        create and update records; add work notes.",
         operations: &[
@@ -307,13 +300,13 @@ pub static ALL_CONNECTORS: &[ConnectorDef] = &[
             "update_record   — update fields on any record",
             "add_work_note   — add a work note to an incident or change",
         ],
-        keywords: &["servicenow","incident","change","itsm","ticket","service desk","cmdb"],
+        keywords: &["servicenow", "incident", "change", "itsm", "ticket", "service desk", "cmdb"],
     },
     ConnectorDef {
-        name:     "pagerduty",
+        name: "pagerduty",
         category: "connector/itsm",
-        mcp_url:  "https://mcp.pagerduty.com/sse",
-        summary:  "PagerDuty: incidents, alerts, on-call schedules",
+        mcp_url: "https://mcp.pagerduty.com/sse",
+        summary: "PagerDuty: incidents, alerts, on-call schedules",
         description: "Interact with PagerDuty. List and acknowledge incidents, trigger \
                        new alerts, check on-call schedules, add notes.",
         operations: &[
@@ -323,15 +316,14 @@ pub static ALL_CONNECTORS: &[ConnectorDef] = &[
             "add_note         — add a note to an incident",
             "get_oncall       — get current on-call person for a schedule",
         ],
-        keywords: &["pagerduty","alert","oncall","incident","escalate","page","on-call"],
+        keywords: &["pagerduty", "alert", "oncall", "incident", "escalate", "page", "on-call"],
     },
-
     // ── HR ───────────────────────────────────────────────────────────────────
     ConnectorDef {
-        name:     "greenhouse",
+        name: "greenhouse",
         category: "connector/hr",
-        mcp_url:  "https://harvest.greenhouse.io/mcp/sse",
-        summary:  "Greenhouse ATS: jobs, candidates, applications",
+        mcp_url: "https://harvest.greenhouse.io/mcp/sse",
+        summary: "Greenhouse ATS: jobs, candidates, applications",
         description: "Interact with Greenhouse ATS. List open jobs and candidates, \
                        get application details, add notes, advance or reject candidates.",
         operations: &[
@@ -341,15 +333,14 @@ pub static ALL_CONNECTORS: &[ConnectorDef] = &[
             "add_note         — add a note to a candidate profile",
             "advance_stage    — move candidate to next interview stage",
         ],
-        keywords: &["greenhouse","recruit","candidate","hiring","ats","job","hr","applicant"],
+        keywords: &["greenhouse", "recruit", "candidate", "hiring", "ats", "job", "hr", "applicant"],
     },
-
     // ── Legal ────────────────────────────────────────────────────────────────
     ConnectorDef {
-        name:     "docusign",
+        name: "docusign",
         category: "connector/legal",
-        mcp_url:  "https://mcp.docusign.net/sse",
-        summary:  "DocuSign: envelopes, signatures, status tracking",
+        mcp_url: "https://mcp.docusign.net/sse",
+        summary: "DocuSign: envelopes, signatures, status tracking",
         description: "Interact with DocuSign. Create signature envelopes, add recipients \
                        and fields, send for signature, check status.",
         operations: &[
@@ -358,15 +349,14 @@ pub static ALL_CONNECTORS: &[ConnectorDef] = &[
             "get_status      — check envelope status and signer actions",
             "void_envelope   — void an in-progress envelope",
         ],
-        keywords: &["docusign","signature","contract","envelope","sign","esign","legal"],
+        keywords: &["docusign", "signature", "contract", "envelope", "sign", "esign", "legal"],
     },
-
     // ── Data pipelines ───────────────────────────────────────────────────────
     ConnectorDef {
-        name:     "dbt_cloud",
+        name: "dbt_cloud",
         category: "connector/data",
-        mcp_url:  "https://cloud.getdbt.com/mcp/sse",
-        summary:  "dbt Cloud: trigger runs, check status, list models",
+        mcp_url: "https://cloud.getdbt.com/mcp/sse",
+        summary: "dbt Cloud: trigger runs, check status, list models",
         description: "Interact with dbt Cloud. List jobs and runs, trigger a job run, \
                        get run logs and results, check model status.",
         operations: &[
@@ -375,7 +365,7 @@ pub static ALL_CONNECTORS: &[ConnectorDef] = &[
             "get_run     — get status and logs of a run",
             "list_models — list models and their last run status",
         ],
-        keywords: &["dbt","transform","pipeline","datawarehouse","model","run","analytics"],
+        keywords: &["dbt", "transform", "pipeline", "datawarehouse", "model", "run", "analytics"],
     },
 ];
 
@@ -401,17 +391,18 @@ pub fn find_by_name(name: &str) -> Option<&'static ConnectorDef> {
 // Returns serde_json::Value of the API response body.
 
 async fn rest_execute(
-    http:      &reqwest::Client,
+    http: &reqwest::Client,
     connector: &str,
-    token:     &str,
+    token: &str,
     operation: &str,
-    params:    &serde_json::Value,
-    settings:  &serde_json::Value,
+    params: &serde_json::Value,
+    settings: &serde_json::Value,
 ) -> anyhow::Result<serde_json::Value> {
     match connector {
         // ── Salesforce ─────────────────────────────────────────────────────
         "salesforce" => {
-            let instance = settings["instance_url"].as_str()
+            let instance = settings["instance_url"]
+                .as_str()
                 .ok_or_else(|| anyhow::anyhow!("Salesforce: missing instance_url in settings"))?;
             let base = format!("{}/services/data/v58.0", instance);
 
@@ -423,22 +414,22 @@ async fn rest_execute(
                     Ok(r.json().await?)
                 }
                 "get_record" => {
-                    let id  = params["id"].as_str().ok_or_else(|| anyhow::anyhow!("id required"))?;
+                    let id = params["id"].as_str().ok_or_else(|| anyhow::anyhow!("id required"))?;
                     let obj = params["object_type"].as_str().unwrap_or("Lead");
                     let url = format!("{}/sobjects/{}/{}", base, obj, id);
                     Ok(http.get(&url).bearer_auth(token).send().await?.json().await?)
                 }
                 "create_record" => {
-                    let obj  = params["object_type"].as_str().unwrap_or("Lead");
+                    let obj = params["object_type"].as_str().unwrap_or("Lead");
                     let body = params.get("fields").cloned().unwrap_or_default();
-                    let url  = format!("{}/sobjects/{}", base, obj);
+                    let url = format!("{}/sobjects/{}", base, obj);
                     Ok(http.post(&url).bearer_auth(token).json(&body).send().await?.json().await?)
                 }
                 "update_record" => {
-                    let id   = params["id"].as_str().ok_or_else(|| anyhow::anyhow!("id required"))?;
-                    let obj  = params["object_type"].as_str().unwrap_or("Lead");
+                    let id = params["id"].as_str().ok_or_else(|| anyhow::anyhow!("id required"))?;
+                    let obj = params["object_type"].as_str().unwrap_or("Lead");
                     let body = params.get("fields").cloned().unwrap_or_default();
-                    let url  = format!("{}/sobjects/{}/{}", base, obj, id);
+                    let url = format!("{}/sobjects/{}/{}", base, obj, id);
                     http.patch(&url).bearer_auth(token).json(&body).send().await?;
                     Ok(serde_json::json!({"updated": true, "id": id}))
                 }
@@ -446,9 +437,12 @@ async fn rest_execute(
                     let parent_id = params["id"].as_str().ok_or_else(|| anyhow::anyhow!("id required"))?;
                     let body_text = params["body"].as_str().unwrap_or("");
                     let url = format!("{}/sobjects/Note", base);
-                    let r = http.post(&url).bearer_auth(token)
+                    let r = http
+                        .post(&url)
+                        .bearer_auth(token)
                         .json(&serde_json::json!({"ParentId": parent_id, "Title": "Narayan Note", "Body": body_text}))
-                        .send().await?;
+                        .send()
+                        .await?;
                     Ok(r.json().await?)
                 }
                 _ => anyhow::bail!("Salesforce: unknown operation '{}'", operation),
@@ -462,21 +456,38 @@ async fn rest_execute(
                 "search_contacts" => {
                     let q = params["query"].as_str().unwrap_or("");
                     let url = format!("{}/objects/contacts/search", base);
-                    let r = http.post(&url).bearer_auth(token)
+                    let r = http
+                        .post(&url)
+                        .bearer_auth(token)
                         .json(&serde_json::json!({"query": q, "limit": 10}))
-                        .send().await?;
+                        .send()
+                        .await?;
                     Ok(r.json().await?)
                 }
                 "create_contact" => {
                     let url = format!("{}/objects/contacts", base);
                     let props = params.get("properties").cloned().unwrap_or_default();
-                    Ok(http.post(&url).bearer_auth(token).json(&serde_json::json!({"properties": props})).send().await?.json().await?)
+                    Ok(http
+                        .post(&url)
+                        .bearer_auth(token)
+                        .json(&serde_json::json!({"properties": props}))
+                        .send()
+                        .await?
+                        .json()
+                        .await?)
                 }
                 "update_deal" => {
                     let id = params["id"].as_str().ok_or_else(|| anyhow::anyhow!("id required"))?;
                     let props = params.get("properties").cloned().unwrap_or_default();
                     let url = format!("{}/objects/deals/{}", base, id);
-                    Ok(http.patch(&url).bearer_auth(token).json(&serde_json::json!({"properties": props})).send().await?.json().await?)
+                    Ok(http
+                        .patch(&url)
+                        .bearer_auth(token)
+                        .json(&serde_json::json!({"properties": props}))
+                        .send()
+                        .await?
+                        .json()
+                        .await?)
                 }
                 "add_note" => {
                     let url = format!("{}/objects/notes", base);
@@ -495,24 +506,33 @@ async fn rest_execute(
 
         // ── GitHub ─────────────────────────────────────────────────────────
         "github" => {
-            let repo = settings["repo"].as_str().unwrap_or(
-                params["repo"].as_str().unwrap_or("")
-            );
+            let repo = settings["repo"].as_str().unwrap_or(params["repo"].as_str().unwrap_or(""));
             let base = format!("https://api.github.com/repos/{}", repo);
 
             match operation {
                 "get_file" => {
                     let path = params["path"].as_str().ok_or_else(|| anyhow::anyhow!("path required"))?;
-                    let r = http.get(&format!("{}/contents/{}", base, path))
-                        .bearer_auth(token).header("Accept", "application/vnd.github.v3+json")
-                        .header("User-Agent", "narayan-agent").send().await?;
+                    let r = http
+                        .get(&format!("{}/contents/{}", base, path))
+                        .bearer_auth(token)
+                        .header("Accept", "application/vnd.github.v3+json")
+                        .header("User-Agent", "narayan-agent")
+                        .send()
+                        .await?;
                     Ok(r.json().await?)
                 }
                 "list_issues" => {
-                    let state  = params["state"].as_str().unwrap_or("open");
+                    let state = params["state"].as_str().unwrap_or("open");
                     let labels = params["labels"].as_str().unwrap_or("");
                     let url = format!("{}/issues?state={}&labels={}", base, state, labels);
-                    Ok(http.get(&url).bearer_auth(token).header("User-Agent", "narayan-agent").send().await?.json().await?)
+                    Ok(http
+                        .get(&url)
+                        .bearer_auth(token)
+                        .header("User-Agent", "narayan-agent")
+                        .send()
+                        .await?
+                        .json()
+                        .await?)
                 }
                 "create_issue" => {
                     let body = serde_json::json!({
@@ -520,8 +540,15 @@ async fn rest_execute(
                         "body":  params["body"].as_str().unwrap_or(""),
                         "labels": params.get("labels").cloned().unwrap_or_default(),
                     });
-                    Ok(http.post(&format!("{}/issues", base))
-                        .bearer_auth(token).header("User-Agent", "narayan-agent").json(&body).send().await?.json().await?)
+                    Ok(http
+                        .post(&format!("{}/issues", base))
+                        .bearer_auth(token)
+                        .header("User-Agent", "narayan-agent")
+                        .json(&body)
+                        .send()
+                        .await?
+                        .json()
+                        .await?)
                 }
                 "create_pr" => {
                     let body = serde_json::json!({
@@ -530,37 +557,61 @@ async fn rest_execute(
                         "base":  params.get("base").and_then(|v| v.as_str()).unwrap_or("main"),
                         "body":  params.get("body").and_then(|v| v.as_str()).unwrap_or(""),
                     });
-                    Ok(http.post(&format!("{}/pulls", base))
-                        .bearer_auth(token).header("User-Agent", "narayan-agent").json(&body).send().await?.json().await?)
+                    Ok(http
+                        .post(&format!("{}/pulls", base))
+                        .bearer_auth(token)
+                        .header("User-Agent", "narayan-agent")
+                        .json(&body)
+                        .send()
+                        .await?
+                        .json()
+                        .await?)
                 }
                 "merge_pr" => {
                     let pr = params["pr_number"].as_u64().ok_or_else(|| anyhow::anyhow!("pr_number required"))?;
-                    Ok(http.put(&format!("{}/pulls/{}/merge", base, pr))
-                        .bearer_auth(token).header("User-Agent", "narayan-agent")
+                    Ok(http
+                        .put(&format!("{}/pulls/{}/merge", base, pr))
+                        .bearer_auth(token)
+                        .header("User-Agent", "narayan-agent")
                         .json(&serde_json::json!({"commit_title": params.get("commit_title")}))
-                        .send().await?.json().await?)
+                        .send()
+                        .await?
+                        .json()
+                        .await?)
                 }
                 "push_commit" => {
                     // Create/update a file via the GitHub Contents API
-                    let path    = params["path"].as_str().ok_or_else(|| anyhow::anyhow!("path required"))?;
+                    let path = params["path"].as_str().ok_or_else(|| anyhow::anyhow!("path required"))?;
                     let content = params["content"].as_str().ok_or_else(|| anyhow::anyhow!("content required"))?;
                     let encoded = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, content);
-                    let sha     = params.get("sha").and_then(|v| v.as_str());
+                    let sha = params.get("sha").and_then(|v| v.as_str());
                     let mut body = serde_json::json!({
                         "message": params.get("message").and_then(|v| v.as_str()).unwrap_or("Update via Narayan"),
                         "content": encoded,
                     });
-                    if let Some(s) = sha { body["sha"] = serde_json::json!(s); }
-                    Ok(http.put(&format!("{}/contents/{}", base, path))
-                        .bearer_auth(token).header("User-Agent", "narayan-agent").json(&body).send().await?.json().await?)
+                    if let Some(s) = sha {
+                        body["sha"] = serde_json::json!(s);
+                    }
+                    Ok(http
+                        .put(&format!("{}/contents/{}", base, path))
+                        .bearer_auth(token)
+                        .header("User-Agent", "narayan-agent")
+                        .json(&body)
+                        .send()
+                        .await?
+                        .json()
+                        .await?)
                 }
                 "run_workflow" => {
-                    let workflow = params["workflow_id"].as_str().ok_or_else(|| anyhow::anyhow!("workflow_id required"))?;
-                    let r#ref    = params.get("ref").and_then(|v| v.as_str()).unwrap_or("main");
+                    let workflow =
+                        params["workflow_id"].as_str().ok_or_else(|| anyhow::anyhow!("workflow_id required"))?;
+                    let r#ref = params.get("ref").and_then(|v| v.as_str()).unwrap_or("main");
                     http.post(&format!("{}/actions/workflows/{}/dispatches", base, workflow))
-                        .bearer_auth(token).header("User-Agent", "narayan-agent")
+                        .bearer_auth(token)
+                        .header("User-Agent", "narayan-agent")
                         .json(&serde_json::json!({"ref": r#ref}))
-                        .send().await?;
+                        .send()
+                        .await?;
                     Ok(serde_json::json!({"dispatched": true}))
                 }
                 _ => anyhow::bail!("GitHub: unknown operation '{}'", operation),
@@ -569,7 +620,8 @@ async fn rest_execute(
 
         // ── Jira ───────────────────────────────────────────────────────────
         "jira" => {
-            let cloud_url = settings["cloud_url"].as_str()
+            let cloud_url = settings["cloud_url"]
+                .as_str()
                 .or_else(|| params["cloud_url"].as_str())
                 .unwrap_or("https://your-domain.atlassian.net");
             let base = format!("{}/rest/api/3", cloud_url);
@@ -593,64 +645,86 @@ async fn rest_execute(
                             "issuetype":   {"name": params.get("issue_type").and_then(|v| v.as_str()).unwrap_or("Task")},
                         }
                     });
-                    Ok(http.post(&format!("{}/issue", base)).bearer_auth(token).json(&body).send().await?.json().await?)
+                    Ok(http
+                        .post(&format!("{}/issue", base))
+                        .bearer_auth(token)
+                        .json(&body)
+                        .send()
+                        .await?
+                        .json()
+                        .await?)
                 }
                 "update_issue" => {
                     let key = params["key"].as_str().ok_or_else(|| anyhow::anyhow!("key required"))?;
                     let fields = params.get("fields").cloned().unwrap_or_default();
-                    http.put(&format!("{}/issue/{}", base, key)).bearer_auth(token).json(&serde_json::json!({"fields": fields})).send().await?;
+                    http.put(&format!("{}/issue/{}", base, key))
+                        .bearer_auth(token)
+                        .json(&serde_json::json!({"fields": fields}))
+                        .send()
+                        .await?;
                     Ok(serde_json::json!({"updated": true, "key": key}))
                 }
                 "add_comment" => {
-                    let key  = params["key"].as_str().ok_or_else(|| anyhow::anyhow!("key required"))?;
+                    let key = params["key"].as_str().ok_or_else(|| anyhow::anyhow!("key required"))?;
                     let text = params["body"].as_str().unwrap_or("");
                     let body = serde_json::json!({"body": {"type":"doc","version":1,"content":[{"type":"paragraph","content":[{"type":"text","text":text}]}]}});
-                    Ok(http.post(&format!("{}/issue/{}/comment", base, key)).bearer_auth(token).json(&body).send().await?.json().await?)
+                    Ok(http
+                        .post(&format!("{}/issue/{}/comment", base, key))
+                        .bearer_auth(token)
+                        .json(&body)
+                        .send()
+                        .await?
+                        .json()
+                        .await?)
                 }
                 _ => anyhow::bail!("Jira: unknown operation '{}'", operation),
             }
         }
 
         // ── Slack ──────────────────────────────────────────────────────────
-        "slack" => {
-            match operation {
-                "send_message" => {
-                    let channel = params["channel"].as_str().unwrap_or("#general");
-                    let text    = params["text"].as_str().unwrap_or("");
-                    let r = http.post("https://slack.com/api/chat.postMessage")
-                        .bearer_auth(token)
-                        .json(&serde_json::json!({"channel": channel, "text": text}))
-                        .send().await?;
-                    Ok(r.json().await?)
-                }
-                "list_messages" => {
-                    let channel = params["channel"].as_str().ok_or_else(|| anyhow::anyhow!("channel required"))?;
-                    let limit   = params["limit"].as_u64().unwrap_or(20);
-                    let url = format!("https://slack.com/api/conversations.history?channel={}&limit={}", channel, limit);
+        "slack" => match operation {
+            "send_message" => {
+                let channel = params["channel"].as_str().unwrap_or("#general");
+                let text = params["text"].as_str().unwrap_or("");
+                let r = http
+                    .post("https://slack.com/api/chat.postMessage")
+                    .bearer_auth(token)
+                    .json(&serde_json::json!({"channel": channel, "text": text}))
+                    .send()
+                    .await?;
+                Ok(r.json().await?)
+            }
+            "list_messages" => {
+                let channel = params["channel"].as_str().ok_or_else(|| anyhow::anyhow!("channel required"))?;
+                let limit = params["limit"].as_u64().unwrap_or(20);
+                let url = format!("https://slack.com/api/conversations.history?channel={}&limit={}", channel, limit);
+                Ok(http.get(&url).bearer_auth(token).send().await?.json().await?)
+            }
+            "reply_thread" => {
+                let channel = params["channel"].as_str().ok_or_else(|| anyhow::anyhow!("channel required"))?;
+                let thread_ts = params["thread_ts"].as_str().ok_or_else(|| anyhow::anyhow!("thread_ts required"))?;
+                let text = params["text"].as_str().unwrap_or("");
+                Ok(http
+                    .post("https://slack.com/api/chat.postMessage")
+                    .bearer_auth(token)
+                    .json(&serde_json::json!({"channel": channel, "thread_ts": thread_ts, "text": text}))
+                    .send()
+                    .await?
+                    .json()
+                    .await?)
+            }
+            "lookup_user" => {
+                let email = params["email"].as_str();
+                if let Some(e) = email {
+                    let url = format!("https://slack.com/api/users.lookupByEmail?email={}", e);
+                    Ok(http.get(&url).bearer_auth(token).send().await?.json().await?)
+                } else {
+                    let url = format!("https://slack.com/api/users.list?limit=100");
                     Ok(http.get(&url).bearer_auth(token).send().await?.json().await?)
                 }
-                "reply_thread" => {
-                    let channel   = params["channel"].as_str().ok_or_else(|| anyhow::anyhow!("channel required"))?;
-                    let thread_ts = params["thread_ts"].as_str().ok_or_else(|| anyhow::anyhow!("thread_ts required"))?;
-                    let text      = params["text"].as_str().unwrap_or("");
-                    Ok(http.post("https://slack.com/api/chat.postMessage").bearer_auth(token)
-                        .json(&serde_json::json!({"channel": channel, "thread_ts": thread_ts, "text": text}))
-                        .send().await?.json().await?)
-                }
-                "lookup_user" => {
-                    let email = params["email"].as_str();
-                    let name  = params["name"].as_str();
-                    if let Some(e) = email {
-                        let url = format!("https://slack.com/api/users.lookupByEmail?email={}", e);
-                        Ok(http.get(&url).bearer_auth(token).send().await?.json().await?)
-                    } else {
-                        let url = format!("https://slack.com/api/users.list?limit=100");
-                        Ok(http.get(&url).bearer_auth(token).send().await?.json().await?)
-                    }
-                }
-                _ => anyhow::bail!("Slack: unknown operation '{}'", operation),
             }
-        }
+            _ => anyhow::bail!("Slack: unknown operation '{}'", operation),
+        },
 
         // ── Notion ─────────────────────────────────────────────────────────
         "notion" => {
@@ -658,33 +732,64 @@ async fn rest_execute(
             match operation {
                 "search_pages" => {
                     let q = params["query"].as_str().unwrap_or("");
-                    Ok(http.post(&format!("{}/search", base)).bearer_auth(token)
+                    Ok(http
+                        .post(&format!("{}/search", base))
+                        .bearer_auth(token)
                         .header("Notion-Version", "2022-06-28")
-                        .json(&serde_json::json!({"query": q})).send().await?.json().await?)
+                        .json(&serde_json::json!({"query": q}))
+                        .send()
+                        .await?
+                        .json()
+                        .await?)
                 }
                 "get_page" => {
                     let id = params["page_id"].as_str().ok_or_else(|| anyhow::anyhow!("page_id required"))?;
-                    Ok(http.get(&format!("{}/blocks/{}/children", base, id)).bearer_auth(token)
-                        .header("Notion-Version", "2022-06-28").send().await?.json().await?)
+                    Ok(http
+                        .get(&format!("{}/blocks/{}/children", base, id))
+                        .bearer_auth(token)
+                        .header("Notion-Version", "2022-06-28")
+                        .send()
+                        .await?
+                        .json()
+                        .await?)
                 }
                 "create_page" => {
                     let body = params.get("body").cloned().unwrap_or_else(|| serde_json::json!({"parent": {"page_id": params["parent_id"]}, "properties": {"title": [{"text": {"content": params["title"].as_str().unwrap_or("")}}]}}));
-                    Ok(http.post(&format!("{}/pages", base)).bearer_auth(token)
-                        .header("Notion-Version", "2022-06-28").json(&body).send().await?.json().await?)
+                    Ok(http
+                        .post(&format!("{}/pages", base))
+                        .bearer_auth(token)
+                        .header("Notion-Version", "2022-06-28")
+                        .json(&body)
+                        .send()
+                        .await?
+                        .json()
+                        .await?)
                 }
                 "append_block" => {
                     let block_id = params["block_id"].as_str().ok_or_else(|| anyhow::anyhow!("block_id required"))?;
                     let children = params.get("children").cloned().unwrap_or(serde_json::json!([]));
-                    Ok(http.patch(&format!("{}/blocks/{}/children", base, block_id)).bearer_auth(token)
+                    Ok(http
+                        .patch(&format!("{}/blocks/{}/children", base, block_id))
+                        .bearer_auth(token)
                         .header("Notion-Version", "2022-06-28")
-                        .json(&serde_json::json!({"children": children})).send().await?.json().await?)
+                        .json(&serde_json::json!({"children": children}))
+                        .send()
+                        .await?
+                        .json()
+                        .await?)
                 }
                 "update_props" => {
-                    let id    = params["page_id"].as_str().ok_or_else(|| anyhow::anyhow!("page_id required"))?;
+                    let id = params["page_id"].as_str().ok_or_else(|| anyhow::anyhow!("page_id required"))?;
                     let props = params.get("properties").cloned().unwrap_or_default();
-                    Ok(http.patch(&format!("{}/pages/{}", base, id)).bearer_auth(token)
+                    Ok(http
+                        .patch(&format!("{}/pages/{}", base, id))
+                        .bearer_auth(token)
                         .header("Notion-Version", "2022-06-28")
-                        .json(&serde_json::json!({"properties": props})).send().await?.json().await?)
+                        .json(&serde_json::json!({"properties": props}))
+                        .send()
+                        .await?
+                        .json()
+                        .await?)
                 }
                 _ => anyhow::bail!("Notion: unknown operation '{}'", operation),
             }
@@ -692,7 +797,8 @@ async fn rest_execute(
 
         // ── Zendesk ────────────────────────────────────────────────────────
         "zendesk" => {
-            let subdomain = settings["subdomain"].as_str()
+            let subdomain = settings["subdomain"]
+                .as_str()
                 .or_else(|| params["subdomain"].as_str())
                 .ok_or_else(|| anyhow::anyhow!("Zendesk: missing subdomain in settings"))?;
             let base = format!("https://{}.zendesk.com/api/v2", subdomain);
@@ -700,32 +806,53 @@ async fn rest_execute(
             match operation {
                 "list_tickets" => {
                     let status = params["status"].as_str().unwrap_or("open");
-                    Ok(http.get(&format!("{}/tickets?status={}", base, status))
-                        .bearer_auth(token).send().await?.json().await?)
+                    Ok(http
+                        .get(&format!("{}/tickets?status={}", base, status))
+                        .bearer_auth(token)
+                        .send()
+                        .await?
+                        .json()
+                        .await?)
                 }
                 "get_ticket" => {
                     let id = params["ticket_id"].as_str().ok_or_else(|| anyhow::anyhow!("ticket_id required"))?;
-                    Ok(http.get(&format!("{}/tickets/{}", base, id))
-                        .bearer_auth(token).send().await?.json().await?)
+                    Ok(http.get(&format!("{}/tickets/{}", base, id)).bearer_auth(token).send().await?.json().await?)
                 }
                 "create_ticket" => {
                     let ticket = params.get("ticket").cloned().unwrap_or_default();
-                    Ok(http.post(&format!("{}/tickets", base)).bearer_auth(token)
-                        .json(&serde_json::json!({"ticket": ticket})).send().await?.json().await?)
+                    Ok(http
+                        .post(&format!("{}/tickets", base))
+                        .bearer_auth(token)
+                        .json(&serde_json::json!({"ticket": ticket}))
+                        .send()
+                        .await?
+                        .json()
+                        .await?)
                 }
                 "update_ticket" => {
-                    let id     = params["ticket_id"].as_str().ok_or_else(|| anyhow::anyhow!("ticket_id required"))?;
+                    let id = params["ticket_id"].as_str().ok_or_else(|| anyhow::anyhow!("ticket_id required"))?;
                     let ticket = params.get("ticket").cloned().unwrap_or_default();
-                    Ok(http.put(&format!("{}/tickets/{}", base, id)).bearer_auth(token)
-                        .json(&serde_json::json!({"ticket": ticket})).send().await?.json().await?)
+                    Ok(http
+                        .put(&format!("{}/tickets/{}", base, id))
+                        .bearer_auth(token)
+                        .json(&serde_json::json!({"ticket": ticket}))
+                        .send()
+                        .await?
+                        .json()
+                        .await?)
                 }
                 "add_comment" => {
-                    let id      = params["ticket_id"].as_str().ok_or_else(|| anyhow::anyhow!("ticket_id required"))?;
-                    let body    = params["body"].as_str().unwrap_or("");
-                    let public  = params["public"].as_bool().unwrap_or(false);
-                    Ok(http.put(&format!("{}/tickets/{}", base, id)).bearer_auth(token)
+                    let id = params["ticket_id"].as_str().ok_or_else(|| anyhow::anyhow!("ticket_id required"))?;
+                    let body = params["body"].as_str().unwrap_or("");
+                    let public = params["public"].as_bool().unwrap_or(false);
+                    Ok(http
+                        .put(&format!("{}/tickets/{}", base, id))
+                        .bearer_auth(token)
                         .json(&serde_json::json!({"ticket": {"comment": {"body": body, "public": public}}}))
-                        .send().await?.json().await?)
+                        .send()
+                        .await?
+                        .json()
+                        .await?)
                 }
                 _ => anyhow::bail!("Zendesk: unknown operation '{}'", operation),
             }
@@ -735,39 +862,84 @@ async fn rest_execute(
         "intercom" => {
             let base = "https://api.intercom.io";
             match operation {
-                "list_conversations" => {
-                    Ok(http.get(&format!("{}/conversations?display_as=plaintext", base))
-                        .bearer_auth(token).header("Accept", "application/json")
-                        .header("Intercom-Version", "2.10").send().await?.json().await?)
-                }
+                "list_conversations" => Ok(http
+                    .get(&format!("{}/conversations?display_as=plaintext", base))
+                    .bearer_auth(token)
+                    .header("Accept", "application/json")
+                    .header("Intercom-Version", "2.10")
+                    .send()
+                    .await?
+                    .json()
+                    .await?),
                 "get_conversation" => {
-                    let id = params["conversation_id"].as_str().ok_or_else(|| anyhow::anyhow!("conversation_id required"))?;
-                    Ok(http.get(&format!("{}/conversations/{}", base, id)).bearer_auth(token)
-                        .header("Intercom-Version", "2.10").send().await?.json().await?)
+                    let id = params["conversation_id"]
+                        .as_str()
+                        .ok_or_else(|| anyhow::anyhow!("conversation_id required"))?;
+                    Ok(http
+                        .get(&format!("{}/conversations/{}", base, id))
+                        .bearer_auth(token)
+                        .header("Intercom-Version", "2.10")
+                        .send()
+                        .await?
+                        .json()
+                        .await?)
                 }
                 "reply" => {
-                    let id       = params["conversation_id"].as_str().ok_or_else(|| anyhow::anyhow!("conversation_id required"))?;
+                    let id = params["conversation_id"]
+                        .as_str()
+                        .ok_or_else(|| anyhow::anyhow!("conversation_id required"))?;
                     let body_txt = params["body"].as_str().unwrap_or("");
-                    let admin_id = params.get("admin_id").and_then(|v| v.as_str())
-                        .or_else(|| settings["admin_id"].as_str()).unwrap_or("");
-                    let body = serde_json::json!({"message_type":"reply","type":"admin","admin_id":admin_id,"body":body_txt});
-                    Ok(http.post(&format!("{}/conversations/{}/reply", base, id)).bearer_auth(token)
-                        .header("Intercom-Version", "2.10").json(&body).send().await?.json().await?)
+                    let admin_id = params
+                        .get("admin_id")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| settings["admin_id"].as_str())
+                        .unwrap_or("");
+                    let body =
+                        serde_json::json!({"message_type":"reply","type":"admin","admin_id":admin_id,"body":body_txt});
+                    Ok(http
+                        .post(&format!("{}/conversations/{}/reply", base, id))
+                        .bearer_auth(token)
+                        .header("Intercom-Version", "2.10")
+                        .json(&body)
+                        .send()
+                        .await?
+                        .json()
+                        .await?)
                 }
                 "create_note" => {
-                    let id       = params["conversation_id"].as_str().ok_or_else(|| anyhow::anyhow!("conversation_id required"))?;
+                    let id = params["conversation_id"]
+                        .as_str()
+                        .ok_or_else(|| anyhow::anyhow!("conversation_id required"))?;
                     let body_txt = params["body"].as_str().unwrap_or("");
-                    let admin_id = params.get("admin_id").and_then(|v| v.as_str())
-                        .or_else(|| settings["admin_id"].as_str()).unwrap_or("");
-                    let body = serde_json::json!({"message_type":"note","type":"admin","admin_id":admin_id,"body":body_txt});
-                    Ok(http.post(&format!("{}/conversations/{}/reply", base, id)).bearer_auth(token)
-                        .header("Intercom-Version", "2.10").json(&body).send().await?.json().await?)
+                    let admin_id = params
+                        .get("admin_id")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| settings["admin_id"].as_str())
+                        .unwrap_or("");
+                    let body =
+                        serde_json::json!({"message_type":"note","type":"admin","admin_id":admin_id,"body":body_txt});
+                    Ok(http
+                        .post(&format!("{}/conversations/{}/reply", base, id))
+                        .bearer_auth(token)
+                        .header("Intercom-Version", "2.10")
+                        .json(&body)
+                        .send()
+                        .await?
+                        .json()
+                        .await?)
                 }
                 "search_contacts" => {
                     let email = params["email"].as_str().unwrap_or("");
-                    let body  = serde_json::json!({"query":{"field":"email","operator":"=","value":email}});
-                    Ok(http.post(&format!("{}/contacts/search", base)).bearer_auth(token)
-                        .header("Intercom-Version", "2.10").json(&body).send().await?.json().await?)
+                    let body = serde_json::json!({"query":{"field":"email","operator":"=","value":email}});
+                    Ok(http
+                        .post(&format!("{}/contacts/search", base))
+                        .bearer_auth(token)
+                        .header("Intercom-Version", "2.10")
+                        .json(&body)
+                        .send()
+                        .await?
+                        .json()
+                        .await?)
                 }
                 _ => anyhow::bail!("Intercom: unknown operation '{}'", operation),
             }
@@ -775,7 +947,8 @@ async fn rest_execute(
 
         // ── Freshdesk ──────────────────────────────────────────────────────
         "freshdesk" => {
-            let domain = settings["domain"].as_str()
+            let domain = settings["domain"]
+                .as_str()
                 .or_else(|| params["domain"].as_str())
                 .ok_or_else(|| anyhow::anyhow!("Freshdesk: missing domain in settings"))?;
             let base = format!("https://{}.freshdesk.com/api/v2", domain);
@@ -784,33 +957,58 @@ async fn rest_execute(
             let auth_header = format!("Basic {}", encoded);
 
             match operation {
-                "list_tickets" => {
-                    Ok(http.get(&format!("{}/tickets", base))
-                        .header("Authorization", &auth_header).send().await?.json().await?)
-                }
+                "list_tickets" => Ok(http
+                    .get(&format!("{}/tickets", base))
+                    .header("Authorization", &auth_header)
+                    .send()
+                    .await?
+                    .json()
+                    .await?),
                 "create_ticket" => {
                     let ticket = params.get("ticket").cloned().unwrap_or_default();
-                    Ok(http.post(&format!("{}/tickets", base))
-                        .header("Authorization", &auth_header).json(&ticket).send().await?.json().await?)
+                    Ok(http
+                        .post(&format!("{}/tickets", base))
+                        .header("Authorization", &auth_header)
+                        .json(&ticket)
+                        .send()
+                        .await?
+                        .json()
+                        .await?)
                 }
                 "update_ticket" => {
-                    let id     = params["ticket_id"].as_str().ok_or_else(|| anyhow::anyhow!("ticket_id required"))?;
+                    let id = params["ticket_id"].as_str().ok_or_else(|| anyhow::anyhow!("ticket_id required"))?;
                     let ticket = params.get("ticket").cloned().unwrap_or_default();
-                    Ok(http.put(&format!("{}/tickets/{}", base, id))
-                        .header("Authorization", &auth_header).json(&ticket).send().await?.json().await?)
+                    Ok(http
+                        .put(&format!("{}/tickets/{}", base, id))
+                        .header("Authorization", &auth_header)
+                        .json(&ticket)
+                        .send()
+                        .await?
+                        .json()
+                        .await?)
                 }
                 "add_note" => {
-                    let id      = params["ticket_id"].as_str().ok_or_else(|| anyhow::anyhow!("ticket_id required"))?;
-                    let body    = params["body"].as_str().unwrap_or("");
+                    let id = params["ticket_id"].as_str().ok_or_else(|| anyhow::anyhow!("ticket_id required"))?;
+                    let body = params["body"].as_str().unwrap_or("");
                     let private = params["private"].as_bool().unwrap_or(true);
-                    Ok(http.post(&format!("{}/tickets/{}/notes", base, id))
+                    Ok(http
+                        .post(&format!("{}/tickets/{}/notes", base, id))
                         .header("Authorization", &auth_header)
-                        .json(&serde_json::json!({"body": body, "private": private})).send().await?.json().await?)
+                        .json(&serde_json::json!({"body": body, "private": private}))
+                        .send()
+                        .await?
+                        .json()
+                        .await?)
                 }
                 "get_contact" => {
                     let email = params["email"].as_str().ok_or_else(|| anyhow::anyhow!("email required"))?;
-                    Ok(http.get(&format!("{}/contacts?email={}", base, urlencoding::encode(email)))
-                        .header("Authorization", &auth_header).send().await?.json().await?)
+                    Ok(http
+                        .get(&format!("{}/contacts?email={}", base, urlencoding::encode(email)))
+                        .header("Authorization", &auth_header)
+                        .send()
+                        .await?
+                        .json()
+                        .await?)
                 }
                 _ => anyhow::bail!("Freshdesk: unknown operation '{}'", operation),
             }
@@ -821,7 +1019,7 @@ async fn rest_execute(
             let base = "https://api.stripe.com/v1";
             match operation {
                 "list_charges" => {
-                    let limit  = params["limit"].as_u64().unwrap_or(10);
+                    let limit = params["limit"].as_u64().unwrap_or(10);
                     let status = params.get("status").and_then(|v| v.as_str()).unwrap_or("");
                     let url = if status.is_empty() {
                         format!("{}/charges?limit={}", base, limit)
@@ -832,21 +1030,37 @@ async fn rest_execute(
                     Ok(http.get(&url).basic_auth(token, Option::<&str>::None).send().await?.json().await?)
                 }
                 "get_customer" => {
-                    let id_or_email = params["id"].as_str()
+                    let id_or_email = params["id"]
+                        .as_str()
                         .or_else(|| params["email"].as_str())
                         .ok_or_else(|| anyhow::anyhow!("id or email required"))?;
                     if id_or_email.starts_with("cus_") {
-                        Ok(http.get(&format!("{}/customers/{}", base, id_or_email))
-                            .basic_auth(token, Option::<&str>::None).send().await?.json().await?)
+                        Ok(http
+                            .get(&format!("{}/customers/{}", base, id_or_email))
+                            .basic_auth(token, Option::<&str>::None)
+                            .send()
+                            .await?
+                            .json()
+                            .await?)
                     } else {
-                        Ok(http.get(&format!("{}/customers?email={}&limit=1", base, urlencoding::encode(id_or_email)))
-                            .basic_auth(token, Option::<&str>::None).send().await?.json().await?)
+                        Ok(http
+                            .get(&format!("{}/customers?email={}&limit=1", base, urlencoding::encode(id_or_email)))
+                            .basic_auth(token, Option::<&str>::None)
+                            .send()
+                            .await?
+                            .json()
+                            .await?)
                     }
                 }
                 "list_invoices" => {
                     let customer = params["customer"].as_str().unwrap_or("");
-                    Ok(http.get(&format!("{}/invoices?customer={}&limit=10", base, customer))
-                        .basic_auth(token, Option::<&str>::None).send().await?.json().await?)
+                    Ok(http
+                        .get(&format!("{}/invoices?customer={}&limit=10", base, customer))
+                        .basic_auth(token, Option::<&str>::None)
+                        .send()
+                        .await?
+                        .json()
+                        .await?)
                 }
                 "list_subscriptions" => {
                     let customer = params.get("customer").and_then(|v| v.as_str()).unwrap_or("");
@@ -858,12 +1072,16 @@ async fn rest_execute(
                     Ok(http.get(&url).basic_auth(token, Option::<&str>::None).send().await?.json().await?)
                 }
                 "create_payment_link" => {
-                    let price_id  = params["price_id"].as_str().ok_or_else(|| anyhow::anyhow!("price_id required"))?;
-                    let quantity  = params["quantity"].as_u64().unwrap_or(1);
-                    Ok(http.post(&format!("{}/payment_links", base))
+                    let price_id = params["price_id"].as_str().ok_or_else(|| anyhow::anyhow!("price_id required"))?;
+                    let quantity = params["quantity"].as_u64().unwrap_or(1);
+                    Ok(http
+                        .post(&format!("{}/payment_links", base))
                         .basic_auth(token, Option::<&str>::None)
                         .form(&[("line_items[0][price]", price_id), ("line_items[0][quantity]", &quantity.to_string())])
-                        .send().await?.json().await?)
+                        .send()
+                        .await?
+                        .json()
+                        .await?)
                 }
                 _ => anyhow::bail!("Stripe: unknown operation '{}'", operation),
             }
@@ -871,7 +1089,8 @@ async fn rest_execute(
 
         // ── QuickBooks ─────────────────────────────────────────────────────
         "quickbooks" => {
-            let realm_id = settings["realm_id"].as_str()
+            let realm_id = settings["realm_id"]
+                .as_str()
                 .or_else(|| params["realm_id"].as_str())
                 .ok_or_else(|| anyhow::anyhow!("QuickBooks: missing realm_id in settings"))?;
             let base = format!("https://quickbooks.api.intuit.com/v3/company/{}", realm_id);
@@ -880,18 +1099,37 @@ async fn rest_execute(
                 "query" => {
                     let q = params["query"].as_str().ok_or_else(|| anyhow::anyhow!("query required"))?;
                     let url = format!("{}/query?query={}", base, urlencoding::encode(q));
-                    Ok(http.get(&url).bearer_auth(token)
-                        .header("Accept", "application/json").send().await?.json().await?)
+                    Ok(http
+                        .get(&url)
+                        .bearer_auth(token)
+                        .header("Accept", "application/json")
+                        .send()
+                        .await?
+                        .json()
+                        .await?)
                 }
                 "create_invoice" => {
                     let invoice = params.get("invoice").cloned().unwrap_or_default();
-                    Ok(http.post(&format!("{}/invoice", base)).bearer_auth(token)
-                        .header("Content-Type", "application/json").json(&invoice).send().await?.json().await?)
+                    Ok(http
+                        .post(&format!("{}/invoice", base))
+                        .bearer_auth(token)
+                        .header("Content-Type", "application/json")
+                        .json(&invoice)
+                        .send()
+                        .await?
+                        .json()
+                        .await?)
                 }
                 "get_report" => {
                     let report = params["report_type"].as_str().unwrap_or("ProfitAndLoss");
-                    Ok(http.get(&format!("{}/reports/{}", base, report)).bearer_auth(token)
-                        .header("Accept", "application/json").send().await?.json().await?)
+                    Ok(http
+                        .get(&format!("{}/reports/{}", base, report))
+                        .bearer_auth(token)
+                        .header("Accept", "application/json")
+                        .send()
+                        .await?
+                        .json()
+                        .await?)
                 }
                 _ => anyhow::bail!("QuickBooks: unknown operation '{}'", operation),
             }
@@ -899,40 +1137,79 @@ async fn rest_execute(
 
         // ── ServiceNow ─────────────────────────────────────────────────────
         "servicenow" => {
-            let instance = settings["instance_url"].as_str()
+            let instance = settings["instance_url"]
+                .as_str()
                 .or_else(|| params["instance_url"].as_str())
                 .ok_or_else(|| anyhow::anyhow!("ServiceNow: missing instance_url in settings"))?;
             let base = format!("{}/api/now/v2", instance.trim_end_matches('/'));
 
             match operation {
                 "query_records" => {
-                    let table  = params["table"].as_str().unwrap_or("incident");
+                    let table = params["table"].as_str().unwrap_or("incident");
                     let filter = params.get("sysparm_query").and_then(|v| v.as_str()).unwrap_or("active=true");
-                    let limit  = params["sysparm_limit"].as_u64().unwrap_or(10);
-                    Ok(http.get(&format!("{}/table/{}?sysparm_query={}&sysparm_limit={}", base, table, urlencoding::encode(filter), limit))
-                        .bearer_auth(token).send().await?.json().await?)
+                    let limit = params["sysparm_limit"].as_u64().unwrap_or(10);
+                    Ok(http
+                        .get(&format!(
+                            "{}/table/{}?sysparm_query={}&sysparm_limit={}",
+                            base,
+                            table,
+                            urlencoding::encode(filter),
+                            limit
+                        ))
+                        .bearer_auth(token)
+                        .send()
+                        .await?
+                        .json()
+                        .await?)
                 }
                 "get_record" => {
-                    let table  = params["table"].as_str().unwrap_or("incident");
+                    let table = params["table"].as_str().unwrap_or("incident");
                     let sys_id = params["sys_id"].as_str().ok_or_else(|| anyhow::anyhow!("sys_id required"))?;
-                    Ok(http.get(&format!("{}/table/{}/{}", base, table, sys_id))
-                        .bearer_auth(token).send().await?.json().await?)
+                    Ok(http
+                        .get(&format!("{}/table/{}/{}", base, table, sys_id))
+                        .bearer_auth(token)
+                        .send()
+                        .await?
+                        .json()
+                        .await?)
                 }
                 "create_incident" => {
-                    let body = params.get("record").cloned().unwrap_or_else(|| serde_json::json!({"short_description": params["short_description"].as_str().unwrap_or("")}));
-                    Ok(http.post(&format!("{}/table/incident", base)).bearer_auth(token).json(&body).send().await?.json().await?)
+                    let body = params.get("record").cloned().unwrap_or_else(
+                        || serde_json::json!({"short_description": params["short_description"].as_str().unwrap_or("")}),
+                    );
+                    Ok(http
+                        .post(&format!("{}/table/incident", base))
+                        .bearer_auth(token)
+                        .json(&body)
+                        .send()
+                        .await?
+                        .json()
+                        .await?)
                 }
                 "update_record" => {
-                    let table  = params["table"].as_str().unwrap_or("incident");
+                    let table = params["table"].as_str().unwrap_or("incident");
                     let sys_id = params["sys_id"].as_str().ok_or_else(|| anyhow::anyhow!("sys_id required"))?;
-                    let body   = params.get("fields").cloned().unwrap_or_default();
-                    Ok(http.patch(&format!("{}/table/{}/{}", base, table, sys_id)).bearer_auth(token).json(&body).send().await?.json().await?)
+                    let body = params.get("fields").cloned().unwrap_or_default();
+                    Ok(http
+                        .patch(&format!("{}/table/{}/{}", base, table, sys_id))
+                        .bearer_auth(token)
+                        .json(&body)
+                        .send()
+                        .await?
+                        .json()
+                        .await?)
                 }
                 "add_work_note" => {
                     let sys_id = params["sys_id"].as_str().ok_or_else(|| anyhow::anyhow!("sys_id required"))?;
-                    let note   = params["work_notes"].as_str().unwrap_or("");
-                    Ok(http.patch(&format!("{}/table/incident/{}", base, sys_id)).bearer_auth(token)
-                        .json(&serde_json::json!({"work_notes": note})).send().await?.json().await?)
+                    let note = params["work_notes"].as_str().unwrap_or("");
+                    Ok(http
+                        .patch(&format!("{}/table/incident/{}", base, sys_id))
+                        .bearer_auth(token)
+                        .json(&serde_json::json!({"work_notes": note}))
+                        .send()
+                        .await?
+                        .json()
+                        .await?)
                 }
                 _ => anyhow::bail!("ServiceNow: unknown operation '{}'", operation),
             }
@@ -944,9 +1221,14 @@ async fn rest_execute(
             match operation {
                 "list_incidents" => {
                     let status = params.get("status").and_then(|v| v.as_str()).unwrap_or("triggered,acknowledged");
-                    Ok(http.get(&format!("{}/incidents?statuses[]={}", base, status))
+                    Ok(http
+                        .get(&format!("{}/incidents?statuses[]={}", base, status))
                         .header("Authorization", format!("Token token={}", token))
-                        .header("Accept", "application/vnd.pagerduty+json;version=2").send().await?.json().await?)
+                        .header("Accept", "application/vnd.pagerduty+json;version=2")
+                        .send()
+                        .await?
+                        .json()
+                        .await?)
                 }
                 "trigger_incident" => {
                     let routing_key = settings["routing_key"].as_str().unwrap_or("");
@@ -956,26 +1238,48 @@ async fn rest_execute(
                 }
                 "acknowledge" => {
                     let id = params["incident_id"].as_str().ok_or_else(|| anyhow::anyhow!("incident_id required"))?;
-                    Ok(http.put(&format!("{}/incidents/{}", base, id))
+                    Ok(http
+                        .put(&format!("{}/incidents/{}", base, id))
                         .header("Authorization", format!("Token token={}", token))
                         .header("Accept", "application/vnd.pagerduty+json;version=2")
-                        .header("From", params.get("from_email").and_then(|v| v.as_str()).unwrap_or("narayan@example.com"))
-                        .json(&serde_json::json!({"incident":{"type":"incident_reference","status":"acknowledged"}})).send().await?.json().await?)
+                        .header(
+                            "From",
+                            params.get("from_email").and_then(|v| v.as_str()).unwrap_or("narayan@example.com"),
+                        )
+                        .json(&serde_json::json!({"incident":{"type":"incident_reference","status":"acknowledged"}}))
+                        .send()
+                        .await?
+                        .json()
+                        .await?)
                 }
                 "add_note" => {
-                    let id   = params["incident_id"].as_str().ok_or_else(|| anyhow::anyhow!("incident_id required"))?;
+                    let id = params["incident_id"].as_str().ok_or_else(|| anyhow::anyhow!("incident_id required"))?;
                     let note = params["content"].as_str().unwrap_or("");
-                    Ok(http.post(&format!("{}/incidents/{}/notes", base, id))
+                    Ok(http
+                        .post(&format!("{}/incidents/{}/notes", base, id))
                         .header("Authorization", format!("Token token={}", token))
                         .header("Accept", "application/vnd.pagerduty+json;version=2")
-                        .header("From", params.get("from_email").and_then(|v| v.as_str()).unwrap_or("narayan@example.com"))
-                        .json(&serde_json::json!({"note":{"content":note}})).send().await?.json().await?)
+                        .header(
+                            "From",
+                            params.get("from_email").and_then(|v| v.as_str()).unwrap_or("narayan@example.com"),
+                        )
+                        .json(&serde_json::json!({"note":{"content":note}}))
+                        .send()
+                        .await?
+                        .json()
+                        .await?)
                 }
                 "get_oncall" => {
-                    let schedule_id = params["schedule_id"].as_str().ok_or_else(|| anyhow::anyhow!("schedule_id required"))?;
-                    Ok(http.get(&format!("{}/schedules/{}/users", base, schedule_id))
+                    let schedule_id =
+                        params["schedule_id"].as_str().ok_or_else(|| anyhow::anyhow!("schedule_id required"))?;
+                    Ok(http
+                        .get(&format!("{}/schedules/{}/users", base, schedule_id))
                         .header("Authorization", format!("Token token={}", token))
-                        .header("Accept", "application/vnd.pagerduty+json;version=2").send().await?.json().await?)
+                        .header("Accept", "application/vnd.pagerduty+json;version=2")
+                        .send()
+                        .await?
+                        .json()
+                        .await?)
                 }
                 _ => anyhow::bail!("PagerDuty: unknown operation '{}'", operation),
             }
@@ -985,27 +1289,61 @@ async fn rest_execute(
         "greenhouse" => {
             let base = "https://harvest.greenhouse.io/v1";
             match operation {
-                "list_jobs"       => Ok(http.get(&format!("{}/jobs?status=open", base)).basic_auth(token, Option::<&str>::None).send().await?.json().await?),
+                "list_jobs" => Ok(http
+                    .get(&format!("{}/jobs?status=open", base))
+                    .basic_auth(token, Option::<&str>::None)
+                    .send()
+                    .await?
+                    .json()
+                    .await?),
                 "list_candidates" => {
                     let job_id = params.get("job_id").and_then(|v| v.as_str()).unwrap_or("");
-                    let url = if job_id.is_empty() { format!("{}/candidates", base) } else { format!("{}/candidates?job_id={}", base, job_id) };
+                    let url = if job_id.is_empty() {
+                        format!("{}/candidates", base)
+                    } else {
+                        format!("{}/candidates?job_id={}", base, job_id)
+                    };
                     Ok(http.get(&url).basic_auth(token, Option::<&str>::None).send().await?.json().await?)
                 }
                 "get_application" => {
-                    let id = params["application_id"].as_str().ok_or_else(|| anyhow::anyhow!("application_id required"))?;
-                    Ok(http.get(&format!("{}/applications/{}", base, id)).basic_auth(token, Option::<&str>::None).send().await?.json().await?)
+                    let id =
+                        params["application_id"].as_str().ok_or_else(|| anyhow::anyhow!("application_id required"))?;
+                    Ok(http
+                        .get(&format!("{}/applications/{}", base, id))
+                        .basic_auth(token, Option::<&str>::None)
+                        .send()
+                        .await?
+                        .json()
+                        .await?)
                 }
                 "add_note" => {
-                    let candidate_id = params["candidate_id"].as_str().ok_or_else(|| anyhow::anyhow!("candidate_id required"))?;
+                    let candidate_id =
+                        params["candidate_id"].as_str().ok_or_else(|| anyhow::anyhow!("candidate_id required"))?;
                     let user_id = params["user_id"].as_str().unwrap_or("0");
                     let body = serde_json::json!({"user_id": user_id, "body": params["body"].as_str().unwrap_or("")});
-                    Ok(http.post(&format!("{}/candidates/{}/activity_feed/notes", base, candidate_id)).basic_auth(token, Option::<&str>::None).json(&body).send().await?.json().await?)
+                    Ok(http
+                        .post(&format!("{}/candidates/{}/activity_feed/notes", base, candidate_id))
+                        .basic_auth(token, Option::<&str>::None)
+                        .json(&body)
+                        .send()
+                        .await?
+                        .json()
+                        .await?)
                 }
                 "advance_stage" => {
-                    let application_id = params["application_id"].as_str().ok_or_else(|| anyhow::anyhow!("application_id required"))?;
-                    let from_stage_id  = params["from_stage_id"].as_str().ok_or_else(|| anyhow::anyhow!("from_stage_id required"))?;
+                    let application_id =
+                        params["application_id"].as_str().ok_or_else(|| anyhow::anyhow!("application_id required"))?;
+                    let from_stage_id =
+                        params["from_stage_id"].as_str().ok_or_else(|| anyhow::anyhow!("from_stage_id required"))?;
                     let body = serde_json::json!({"from_stage_id": from_stage_id});
-                    Ok(http.post(&format!("{}/applications/{}/advance", base, application_id)).basic_auth(token, Option::<&str>::None).json(&body).send().await?.json().await?)
+                    Ok(http
+                        .post(&format!("{}/applications/{}/advance", base, application_id))
+                        .basic_auth(token, Option::<&str>::None)
+                        .json(&body)
+                        .send()
+                        .await?
+                        .json()
+                        .await?)
                 }
                 _ => anyhow::bail!("Greenhouse: unknown operation '{}'", operation),
             }
@@ -1013,7 +1351,8 @@ async fn rest_execute(
 
         // ── DocuSign ───────────────────────────────────────────────────────
         "docusign" => {
-            let account_id = settings["account_id"].as_str()
+            let account_id = settings["account_id"]
+                .as_str()
                 .or_else(|| params["account_id"].as_str())
                 .ok_or_else(|| anyhow::anyhow!("DocuSign: missing account_id in settings"))?;
             let base_url = settings["base_url"].as_str().unwrap_or("https://demo.docusign.net");
@@ -1022,22 +1361,41 @@ async fn rest_execute(
             match operation {
                 "create_envelope" => {
                     let envelope = params.get("envelope").cloned().unwrap_or_default();
-                    Ok(http.post(&format!("{}/envelopes", base)).bearer_auth(token).json(&envelope).send().await?.json().await?)
+                    Ok(http
+                        .post(&format!("{}/envelopes", base))
+                        .bearer_auth(token)
+                        .json(&envelope)
+                        .send()
+                        .await?
+                        .json()
+                        .await?)
                 }
                 "send_envelope" => {
                     let id = params["envelope_id"].as_str().ok_or_else(|| anyhow::anyhow!("envelope_id required"))?;
-                    Ok(http.put(&format!("{}/envelopes/{}", base, id)).bearer_auth(token)
-                        .json(&serde_json::json!({"status":"sent"})).send().await?.json().await?)
+                    Ok(http
+                        .put(&format!("{}/envelopes/{}", base, id))
+                        .bearer_auth(token)
+                        .json(&serde_json::json!({"status":"sent"}))
+                        .send()
+                        .await?
+                        .json()
+                        .await?)
                 }
                 "get_status" => {
                     let id = params["envelope_id"].as_str().ok_or_else(|| anyhow::anyhow!("envelope_id required"))?;
                     Ok(http.get(&format!("{}/envelopes/{}", base, id)).bearer_auth(token).send().await?.json().await?)
                 }
                 "void_envelope" => {
-                    let id     = params["envelope_id"].as_str().ok_or_else(|| anyhow::anyhow!("envelope_id required"))?;
+                    let id = params["envelope_id"].as_str().ok_or_else(|| anyhow::anyhow!("envelope_id required"))?;
                     let reason = params.get("reason").and_then(|v| v.as_str()).unwrap_or("Voided by Narayan");
-                    Ok(http.put(&format!("{}/envelopes/{}", base, id)).bearer_auth(token)
-                        .json(&serde_json::json!({"status":"voided","voidedReason":reason})).send().await?.json().await?)
+                    Ok(http
+                        .put(&format!("{}/envelopes/{}", base, id))
+                        .bearer_auth(token)
+                        .json(&serde_json::json!({"status":"voided","voidedReason":reason}))
+                        .send()
+                        .await?
+                        .json()
+                        .await?)
                 }
                 _ => anyhow::bail!("DocuSign: unknown operation '{}'", operation),
             }
@@ -1045,18 +1403,25 @@ async fn rest_execute(
 
         // ── dbt Cloud ──────────────────────────────────────────────────────
         "dbt_cloud" => {
-            let account_id = settings["account_id"].as_str()
+            let account_id = settings["account_id"]
+                .as_str()
                 .or_else(|| params["account_id"].as_str())
                 .ok_or_else(|| anyhow::anyhow!("dbt Cloud: missing account_id in settings"))?;
             let base = format!("https://cloud.getdbt.com/api/v2/accounts/{}", account_id);
 
             match operation {
-                "list_jobs"   => Ok(http.get(&format!("{}/jobs/", base)).bearer_auth(token).send().await?.json().await?),
+                "list_jobs" => Ok(http.get(&format!("{}/jobs/", base)).bearer_auth(token).send().await?.json().await?),
                 "trigger_run" => {
                     let job_id = params["job_id"].as_str().ok_or_else(|| anyhow::anyhow!("job_id required"))?;
-                    let cause  = params.get("cause").and_then(|v| v.as_str()).unwrap_or("Triggered by Narayan");
-                    Ok(http.post(&format!("{}/jobs/{}/run/", base, job_id)).bearer_auth(token)
-                        .json(&serde_json::json!({"cause": cause})).send().await?.json().await?)
+                    let cause = params.get("cause").and_then(|v| v.as_str()).unwrap_or("Triggered by Narayan");
+                    Ok(http
+                        .post(&format!("{}/jobs/{}/run/", base, job_id))
+                        .bearer_auth(token)
+                        .json(&serde_json::json!({"cause": cause}))
+                        .send()
+                        .await?
+                        .json()
+                        .await?)
                 }
                 "get_run" => {
                     let run_id = params["run_id"].as_str().ok_or_else(|| anyhow::anyhow!("run_id required"))?;
@@ -1064,7 +1429,10 @@ async fn rest_execute(
                 }
                 "list_models" => {
                     let project_id = params.get("project_id").and_then(|v| v.as_str()).unwrap_or("");
-                    let url = format!("https://cloud.getdbt.com/api/v3/accounts/{}/projects/{}/models/", account_id, project_id);
+                    let url = format!(
+                        "https://cloud.getdbt.com/api/v3/accounts/{}/projects/{}/models/",
+                        account_id, project_id
+                    );
                     Ok(http.get(&url).bearer_auth(token).send().await?.json().await?)
                 }
                 _ => anyhow::bail!("dbt Cloud: unknown operation '{}'", operation),
@@ -1076,36 +1444,58 @@ async fn rest_execute(
             let base = "https://gmail.googleapis.com/gmail/v1/users/me";
             match operation {
                 "list_messages" => {
-                    let q     = params.get("query").and_then(|v| v.as_str()).unwrap_or("");
-                    let max   = params["max_results"].as_u64().unwrap_or(10);
-                    Ok(http.get(&format!("{}/messages?q={}&maxResults={}", base, urlencoding::encode(q), max))
-                        .bearer_auth(token).send().await?.json().await?)
+                    let q = params.get("query").and_then(|v| v.as_str()).unwrap_or("");
+                    let max = params["max_results"].as_u64().unwrap_or(10);
+                    Ok(http
+                        .get(&format!("{}/messages?q={}&maxResults={}", base, urlencoding::encode(q), max))
+                        .bearer_auth(token)
+                        .send()
+                        .await?
+                        .json()
+                        .await?)
                 }
                 "get_message" => {
                     let id = params["message_id"].as_str().ok_or_else(|| anyhow::anyhow!("message_id required"))?;
                     Ok(http.get(&format!("{}/messages/{}", base, id)).bearer_auth(token).send().await?.json().await?)
                 }
                 "send_email" | "create_draft" => {
-                    let to      = params["to"].as_str().unwrap_or("");
+                    let to = params["to"].as_str().unwrap_or("");
                     let subject = params["subject"].as_str().unwrap_or("");
-                    let body    = params["body"].as_str().unwrap_or("");
+                    let body = params["body"].as_str().unwrap_or("");
                     let raw = base64::Engine::encode(
                         &base64::engine::general_purpose::URL_SAFE,
                         format!("To: {to}\r\nSubject: {subject}\r\nContent-Type: text/plain\r\n\r\n{body}"),
                     );
                     if operation == "create_draft" {
-                        Ok(http.post(&format!("{}/drafts", base)).bearer_auth(token)
-                            .json(&serde_json::json!({"message":{"raw":raw}})).send().await?.json().await?)
+                        Ok(http
+                            .post(&format!("{}/drafts", base))
+                            .bearer_auth(token)
+                            .json(&serde_json::json!({"message":{"raw":raw}}))
+                            .send()
+                            .await?
+                            .json()
+                            .await?)
                     } else {
-                        Ok(http.post(&format!("{}/messages/send", base)).bearer_auth(token)
-                            .json(&serde_json::json!({"raw":raw})).send().await?.json().await?)
+                        Ok(http
+                            .post(&format!("{}/messages/send", base))
+                            .bearer_auth(token)
+                            .json(&serde_json::json!({"raw":raw}))
+                            .send()
+                            .await?
+                            .json()
+                            .await?)
                     }
                 }
                 "search" => {
-                    let q   = params["query"].as_str().ok_or_else(|| anyhow::anyhow!("query required"))?;
+                    let q = params["query"].as_str().ok_or_else(|| anyhow::anyhow!("query required"))?;
                     let max = params["max_results"].as_u64().unwrap_or(10);
-                    Ok(http.get(&format!("{}/messages?q={}&maxResults={}", base, urlencoding::encode(q), max))
-                        .bearer_auth(token).send().await?.json().await?)
+                    Ok(http
+                        .get(&format!("{}/messages?q={}&maxResults={}", base, urlencoding::encode(q), max))
+                        .bearer_auth(token)
+                        .send()
+                        .await?
+                        .json()
+                        .await?)
                 }
                 _ => anyhow::bail!("Gmail: unknown operation '{}'", operation),
             }
@@ -1116,7 +1506,7 @@ async fn rest_execute(
             let base = "https://graph.microsoft.com/v1.0/me";
             match operation {
                 "list_messages" => {
-                    let top    = params["top"].as_u64().unwrap_or(10);
+                    let top = params["top"].as_u64().unwrap_or(10);
                     let filter = params.get("filter").and_then(|v| v.as_str()).unwrap_or("");
                     let url = if filter.is_empty() {
                         format!("{}/messages?$top={}", base, top)
@@ -1142,14 +1532,28 @@ async fn rest_execute(
                         "body": {"contentType":"Text","content": params["body"].as_str().unwrap_or("")},
                         "toRecipients":[{"emailAddress":{"address":params["to"].as_str().unwrap_or("")}}],
                     });
-                    Ok(http.post(&format!("{}/messages", base)).bearer_auth(token).json(&body).send().await?.json().await?)
+                    Ok(http
+                        .post(&format!("{}/messages", base))
+                        .bearer_auth(token)
+                        .json(&body)
+                        .send()
+                        .await?
+                        .json()
+                        .await?)
                 }
                 "list_events" => {
                     Ok(http.get(&format!("{}/events?$top=10", base)).bearer_auth(token).send().await?.json().await?)
                 }
                 "create_event" => {
                     let event = params.get("event").cloned().unwrap_or_default();
-                    Ok(http.post(&format!("{}/events", base)).bearer_auth(token).json(&event).send().await?.json().await?)
+                    Ok(http
+                        .post(&format!("{}/events", base))
+                        .bearer_auth(token)
+                        .json(&event)
+                        .send()
+                        .await?
+                        .json()
+                        .await?)
                 }
                 _ => anyhow::bail!("Outlook: unknown operation '{}'", operation),
             }
@@ -1169,18 +1573,38 @@ async fn rest_execute(
                         "name": params["name"].as_str().unwrap_or("New task"),
                         "projects": params.get("projects").cloned().unwrap_or_default(),
                     }));
-                    Ok(http.post(&format!("{}/tasks", base)).bearer_auth(token).json(&serde_json::json!({"data":task})).send().await?.json().await?)
+                    Ok(http
+                        .post(&format!("{}/tasks", base))
+                        .bearer_auth(token)
+                        .json(&serde_json::json!({"data":task}))
+                        .send()
+                        .await?
+                        .json()
+                        .await?)
                 }
                 "update_task" => {
-                    let id   = params["task_id"].as_str().ok_or_else(|| anyhow::anyhow!("task_id required"))?;
+                    let id = params["task_id"].as_str().ok_or_else(|| anyhow::anyhow!("task_id required"))?;
                     let data = params.get("data").cloned().unwrap_or_default();
-                    Ok(http.put(&format!("{}/tasks/{}", base, id)).bearer_auth(token).json(&serde_json::json!({"data":data})).send().await?.json().await?)
+                    Ok(http
+                        .put(&format!("{}/tasks/{}", base, id))
+                        .bearer_auth(token)
+                        .json(&serde_json::json!({"data":data}))
+                        .send()
+                        .await?
+                        .json()
+                        .await?)
                 }
                 "add_comment" => {
-                    let id   = params["task_id"].as_str().ok_or_else(|| anyhow::anyhow!("task_id required"))?;
+                    let id = params["task_id"].as_str().ok_or_else(|| anyhow::anyhow!("task_id required"))?;
                     let text = params["text"].as_str().unwrap_or("");
-                    Ok(http.post(&format!("{}/tasks/{}/stories", base, id)).bearer_auth(token)
-                        .json(&serde_json::json!({"data":{"text":text}})).send().await?.json().await?)
+                    Ok(http
+                        .post(&format!("{}/tasks/{}/stories", base, id))
+                        .bearer_auth(token)
+                        .json(&serde_json::json!({"data":{"text":text}}))
+                        .send()
+                        .await?
+                        .json()
+                        .await?)
                 }
                 _ => anyhow::bail!("Asana: unknown operation '{}'", operation),
             }
@@ -1201,20 +1625,15 @@ async fn rest_execute(
 // REST paths that the Connector framework uses — no fantasy MCP servers needed.
 
 pub struct ConnectorTool {
-    def:           &'static ConnectorDef,
-    mcp:           McpSessionTool,
+    def: &'static ConnectorDef,
+    mcp: McpSessionTool,
     install_store: Option<Arc<crate::connectors::ConnectorInstallStore>>,
-    http:          reqwest::Client,
+    http: reqwest::Client,
 }
 
 impl ConnectorTool {
     pub fn new(def: &'static ConnectorDef) -> Self {
-        Self {
-            def,
-            mcp: McpSessionTool::new(),
-            install_store: None,
-            http: reqwest::Client::new(),
-        }
+        Self { def, mcp: McpSessionTool::new(), install_store: None, http: reqwest::Client::new() }
     }
 
     pub fn with_install_store(
@@ -1247,23 +1666,12 @@ impl ConnectorTool {
     ) -> anyhow::Result<ToolResult> {
         // Get any stored settings (e.g. Salesforce instance_url, Zendesk subdomain)
         let settings = if let Some(store) = &self.install_store {
-            store.get(tenant_id, self.def.name).await
-                .ok()
-                .flatten()
-                .map(|i| i.settings.clone())
-                .unwrap_or_default()
+            store.get(tenant_id, self.def.name).await.ok().flatten().map(|i| i.settings.clone()).unwrap_or_default()
         } else {
             serde_json::json!({})
         };
 
-        let result = rest_execute(
-            &self.http,
-            self.def.name,
-            token,
-            operation,
-            params,
-            &settings,
-        ).await?;
+        let result = rest_execute(&self.http, self.def.name, token, operation, params, &settings).await?;
 
         Ok(ToolResult::ok(result))
     }
@@ -1271,9 +1679,15 @@ impl ConnectorTool {
 
 #[async_trait]
 impl Tool for ConnectorTool {
-    fn name(&self) -> &str { self.def.name }
-    fn description(&self) -> &str { self.def.description }
-    fn category(&self) -> &'static str { self.def.category }
+    fn name(&self) -> &str {
+        self.def.name
+    }
+    fn description(&self) -> &str {
+        self.def.description
+    }
+    fn category(&self) -> &'static str {
+        self.def.category
+    }
 
     fn parameters_schema(&self) -> Vec<ParameterSchema> {
         let ops_hint = self.def.operations.join("; ");
@@ -1285,21 +1699,25 @@ impl Tool for ConnectorTool {
             ),
             ParameterSchema::optional("params", "object", "Operation-specific parameters as a JSON object."),
             ParameterSchema::optional("tenant_id", "string", "Tenant ID for credential lookup (injected by executor)."),
-            ParameterSchema::optional("auth_token", "string", "Bearer token override. Omit to use the stored tenant credential."),
+            ParameterSchema::optional(
+                "auth_token",
+                "string",
+                "Bearer token override. Omit to use the stored tenant credential.",
+            ),
         ]
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         let operation = match args["operation"].as_str() {
             Some(op) => op.to_string(),
-            None     => return Ok(ToolResult::err("'operation' is required")),
+            None => return Ok(ToolResult::err("'operation' is required")),
         };
-        let params    = args.get("params").cloned().unwrap_or_default();
+        let params = args.get("params").cloned().unwrap_or_default();
         let tenant_id = args["tenant_id"].as_str().unwrap_or("").to_string();
 
         // 1. Explicit token override → try MCP session
         if let Some(token) = args["auth_token"].as_str() {
-            let mut mcp_args = serde_json::json!({
+            let mcp_args = serde_json::json!({
                 "server_url": self.def.mcp_url,
                 "action":     "call_tool",
                 "tool_name":  operation,
@@ -1336,7 +1754,7 @@ pub fn register_all_connectors(
     for def in ALL_CONNECTORS {
         let tool: Arc<dyn Tool> = match &install_store {
             Some(store) => Arc::new(ConnectorTool::with_install_store(def, Arc::clone(store))),
-            None        => Arc::new(ConnectorTool::new(def)),
+            None => Arc::new(ConnectorTool::new(def)),
         };
         registry.register(tool);
     }
@@ -1362,7 +1780,8 @@ mod tests {
             assert!(
                 def.category.starts_with("connector/"),
                 "connector '{}' category '{}' must start with 'connector/'",
-                def.name, def.category
+                def.name,
+                def.category
             );
         }
     }
@@ -1425,8 +1844,12 @@ mod tests {
     #[test]
     fn test_catalogue_entries_strip_prefix() {
         for (cat, name, _) in catalogue_entries() {
-            assert!(!cat.starts_with("connector/"),
-                "catalogue_entries should strip prefix, got '{}' for '{}'", cat, name);
+            assert!(
+                !cat.starts_with("connector/"),
+                "catalogue_entries should strip prefix, got '{}' for '{}'",
+                cat,
+                name
+            );
         }
     }
 

@@ -34,15 +34,13 @@ impl Tool for ListConnectorsInCategoryTool {
     }
 
     fn parameters_schema(&self) -> Vec<ParameterSchema> {
-        vec![
-            ParameterSchema::required(
-                "category",
-                "string",
-                "Connector category to list. Examples: crm, devtools, project_management, \
+        vec![ParameterSchema::required(
+            "category",
+            "string",
+            "Connector category to list. Examples: crm, devtools, project_management, \
                  communication, finance, itsm, hr, legal, data. \
                  Use 'all' to see every available connector.",
-            ),
-        ]
+        )]
     }
 
     /// In production the executor intercepts this call and returns the real list.

@@ -492,7 +492,9 @@ fn clarification_context(state: &AgentState) -> Option<String> {
         state
             .metadata
             .get("clarification_answers")
-            .and_then(|value| serde_json::from_value::<crate::agent::clarifier::ClarificationAnswers>(value.clone()).ok())
+            .and_then(|value| {
+                serde_json::from_value::<crate::agent::clarifier::ClarificationAnswers>(value.clone()).ok()
+            })
             .and_then(|answers| {
                 if let Some(freeform) = answers.freeform.filter(|value| !value.trim().is_empty()) {
                     Some(freeform)
@@ -503,7 +505,11 @@ fn clarification_context(state: &AgentState) -> Option<String> {
                         .filter(|answer| !answer.trim().is_empty())
                         .collect::<Vec<_>>()
                         .join("\n");
-                    if joined.is_empty() { None } else { Some(joined) }
+                    if joined.is_empty() {
+                        None
+                    } else {
+                        Some(joined)
+                    }
                 }
             })
     })
@@ -712,9 +718,8 @@ CONSTRAINTS:
     ) -> String {
         let conv_ctx =
             if conversation_history.is_empty() { String::new() } else { format!("\n{conversation_history}\n") };
-        let clarification_ctx = clarification_context(state)
-            .map(|value| format!("\nLATEST USER INPUT:\n{value}\n"))
-            .unwrap_or_default();
+        let clarification_ctx =
+            clarification_context(state).map(|value| format!("\nLATEST USER INPUT:\n{value}\n")).unwrap_or_default();
         let role_ctx = role_context
             .filter(|s| !s.is_empty())
             .map(|s| format!("\nROLE CONTEXT (follow these guidelines):\n{s}\n"))
@@ -775,12 +780,7 @@ Reply directly to the user's message.
         }
     }
 
-    pub fn system(
-        state: &AgentState,
-        plan: &Plan,
-        job_type: &JobType,
-        role_policy_context: Option<&str>,
-    ) -> String {
+    pub fn system(state: &AgentState, plan: &Plan, job_type: &JobType, role_policy_context: Option<&str>) -> String {
         let execution_style = match job_type {
             JobType::SoftwareEngineer => {
                 "\

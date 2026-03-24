@@ -62,10 +62,7 @@ impl Plan {
 
     /// Build a deterministic Plan from a role's enriched workflow outline.
     /// No LLM call — templates are rendered against the trigger's input_data.
-    pub fn from_workflow_outline(
-        role: &crate::agent::definition::AgentRole,
-        input_data: &serde_json::Value,
-    ) -> Self {
+    pub fn from_workflow_outline(role: &crate::agent::definition::AgentRole, input_data: &serde_json::Value) -> Self {
         let steps = role
             .execution_guidelines
             .workflow_outline
@@ -115,10 +112,8 @@ fn render_template(template: &serde_json::Value, input_data: &serde_json::Value)
             serde_json::Value::String(result)
         }
         serde_json::Value::Object(map) => {
-            let rendered: serde_json::Map<String, serde_json::Value> = map
-                .iter()
-                .map(|(k, v)| (k.clone(), render_template(v, input_data)))
-                .collect();
+            let rendered: serde_json::Map<String, serde_json::Value> =
+                map.iter().map(|(k, v)| (k.clone(), render_template(v, input_data))).collect();
             serde_json::Value::Object(rendered)
         }
         serde_json::Value::Array(arr) => {
@@ -193,16 +188,10 @@ impl LlmPlanner {
             parts.push(format!("Available connectors for this role: {}", role.connectors.join(", ")));
         }
         if let Ok(tenant_wasm_tools) = store.list_tenant_wasm_tools(&state.tenant_id).await {
-            let names: Vec<String> = tenant_wasm_tools
-                .into_iter()
-                .filter(|tool| tool.enabled)
-                .map(|tool| tool.name)
-                .collect();
+            let names: Vec<String> =
+                tenant_wasm_tools.into_iter().filter(|tool| tool.enabled).map(|tool| tool.name).collect();
             if !names.is_empty() {
-                parts.push(format!(
-                    "Registered tenant WASM tools (strictly sandboxed): {}",
-                    names.join(", ")
-                ));
+                parts.push(format!("Registered tenant WASM tools (strictly sandboxed): {}", names.join(", ")));
             }
         }
         let mut role_tools = Vec::new();
@@ -222,25 +211,16 @@ impl LlmPlanner {
             parts.push(format!("Specific tools for this role: {}", role_tools.join(", ")));
         }
         if !allowed_wasm_tools.is_empty() {
-            parts.push(format!(
-                "Allowed registered WASM tools for this role: {}",
-                allowed_wasm_tools.join(", ")
-            ));
+            parts.push(format!("Allowed registered WASM tools for this role: {}", allowed_wasm_tools.join(", ")));
         }
         if !role.execution_guidelines.is_empty() {
             parts.push(format!("Execution guidelines:\n{}", role.execution_guidelines.to_prompt()));
         }
         if !workflow_hints.is_empty() {
-            parts.push(format!(
-                "Preferred workflow order for this role:\n- {}",
-                workflow_hints.join("\n- ")
-            ));
+            parts.push(format!("Preferred workflow order for this role:\n- {}", workflow_hints.join("\n- ")));
         }
         if !preferred_tool_categories.is_empty() {
-            parts.push(format!(
-                "Preferred tool categories for this role: {}",
-                preferred_tool_categories.join(", ")
-            ));
+            parts.push(format!("Preferred tool categories for this role: {}", preferred_tool_categories.join(", ")));
         }
         if !preferred_connector_categories.is_empty() {
             parts.push(format!(
@@ -257,10 +237,7 @@ impl LlmPlanner {
             role.execution_limits.max_steps,
             role.execution_limits.max_retries,
             role.execution_limits.timeout_secs,
-            role.execution_limits
-                .max_cost_usd
-                .map(|value| format!("{value:.2}"))
-                .unwrap_or_else(|| "none".into())
+            role.execution_limits.max_cost_usd.map(|value| format!("{value:.2}")).unwrap_or_else(|| "none".into())
         ));
         // Load agent constraints
         if let Ok(Some(agent)) = store.get_agent_definition(&state.tenant_id, &role.agent_id).await {
@@ -301,10 +278,8 @@ impl Planner for LlmPlanner {
         }
 
         let role_context = self.load_role_context(state).await;
-        let job_type = role_context
-            .as_ref()
-            .map(|ctx| ctx.job_type.clone())
-            .unwrap_or_else(|| JobType::detect(&state.goal));
+        let job_type =
+            role_context.as_ref().map(|ctx| ctx.job_type.clone()).unwrap_or_else(|| JobType::detect(&state.goal));
 
         let system = PlannerPrompt::system(&job_type);
         let manifest = crate::tools::selector::tool_manifest_from_names(available_tools);
@@ -387,11 +362,8 @@ impl Planner for LlmPlanner {
 
     async fn revise_plan(&self, plan: &Plan, state: &AgentState, feedback: &str) -> Result<Plan> {
         let user = PlannerPrompt::user_revise(plan, feedback, state);
-        let job_type = self
-            .load_role_context(state)
-            .await
-            .map(|ctx| ctx.job_type)
-            .unwrap_or_else(|| JobType::detect(&state.goal));
+        let job_type =
+            self.load_role_context(state).await.map(|ctx| ctx.job_type).unwrap_or_else(|| JobType::detect(&state.goal));
         let system = PlannerPrompt::system(&job_type);
 
         let request = GatewayRequest::new(

@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import clsx from 'clsx';
 import {
   Loader2, Send, CheckCircle2, Sparkles, X, ArrowRight,
-  Bot, User, AlertCircle, Search, Zap,
+  Bot, User, AlertCircle, Search, Zap, Paperclip, FileText, Trash2,
 } from 'lucide-react';
 import { planMode as planModeApi } from '../../api';
 
@@ -35,6 +35,42 @@ const PERSONA_LABELS = {
   founders: 'Founder Tools',
   personal: 'Personal Assistants',
 };
+
+const MAX_ATTACHMENT_BYTES = 15 * 1024 * 1024;
+
+function formatBytes(bytes) {
+  if (!bytes) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value >= 10 || unit === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unit]}`;
+}
+
+function readFileAsBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result;
+      if (typeof result !== 'string') {
+        reject(new Error(`Failed to read ${file.name}`));
+        return;
+      }
+      const comma = result.indexOf(',');
+      resolve(comma >= 0 ? result.slice(comma + 1) : result);
+    };
+    reader.onerror = () => reject(new Error(`Failed to read ${file.name}`));
+    reader.readAsDataURL(file);
+  });
+}
+
+function attachmentPrompt(attachments) {
+  const names = attachments.map(a => a.name).join(', ');
+  return `Please analyze the attached file${attachments.length === 1 ? '' : 's'}${names ? `: ${names}` : ''}.`;
+}
 
 // ── Phase progress strip ───────────────────────────────────────────────────
 function PhaseStrip({ phase }) {
@@ -72,7 +108,7 @@ function PhaseStrip({ phase }) {
 }
 
 // ── Message bubble ─────────────────────────────────────────────────────────
-function Bubble({ role, content, isNew }) {
+function Bubble({ role, content, isNew, attachments = [] }) {
   const isUser = role === 'user';
   return (
     <motion.div
@@ -99,6 +135,25 @@ function Bubble({ role, content, isNew }) {
           : 'bg-bg-card border border-border text-tx-1 rounded-tl-sm',
       )}>
         {content}
+        {attachments.length > 0 && (
+          <div className="mt-3 flex flex-wrap gap-2">
+            {attachments.map((file, idx) => (
+              <div
+                key={`${file.name}-${idx}`}
+                className={clsx(
+                  'inline-flex items-center gap-1.5 rounded-lg border px-2 py-1 text-[11px]',
+                  isUser
+                    ? 'border-white/15 bg-white/10 text-bg-card/90'
+                    : 'border-border bg-bg text-tx-2',
+                )}
+              >
+                <FileText size={11} className={isUser ? 'text-white/90' : 'text-accent'} />
+                <span className="truncate max-w-[10rem]">{file.name}</span>
+                {file.size ? <span className="opacity-70">{formatBytes(file.size)}</span> : null}
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </motion.div>
   );
@@ -285,8 +340,11 @@ export default function PlanModeChat({ agentName = 'New Agent', existingAgentId 
   const [complete,   setComplete]   = useState(false);
   const [saving,     setSaving]     = useState(false);
   const [error,      setError]      = useState('');
+  const [pendingAttachments, setPendingAttachments] = useState([]);
+  const [attachmentsBusy, setAttachmentsBusy] = useState(false);
   const bottomRef = useRef(null);
   const inputRef  = useRef(null);
+  const fileInputRef = useRef(null);
 
   // ── Load templates ──────────────────────────────────────────────────────
   useEffect(() => {
@@ -326,6 +384,42 @@ export default function PlanModeChat({ agentName = 'New Agent', existingAgentId 
     }
   }, [agentName, existingAgentId]);
 
+  const handleAttachmentPick = useCallback(async (event) => {
+    const files = Array.from(event.target.files || []);
+    event.target.value = '';
+    if (files.length === 0) return;
+
+    setError('');
+    setAttachmentsBusy(true);
+    try {
+      const uploads = [];
+      for (const file of files) {
+        if (file.size > MAX_ATTACHMENT_BYTES) {
+          throw new Error(`"${file.name}" is larger than ${formatBytes(MAX_ATTACHMENT_BYTES)}.`);
+        }
+
+        const contentBase64 = await readFileAsBase64(file);
+        uploads.push({
+          id: `${file.name}-${file.size}-${file.lastModified}-${Math.random().toString(36).slice(2)}`,
+          name: file.name,
+          mime_type: file.type || null,
+          size: file.size,
+          content_base64: contentBase64,
+        });
+      }
+
+      setPendingAttachments(prev => [...prev, ...uploads]);
+    } catch (e) {
+      setError(e.message || 'Failed to read attachment');
+    } finally {
+      setAttachmentsBusy(false);
+    }
+  }, []);
+
+  const removeAttachment = useCallback((id) => {
+    setPendingAttachments(prev => prev.filter(file => file.id !== id));
+  }, []);
+
   // Auto-scroll on new messages
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -338,20 +432,33 @@ export default function PlanModeChat({ agentName = 'New Agent', existingAgentId 
 
   // ── Send a turn ────────────────────────────────────────────────────────
   const sendMessage = useCallback(async (text) => {
-    if (!text.trim() || sending || !sessionId) return;
-    const userMsg = text.trim();
+    const trimmed = text.trim();
+    const attachments = pendingAttachments.map(({ name, mime_type, content_base64, size }) => ({
+      name,
+      mime_type,
+      content_base64,
+      size,
+    }));
+    const userMsg = trimmed || (attachments.length ? attachmentPrompt(attachments) : '');
+    if (!userMsg || sending || !sessionId || attachmentsBusy) return;
     setInput('');
     setError('');
     setSending(true);
 
     // Append user bubble immediately
-    setMessages(prev => [...prev, { role: 'user', content: userMsg, isNew: true }]);
+    setMessages(prev => [...prev, {
+      role: 'user',
+      content: userMsg,
+      isNew: true,
+      attachments: pendingAttachments.map(({ id, name, size }) => ({ id, name, size })),
+    }]);
 
     try {
-      const res = await planModeApi.turn(sessionId, userMsg);
+      const res = await planModeApi.turn(sessionId, userMsg, attachments);
       const newPhase = res.phase || phase;
       setPhase(newPhase);
       setMessages(prev => [...prev, { role: 'assistant', content: res.reply, isNew: true }]);
+      setPendingAttachments([]);
 
       if (res.complete || newPhase === 'complete') {
         setComplete(true);
@@ -363,7 +470,7 @@ export default function PlanModeChat({ agentName = 'New Agent', existingAgentId 
     } finally {
       setSending(false);
     }
-  }, [sessionId, sending, phase]);
+  }, [sessionId, sending, phase, pendingAttachments, attachmentsBusy]);
 
   // ── Save and deploy ────────────────────────────────────────────────────
   const handleSave = useCallback(async () => {
@@ -381,8 +488,10 @@ export default function PlanModeChat({ agentName = 'New Agent', existingAgentId 
   // ── Keyboard submit ────────────────────────────────────────────────────
   function onKeyDown(e) {
     if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      sendMessage(input);
+      if (input.trim() || pendingAttachments.length > 0) {
+        e.preventDefault();
+        sendMessage(input);
+      }
     }
   }
 
@@ -507,40 +616,88 @@ export default function PlanModeChat({ agentName = 'New Agent', existingAgentId 
                 </div>
               ) : (
                 // Chat input
-                <div className="flex items-end gap-2.5 rounded-xl border border-border bg-bg px-3.5 py-2.5
-                                focus-within:border-border-md focus-within:ring-2 focus-within:ring-accent/10 transition-all">
-                  <textarea
-                    ref={inputRef}
-                    value={input}
-                    onChange={e => setInput(e.target.value)}
-                    onKeyDown={onKeyDown}
-                    placeholder={loading ? 'Starting…' : 'Reply…'}
-                    disabled={loading || sending}
-                    rows={1}
-                    className="flex-1 bg-transparent text-[13px] text-tx-1 placeholder-tx-4 outline-none resize-none
-                               leading-relaxed max-h-28 disabled:opacity-50"
-                    onInput={e => {
-                      e.target.style.height = 'auto';
-                      e.target.style.height = Math.min(e.target.scrollHeight, 112) + 'px';
-                    }}
+                <div className="rounded-xl border border-border bg-bg px-3.5 py-2.5 focus-within:border-border-md focus-within:ring-2 focus-within:ring-accent/10 transition-all">
+                  {pendingAttachments.length > 0 && (
+                    <div className="mb-2 flex flex-wrap gap-2">
+                      {pendingAttachments.map(file => (
+                        <div
+                          key={file.id}
+                          className="inline-flex items-center gap-2 rounded-lg border border-border bg-bg-card px-2.5 py-1.5 text-[11px] text-tx-2"
+                        >
+                          <FileText size={11} className="text-accent shrink-0" />
+                          <div className="min-w-0">
+                            <p className="max-w-[12rem] truncate">{file.name}</p>
+                            <p className="text-[10px] text-tx-4">{formatBytes(file.size)}</p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => removeAttachment(file.id)}
+                            className="p-1 rounded-md text-tx-4 hover:text-err hover:bg-err-soft transition-colors"
+                            title={`Remove ${file.name}`}
+                          >
+                            <Trash2 size={11} />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  <div className="flex items-end gap-2.5">
+                    <textarea
+                      ref={inputRef}
+                      value={input}
+                      onChange={e => setInput(e.target.value)}
+                      onKeyDown={onKeyDown}
+                      placeholder={loading ? 'Starting…' : attachmentsBusy ? 'Reading files…' : pendingAttachments.length > 0 ? 'Add a note or press Enter to send files' : 'Reply…'}
+                      disabled={loading || sending || attachmentsBusy}
+                      rows={1}
+                      className="flex-1 bg-transparent text-[13px] text-tx-1 placeholder-tx-4 outline-none resize-none leading-relaxed max-h-28 disabled:opacity-50"
+                      onInput={e => {
+                        e.target.style.height = 'auto';
+                        e.target.style.height = Math.min(e.target.scrollHeight, 112) + 'px';
+                      }}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => fileInputRef.current?.click()}
+                      disabled={loading || sending || attachmentsBusy}
+                      className={clsx(
+                        'p-1.5 rounded-lg transition-all shrink-0 border',
+                        loading || sending || attachmentsBusy
+                          ? 'bg-bg-active text-tx-4 border-border cursor-not-allowed'
+                          : 'bg-bg-card text-tx-3 border-border hover:text-accent hover:border-accent/40 hover:bg-accent-soft/20',
+                      )}
+                      title="Attach files"
+                    >
+                      {attachmentsBusy ? <Loader2 size={14} className="animate-spin" /> : <Paperclip size={14} />}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => sendMessage(input)}
+                      disabled={loading || sending || attachmentsBusy || (!input.trim() && pendingAttachments.length === 0)}
+                      className={clsx(
+                        'p-1.5 rounded-lg transition-all shrink-0',
+                        !loading && !sending && !attachmentsBusy && (input.trim() || pendingAttachments.length > 0)
+                          ? 'bg-tx-1 text-bg-card hover:bg-tx-2'
+                          : 'bg-bg-active text-tx-4 cursor-not-allowed',
+                      )}
+                    >
+                      {sending ? <Loader2 size={14} className="animate-spin" /> : <Send size={14} />}
+                    </button>
+                  </div>
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    className="hidden"
+                    multiple
+                    accept=".pdf,.xls,.xlsx,.csv,.txt,.md,.json,.html,.htm,.xml,.yaml,.yml,.log,.rst,.toml,.doc,.docx"
+                    onChange={handleAttachmentPick}
                   />
-                  <button
-                    onClick={() => sendMessage(input)}
-                    disabled={loading || sending || !input.trim()}
-                    className={clsx(
-                      'p-1.5 rounded-lg transition-all shrink-0',
-                      input.trim() && !loading && !sending
-                        ? 'bg-tx-1 text-bg-card hover:bg-tx-2'
-                        : 'bg-bg-active text-tx-4 cursor-not-allowed',
-                    )}
-                  >
-                    {sending ? <Loader2 size={14} className="animate-spin" /> : <Send size={14} />}
-                  </button>
                 </div>
               )}
               {!complete && (
                 <p className="text-[11px] text-tx-4 mt-1.5 text-center">
-                  Enter to send · Shift+Enter for new line
+                  Enter to send | Shift+Enter for new line | Attach PDFs, spreadsheets, CSVs, and docs
                 </p>
               )}
             </div>

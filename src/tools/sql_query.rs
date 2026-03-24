@@ -75,7 +75,7 @@ async fn run_query(
     params: Vec<serde_json::Value>,
     max_rows: usize,
 ) -> anyhow::Result<serde_json::Value> {
-    use sqlx::{postgres::PgPoolOptions, Column, Row, TypeInfo};
+    use sqlx::{postgres::PgPoolOptions, Column, Row};
 
     let pool = PgPoolOptions::new()
         .max_connections(1)

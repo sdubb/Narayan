@@ -477,12 +477,7 @@ mod tests {
         let specs = select_tools_for_step(&registry, &step, &JobType::General, &[], &["integration".into()]);
         let integration_count = specs
             .iter()
-            .filter(|spec| {
-                registry
-                    .get(&spec.name)
-                    .map(|tool| tool.category() == "integration")
-                    .unwrap_or(false)
-            })
+            .filter(|spec| registry.get(&spec.name).map(|tool| tool.category() == "integration").unwrap_or(false))
             .count();
         assert!(integration_count <= MAX_ROLE_CATEGORY_TOOLS);
     }

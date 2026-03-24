@@ -4,11 +4,7 @@
 
 use crate::{
     compliance::sla::{EscalationAction, EscalationRule, SlaPolicy, SlaPriority},
-    connectors::{
-        freshdesk::FreshdeskConnector,
-        intercom::IntercomConnector,
-        zendesk::ZendeskConnector,
-    },
+    connectors::{freshdesk::FreshdeskConnector, intercom::IntercomConnector, zendesk::ZendeskConnector},
     policy::rules::{PolicyAction, PolicyCondition, PolicyRule, PolicyRuleSet},
     segments::registry::{SegmentPlugin, SegmentServices, SharedDeps},
 };

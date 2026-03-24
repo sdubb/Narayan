@@ -273,15 +273,19 @@ export const agentDefs = {
 export const planMode = {
   // Start a new plan mode session, optionally for an existing agent (to add a role)
   // If templateId is provided, skips intent capture and uses pre-built role
-  start: (agentName, agentId = null, templateId = null) =>
+  start: (agentName, agentId = null, templateId = null, attachments = []) =>
     req('POST', '/plan-mode/sessions', {
       agent_name: agentName,
       ...(agentId ? { agent_id: agentId } : {}),
       ...(templateId ? { template_id: templateId } : {}),
+      ...(attachments.length ? { attachments } : {}),
     }),
   // Send a turn in the conversation — session tracks phase and history server-side
-  turn: (sessionId, message) =>
-    req('POST', `/plan-mode/sessions/${sessionId}/turn`, { message }),
+  turn: (sessionId, message, attachments = []) =>
+    req('POST', `/plan-mode/sessions/${sessionId}/turn`, {
+      message,
+      ...(attachments.length ? { attachments } : {}),
+    }),
   // Save and deploy — creates AgentDefinition + AgentRole in DB
   // The draft_role is stored in the session, no need to send it from the frontend
   save: (sessionId) =>

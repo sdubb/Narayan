@@ -38,16 +38,8 @@ impl Tool for WasmExecTool {
             ParameterSchema::optional("args", "array", "Command-line arguments passed to the module."),
             ParameterSchema::optional("env", "object", "Environment variables: {KEY: value}."),
             ParameterSchema::optional("workspace", "string", "Directory mounted as /workspace (read-write)."),
-            ParameterSchema::optional(
-                "timeout_secs",
-                "integer",
-                "Hard timeout in seconds (default: 3, max: 15).",
-            ),
-            ParameterSchema::optional(
-                "fuel",
-                "integer",
-                "Max WASM fuel (default: 5,000,000; max: 20,000,000).",
-            ),
+            ParameterSchema::optional("timeout_secs", "integer", "Hard timeout in seconds (default: 3, max: 15)."),
+            ParameterSchema::optional("fuel", "integer", "Max WASM fuel (default: 5,000,000; max: 20,000,000)."),
             ParameterSchema::optional(
                 "memory_limit_bytes",
                 "integer",
@@ -78,14 +70,8 @@ impl Tool for WasmExecTool {
         }
 
         let stdin_data = args["stdin"].as_str().unwrap_or("").to_string();
-        let timeout_secs = args["timeout_secs"]
-            .as_u64()
-            .unwrap_or(DEFAULT_TIMEOUT_SECS)
-            .clamp(1, MAX_TIMEOUT_SECS);
-        let fuel_limit = args["fuel"]
-            .as_u64()
-            .unwrap_or(DEFAULT_FUEL)
-            .clamp(100_000, MAX_FUEL);
+        let timeout_secs = args["timeout_secs"].as_u64().unwrap_or(DEFAULT_TIMEOUT_SECS).clamp(1, MAX_TIMEOUT_SECS);
+        let fuel_limit = args["fuel"].as_u64().unwrap_or(DEFAULT_FUEL).clamp(100_000, MAX_FUEL);
         let memory_limit_bytes = args["memory_limit_bytes"]
             .as_u64()
             .unwrap_or(DEFAULT_MEMORY_LIMIT_BYTES)
@@ -102,15 +88,7 @@ impl Tool for WasmExecTool {
             .unwrap_or_default();
 
         let join = tokio::task::spawn_blocking(move || {
-            run_wasm(
-                wasm_bytes,
-                stdin_data,
-                cli_args,
-                env_vars,
-                workspace,
-                fuel_limit,
-                memory_limit_bytes,
-            )
+            run_wasm(wasm_bytes, stdin_data, cli_args, env_vars, workspace, fuel_limit, memory_limit_bytes)
         });
 
         match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), join).await {

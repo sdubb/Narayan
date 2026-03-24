@@ -69,11 +69,7 @@ impl Tool for RunRegisteredWasmTool {
                 "integer",
                 "Requested timeout, capped by the registered tool timeout limit.",
             ),
-            ParameterSchema::optional(
-                "fuel",
-                "integer",
-                "Requested fuel, capped by the registered tool fuel limit.",
-            ),
+            ParameterSchema::optional("fuel", "integer", "Requested fuel, capped by the registered tool fuel limit."),
             ParameterSchema::optional(
                 "memory_limit_bytes",
                 "integer",
@@ -101,9 +97,7 @@ impl Tool for RunRegisteredWasmTool {
             return Ok(ToolResult::err("'tool_name' is required"));
         }
 
-        let Some((tool_meta, module_bytes)) = store
-            .get_tenant_wasm_tool_with_module(tenant_id, &tool_name)
-            .await?
+        let Some((tool_meta, module_bytes)) = store.get_tenant_wasm_tool_with_module(tenant_id, &tool_name).await?
         else {
             return Ok(ToolResult::err(format!("registered WASM tool '{}' not found", tool_name)));
         };
@@ -112,21 +106,13 @@ impl Tool for RunRegisteredWasmTool {
             return Ok(ToolResult::err(format!("registered WASM tool '{}' is disabled", tool_name)));
         }
         if module_bytes.len() < 4 || &module_bytes[..4] != b"\0asm" {
-            return Ok(ToolResult::err(format!(
-                "registered WASM tool '{}' has invalid module bytes",
-                tool_name
-            )));
+            return Ok(ToolResult::err(format!("registered WASM tool '{}' has invalid module bytes", tool_name)));
         }
 
         let limits = tool_meta.limits.clamped();
-        let effective_timeout = args["timeout_secs"]
-            .as_u64()
-            .unwrap_or(limits.timeout_secs)
-            .clamp(1, limits.timeout_secs);
-        let effective_fuel = args["fuel"]
-            .as_u64()
-            .unwrap_or(limits.max_fuel)
-            .clamp(100_000, limits.max_fuel);
+        let effective_timeout =
+            args["timeout_secs"].as_u64().unwrap_or(limits.timeout_secs).clamp(1, limits.timeout_secs);
+        let effective_fuel = args["fuel"].as_u64().unwrap_or(limits.max_fuel).clamp(100_000, limits.max_fuel);
         let effective_memory = args["memory_limit_bytes"]
             .as_u64()
             .unwrap_or(limits.max_memory_bytes)
@@ -210,11 +196,7 @@ impl Tool for RunRegisteredWasmTool {
         if success {
             Ok(ToolResult::ok(output))
         } else {
-            Ok(ToolResult {
-                success: false,
-                output,
-                error: Some(error.unwrap_or_else(|| "WASM run failed".into())),
-            })
+            Ok(ToolResult { success: false, output, error: Some(error.unwrap_or_else(|| "WASM run failed".into())) })
         }
     }
 }
@@ -296,10 +278,7 @@ fn execute_registered_module(
     let exit_code: i32 = match instance.get_typed_func::<(), ()>(&mut store, "_start") {
         Ok(func) => match func.call(&mut store, ()) {
             Ok(()) => 0,
-            Err(error) => error
-                .downcast_ref::<wasmtime_wasi::I32Exit>()
-                .map(|exit| exit.0)
-                .unwrap_or(1),
+            Err(error) => error.downcast_ref::<wasmtime_wasi::I32Exit>().map(|exit| exit.0).unwrap_or(1),
         },
         Err(_) => {
             if let Ok(init) = instance.get_typed_func::<(), ()>(&mut store, "_initialize") {
@@ -310,10 +289,7 @@ fn execute_registered_module(
     };
 
     let elapsed_ms = started.elapsed().as_millis() as u64;
-    let fuel_used = store
-        .get_fuel()
-        .ok()
-        .map(|remaining| fuel_limit.saturating_sub(remaining));
+    let fuel_used = store.get_fuel().ok().map(|remaining| fuel_limit.saturating_sub(remaining));
     let stdout = String::from_utf8_lossy(&stdout_read.try_into_inner().unwrap_or_default()).into_owned();
     let stderr = String::from_utf8_lossy(&stderr_read.try_into_inner().unwrap_or_default()).into_owned();
 
@@ -330,12 +306,7 @@ fn execute_registered_module(
         "memory_limit_bytes": memory_limit_bytes,
     });
 
-    Ok(RegisteredWasmRunResult {
-        success: exit_code == 0,
-        output,
-        elapsed_ms,
-        fuel_used,
-    })
+    Ok(RegisteredWasmRunResult { success: exit_code == 0, output, elapsed_ms, fuel_used })
 }
 
 fn build_stdin_payload(args: &serde_json::Value) -> String {

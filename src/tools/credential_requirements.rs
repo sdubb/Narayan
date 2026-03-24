@@ -31,11 +31,8 @@ use crate::tools::connector_tool::ALL_CONNECTORS;
 /// The check passes if at least one of the listed providers is installed.
 /// Only needed for tools NOT in ALL_CONNECTORS (i.e. non-connector tools
 /// that have flexible auth like email).
-static MULTI_PROVIDER_TOOLS: &[(&str, &[&str])] = &[
-    ("email_send", &["gmail", "outlook"]),
-    ("email_read", &["gmail", "outlook"]),
-    ("email",      &["gmail", "outlook"]),
-];
+static MULTI_PROVIDER_TOOLS: &[(&str, &[&str])] =
+    &[("email_send", &["gmail", "outlook"]), ("email_read", &["gmail", "outlook"]), ("email", &["gmail", "outlook"])];
 
 /// Returns the credential provider(s) required for a given tool name.
 /// Returns None if the tool has no credential requirement.
@@ -72,9 +69,7 @@ fn step_confidence(
 ) -> &'static str {
     if let Some(tool_name) = tool {
         if let Some(required) = required_credentials(tool_name) {
-            let any_present = required
-                .iter()
-                .any(|cred| tenant_credentials.iter().any(|tc| tc == cred));
+            let any_present = required.iter().any(|cred| tenant_credentials.iter().any(|tc| tc == cred));
             if !any_present {
                 return "red";
             }
@@ -119,9 +114,7 @@ pub fn scan_plan_credentials(
 
         if let Some(tool_name) = tool_opt.as_deref() {
             if let Some(required) = required_credentials(tool_name) {
-                let any_present = required
-                    .iter()
-                    .any(|cred| tenant_credentials.iter().any(|tc| tc == cred));
+                let any_present = required.iter().any(|cred| tenant_credentials.iter().any(|tc| tc == cred));
                 if !any_present {
                     for cred in &required {
                         missing.insert(cred.to_string());
@@ -130,12 +123,7 @@ pub fn scan_plan_credentials(
             }
         }
 
-        let colour = step_confidence(
-            tool_opt.as_deref(),
-            skill_names,
-            description,
-            tenant_credentials,
-        );
+        let colour = step_confidence(tool_opt.as_deref(), skill_names, description, tenant_credentials);
         confidences.push(colour.to_string());
     }
 
@@ -157,8 +145,7 @@ mod tests {
         for def in ALL_CONNECTORS {
             let creds = required_credentials(def.name)
                 .unwrap_or_else(|| panic!("connector '{}' has no credential requirement", def.name));
-            assert_eq!(creds, vec![def.name],
-                "connector '{}' should require credential '{}'", def.name, def.name);
+            assert_eq!(creds, vec![def.name], "connector '{}' should require credential '{}'", def.name, def.name);
         }
     }
 
@@ -220,11 +207,7 @@ mod tests {
     #[test]
     fn test_no_missing_for_core_tools() {
         // Core tools (shell, file_read etc.) don't need credentials
-        let tools = vec![
-            Some("shell".into()),
-            Some("file_read".into()),
-            Some("web_search_tool".into()),
-        ];
+        let tools = vec![Some("shell".into()), Some("file_read".into()), Some("web_search_tool".into())];
         let creds: Vec<String> = vec![];
         let (missing, confidence) = scan_plan_credentials(&tools, &creds, &[], &[]);
         assert!(missing.is_empty());
@@ -285,17 +268,13 @@ mod tests {
     #[test]
     fn test_mixed_plan_partial_creds() {
         // salesforce installed, jira not
-        let tools = vec![
-            Some("salesforce".into()),
-            Some("jira".into()),
-            Some("web_search_tool".into()),
-        ];
+        let tools = vec![Some("salesforce".into()), Some("jira".into()), Some("web_search_tool".into())];
         let creds = vec!["salesforce".into()];
         let (missing, confidence) = scan_plan_credentials(&tools, &creds, &[], &[]);
         assert!(!missing.contains(&"salesforce".to_string()));
         assert!(missing.contains(&"jira".to_string()));
         assert_eq!(confidence[0], "amber"); // salesforce installed, no skill → amber
-        assert_eq!(confidence[1], "red");   // jira missing
+        assert_eq!(confidence[1], "red"); // jira missing
         assert_eq!(confidence[2], "amber"); // web_search has no credential requirement
     }
 }

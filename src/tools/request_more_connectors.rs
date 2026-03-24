@@ -56,7 +56,7 @@ impl Tool for RequestMoreConnectorsTool {
     /// Fallback — executor intercepts in production.
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         let category = args["category"].as_str().unwrap_or("");
-        let reason   = args["reason"].as_str().unwrap_or("");
+        let reason = args["reason"].as_str().unwrap_or("");
         Ok(ToolResult::ok(serde_json::json!({
             "status":   "no_more_connectors",
             "category": category,

@@ -147,8 +147,8 @@ impl GoalInstance {
             failure_reason: None,
             trigger_source,
             is_test,
-            cost_usd:             0.0,
-            human_hours_saved:    0.0,
+            cost_usd: 0.0,
+            human_hours_saved: 0.0,
             human_cost_saved_usd: 0.0,
             agent_state_id: None,
             triggered_by_goal_instance_id: None,
@@ -197,9 +197,7 @@ impl GoalInstance {
     pub fn is_terminal(&self) -> bool {
         matches!(
             self.status,
-            GoalInstanceStatus::Completed
-                | GoalInstanceStatus::Failed
-                | GoalInstanceStatus::Cancelled
+            GoalInstanceStatus::Completed | GoalInstanceStatus::Failed | GoalInstanceStatus::Cancelled
         )
     }
 
@@ -219,9 +217,9 @@ impl GoalInstance {
             goal_instance_id: self.id.clone(),
             status: match self.status {
                 GoalInstanceStatus::Completed => "completed".into(),
-                GoalInstanceStatus::Failed    => "failed".into(),
+                GoalInstanceStatus::Failed => "failed".into(),
                 GoalInstanceStatus::Cancelled => "cancelled".into(),
-                _                             => "unknown".into(),
+                _ => "unknown".into(),
             },
             output_data: self.result.clone().unwrap_or(serde_json::Value::Null),
             failure_reason: self.failure_reason.clone(),

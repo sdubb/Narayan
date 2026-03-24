@@ -27,7 +27,9 @@ impl StripeConnector {
     }
 
     fn secret_key(config: &ConnectorConfig) -> Option<String> {
-        config.credentials.get("api_key")
+        config
+            .credentials
+            .get("api_key")
             .or_else(|| config.credentials.get("secret_key"))
             .or_else(|| config.credentials.get("access_token"))
             .and_then(|v| v.as_str())
@@ -42,7 +44,9 @@ impl StripeConnector {
 
 #[async_trait]
 impl Connector for StripeConnector {
-    fn connector_type(&self) -> &str { "stripe" }
+    fn connector_type(&self) -> &str {
+        "stripe"
+    }
 
     async fn handle_inbound(&self, event: &ConnectorEvent, _config: &ConnectorConfig) -> Result<Option<String>> {
         let payload = &event.payload;
@@ -52,11 +56,11 @@ impl Connector for StripeConnector {
 
         match event_type {
             "payment_intent.payment_failed" => {
-                let amount      = obj["amount"].as_i64().unwrap_or(0);
-                let currency    = obj["currency"].as_str().unwrap_or("usd");
+                let amount = obj["amount"].as_i64().unwrap_or(0);
+                let currency = obj["currency"].as_str().unwrap_or("usd");
                 let customer_id = obj["customer"].as_str().unwrap_or("unknown");
-                let reason      = obj["last_payment_error"]["message"].as_str().unwrap_or("unknown reason");
-                let pi_id       = obj["id"].as_str().unwrap_or("");
+                let reason = obj["last_payment_error"]["message"].as_str().unwrap_or("unknown reason");
+                let pi_id = obj["id"].as_str().unwrap_or("");
 
                 Ok(Some(format!(
                     "Stripe payment failed for {pi_id}: {} for customer {customer_id}. \
@@ -69,9 +73,9 @@ impl Connector for StripeConnector {
             }
 
             "customer.subscription.deleted" => {
-                let customer_id  = obj["customer"].as_str().unwrap_or("unknown");
-                let plan_id      = obj["items"]["data"][0]["price"]["id"].as_str().unwrap_or("unknown");
-                let cancel_at    = obj["canceled_at"].as_i64().unwrap_or(0);
+                let customer_id = obj["customer"].as_str().unwrap_or("unknown");
+                let plan_id = obj["items"]["data"][0]["price"]["id"].as_str().unwrap_or("unknown");
+                let cancel_at = obj["canceled_at"].as_i64().unwrap_or(0);
 
                 Ok(Some(format!(
                     "Stripe subscription cancelled for customer {customer_id} (plan: {plan_id}, \
@@ -83,11 +87,11 @@ impl Connector for StripeConnector {
             }
 
             "invoice.payment_failed" => {
-                let invoice_id  = obj["id"].as_str().unwrap_or("unknown");
+                let invoice_id = obj["id"].as_str().unwrap_or("unknown");
                 let customer_id = obj["customer"].as_str().unwrap_or("unknown");
-                let amount      = obj["amount_due"].as_i64().unwrap_or(0);
-                let currency    = obj["currency"].as_str().unwrap_or("usd");
-                let attempt     = obj["attempt_count"].as_i64().unwrap_or(1);
+                let amount = obj["amount_due"].as_i64().unwrap_or(0);
+                let currency = obj["currency"].as_str().unwrap_or("usd");
+                let attempt = obj["attempt_count"].as_i64().unwrap_or(1);
 
                 Ok(Some(format!(
                     "Stripe invoice {invoice_id} payment failed for customer {customer_id}. \
@@ -100,12 +104,12 @@ impl Connector for StripeConnector {
             }
 
             "charge.dispute.created" => {
-                let dispute_id  = obj["id"].as_str().unwrap_or("unknown");
-                let charge_id   = obj["charge"].as_str().unwrap_or("unknown");
-                let amount      = obj["amount"].as_i64().unwrap_or(0);
-                let currency    = obj["currency"].as_str().unwrap_or("usd");
-                let reason      = obj["reason"].as_str().unwrap_or("unknown");
-                let due_by      = obj["evidence_details"]["due_by"].as_i64().unwrap_or(0);
+                let dispute_id = obj["id"].as_str().unwrap_or("unknown");
+                let charge_id = obj["charge"].as_str().unwrap_or("unknown");
+                let amount = obj["amount"].as_i64().unwrap_or(0);
+                let currency = obj["currency"].as_str().unwrap_or("usd");
+                let reason = obj["reason"].as_str().unwrap_or("unknown");
+                let due_by = obj["evidence_details"]["due_by"].as_i64().unwrap_or(0);
 
                 Ok(Some(format!(
                     "Stripe dispute {dispute_id} created for charge {charge_id}: {} — reason: {reason}. \
@@ -118,8 +122,8 @@ impl Connector for StripeConnector {
 
             "customer.created" => {
                 let customer_id = obj["id"].as_str().unwrap_or("unknown");
-                let email       = obj["email"].as_str().unwrap_or("");
-                let name        = obj["name"].as_str().unwrap_or("customer");
+                let email = obj["email"].as_str().unwrap_or("");
+                let name = obj["name"].as_str().unwrap_or("customer");
 
                 Ok(Some(format!(
                     "New Stripe customer created: {name} ({email}, id: {customer_id}). \
@@ -139,8 +143,7 @@ impl Connector for StripeConnector {
         output: &str,
         metadata: &serde_json::Value,
     ) -> Result<()> {
-        let key = Self::secret_key(config)
-            .ok_or_else(|| anyhow::anyhow!("missing Stripe api_key"))?;
+        let key = Self::secret_key(config).ok_or_else(|| anyhow::anyhow!("missing Stripe api_key"))?;
 
         // Delivery for Stripe means adding metadata to a customer/charge record
         let delivery_type = metadata.get("delivery_type").and_then(|v| v.as_str()).unwrap_or("customer_note");
@@ -175,14 +178,14 @@ impl Connector for StripeConnector {
     }
 
     async fn validate_config(&self, config: &ConnectorConfig) -> Result<()> {
-        let key = Self::secret_key(config)
-            .ok_or_else(|| anyhow::anyhow!("missing 'api_key' in credentials"))?;
+        let key = Self::secret_key(config).ok_or_else(|| anyhow::anyhow!("missing 'api_key' in credentials"))?;
 
         if !key.starts_with("sk_") {
             anyhow::bail!("Stripe api_key must start with 'sk_live_' or 'sk_test_'");
         }
 
-        let resp = self.http
+        let resp = self
+            .http
             .get("https://api.stripe.com/v1/customers?limit=1")
             .basic_auth(&key, Option::<&str>::None)
             .send()

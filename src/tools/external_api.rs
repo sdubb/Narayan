@@ -33,18 +33,15 @@ use crate::tools::{ParameterSchema, Tool, ToolResult};
 pub const TOOL_NAME: &str = "external_api";
 
 pub struct ExternalApiTool {
-    http:          reqwest::Client,
+    http: reqwest::Client,
     install_store: Option<Arc<crate::connectors::ConnectorInstallStore>>,
-    store:         Option<Arc<crate::storage::PostgresStore>>,
+    store: Option<Arc<crate::storage::PostgresStore>>,
 }
 
 impl ExternalApiTool {
     pub fn new() -> Self {
         Self {
-            http: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(30))
-                .build()
-                .unwrap_or_default(),
+            http: reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).build().unwrap_or_default(),
             install_store: None,
             store: None,
         }
@@ -60,33 +57,26 @@ impl ExternalApiTool {
         self
     }
 
-    async fn load_api(&self, tenant_id: &str, api_name: &str)
-        -> Result<(String, String, Option<String>), String>
-    {
+    async fn load_api(&self, tenant_id: &str, api_name: &str) -> Result<(String, String, Option<String>), String> {
         // Load the connector definition (base_url, auth_type)
-        let store = self.store.as_ref()
-            .ok_or_else(|| "Store not configured".to_string())?;
+        let store = self.store.as_ref().ok_or_else(|| "Store not configured".to_string())?;
 
-        let tc = store.get_tenant_connector(tenant_id, api_name).await
+        let tc = store
+            .get_tenant_connector(tenant_id, api_name)
+            .await
             .map_err(|e| format!("Connector lookup failed: {e}"))?
-            .ok_or_else(|| format!(
-                "API '{api_name}' not found. Register it in Settings → Connections → REST APIs."
-            ))?;
+            .ok_or_else(|| format!("API '{api_name}' not found. Register it in Settings → Connections → REST APIs."))?;
 
         // Load stored token
         let token = if let Some(inst) = self.install_store.as_ref() {
-            inst.get(tenant_id, api_name).await
-                .ok()
-                .flatten()
-                .and_then(|i| inst.decrypt_token(&i))
+            inst.get(tenant_id, api_name).await.ok().flatten().and_then(|i| inst.decrypt_token(&i))
         } else {
             None
         };
 
         // Determine auth header name from auth_type
         let auth_header = match &tc.auth_type {
-            crate::agent::definition::ConnectorAuthType::ApiKeyHeader { header_name } =>
-                header_name.clone(),
+            crate::agent::definition::ConnectorAuthType::ApiKeyHeader { header_name } => header_name.clone(),
             _ => "Authorization".to_string(),
         };
 
@@ -96,7 +86,9 @@ impl ExternalApiTool {
 
 #[async_trait]
 impl Tool for ExternalApiTool {
-    fn name(&self) -> &str { TOOL_NAME }
+    fn name(&self) -> &str {
+        TOOL_NAME
+    }
 
     fn description(&self) -> &str {
         "Call an endpoint on an external REST API that has been registered by the tenant. \
@@ -105,7 +97,9 @@ impl Tool for ExternalApiTool {
          The API's authentication is handled automatically using stored credentials."
     }
 
-    fn category(&self) -> &'static str { "integration" }
+    fn category(&self) -> &'static str {
+        "integration"
+    }
 
     fn parameters_schema(&self) -> Vec<ParameterSchema> {
         vec![
@@ -114,11 +108,7 @@ impl Tool for ExternalApiTool {
                 "string",
                 "Name of the registered API (as set in Settings → Connections → REST APIs).",
             ),
-            ParameterSchema::required(
-                "method",
-                "string",
-                "HTTP method: GET, POST, PUT, PATCH, DELETE.",
-            ),
+            ParameterSchema::required("method", "string", "HTTP method: GET, POST, PUT, PATCH, DELETE."),
             ParameterSchema::required(
                 "path",
                 "string",
@@ -134,49 +124,48 @@ impl Tool for ExternalApiTool {
                 "object",
                 "Additional HTTP headers to include (auth headers are added automatically).",
             ),
-            ParameterSchema::optional(
-                "tenant_id",
-                "string",
-                "Injected by executor — tenant for credential lookup.",
-            ),
+            ParameterSchema::optional("tenant_id", "string", "Injected by executor — tenant for credential lookup."),
         ]
     }
 
     async fn execute(&self, args: Value) -> anyhow::Result<ToolResult> {
-        let api_name  = args["api"].as_str().unwrap_or("").to_string();
-        let method    = args["method"].as_str().unwrap_or("GET").to_uppercase();
-        let path      = args["path"].as_str().unwrap_or("").to_string();
+        let api_name = args["api"].as_str().unwrap_or("").to_string();
+        let method = args["method"].as_str().unwrap_or("GET").to_uppercase();
+        let path = args["path"].as_str().unwrap_or("").to_string();
         let tenant_id = args["tenant_id"].as_str().unwrap_or("").to_string();
-        let params    = args.get("params").cloned().unwrap_or_default();
-        let headers   = args.get("headers").and_then(|v| v.as_object()).cloned();
+        let params = args.get("params").cloned().unwrap_or_default();
+        let headers = args.get("headers").and_then(|v| v.as_object()).cloned();
 
-        if api_name.is_empty() { return Ok(ToolResult::err("'api' is required")); }
-        if path.is_empty()     { return Ok(ToolResult::err("'path' is required")); }
+        if api_name.is_empty() {
+            return Ok(ToolResult::err("'api' is required"));
+        }
+        if path.is_empty() {
+            return Ok(ToolResult::err("'path' is required"));
+        }
 
-        let (base_url, auth_header, token) =
-            match self.load_api(&tenant_id, &api_name).await {
-                Ok(v) => v,
-                Err(e) => return Ok(ToolResult::err(e)),
-            };
+        let (base_url, auth_header, token) = match self.load_api(&tenant_id, &api_name).await {
+            Ok(v) => v,
+            Err(e) => return Ok(ToolResult::err(e)),
+        };
 
         // Build full URL
         let full_url = format!("{}{}", base_url.trim_end_matches('/'), path);
 
         // Build request
         let mut req = match method.as_str() {
-            "GET"    => self.http.get(&full_url),
-            "POST"   => self.http.post(&full_url),
-            "PUT"    => self.http.put(&full_url),
-            "PATCH"  => self.http.patch(&full_url),
+            "GET" => self.http.get(&full_url),
+            "POST" => self.http.post(&full_url),
+            "PUT" => self.http.put(&full_url),
+            "PATCH" => self.http.patch(&full_url),
             "DELETE" => self.http.delete(&full_url),
-            other    => return Ok(ToolResult::err(format!("Unknown HTTP method '{other}'"))),
+            other => return Ok(ToolResult::err(format!("Unknown HTTP method '{other}'"))),
         };
 
         // Auth
         if let Some(ref tok) = token {
             req = match auth_header.as_str() {
                 "Authorization" => req.bearer_auth(tok),
-                other           => req.header(other, tok),
+                other => req.header(other, tok),
             };
         }
 
@@ -192,9 +181,8 @@ impl Tool for ExternalApiTool {
         // Params / body
         req = if method == "GET" || method == "DELETE" {
             if let Some(obj) = params.as_object() {
-                let qp: Vec<(String, String)> = obj.iter()
-                    .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
-                    .collect();
+                let qp: Vec<(String, String)> =
+                    obj.iter().filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string()))).collect();
                 req.query(&qp)
             } else {
                 req
@@ -204,20 +192,16 @@ impl Tool for ExternalApiTool {
         };
 
         // Execute
-        let resp = tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            req.send(),
-        )
-        .await
-        .map_err(|_| anyhow::anyhow!("Request timed out"))?
-        .map_err(|e| anyhow::anyhow!("Request failed: {e}"))?;
+        let resp = tokio::time::timeout(std::time::Duration::from_secs(30), req.send())
+            .await
+            .map_err(|_| anyhow::anyhow!("Request timed out"))?
+            .map_err(|e| anyhow::anyhow!("Request failed: {e}"))?;
 
         let status = resp.status();
         let status_u16 = status.as_u16();
 
         // Parse response
-        let body: Value = resp.json().await
-            .unwrap_or_else(|_| Value::String(String::new()));
+        let body: Value = resp.json().await.unwrap_or_else(|_| Value::String(String::new()));
 
         if status.is_success() {
             Ok(ToolResult::ok(serde_json::json!({

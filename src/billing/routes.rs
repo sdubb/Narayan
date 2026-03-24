@@ -15,11 +15,7 @@ use axum::{
 };
 use serde::Deserialize;
 
-use crate::{
-    api::routes::AppState,
-    billing::BillingPlan,
-    tenant::model::AuthenticatedTenant,
-};
+use crate::{api::routes::AppState, billing::BillingPlan, tenant::model::AuthenticatedTenant};
 
 fn err(code: StatusCode, msg: impl Into<String>) -> axum::response::Response {
     (code, Json(serde_json::json!({ "error": msg.into() }))).into_response()

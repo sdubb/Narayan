@@ -91,41 +91,40 @@ pub fn parse_clarification_questions(value: &serde_json::Value) -> Vec<Clarifica
                 .ok()
                 .map(|question| question.normalized(index))
                 .or_else(|| {
-                    map.get("question").and_then(|value| value.as_str()).map(|prompt| ClarificationQuestion {
-                        id: map.get("id").and_then(|value| value.as_str()).unwrap_or_default().to_string(),
-                        prompt: prompt.to_string(),
-                        placeholder: map.get("placeholder").and_then(|value| value.as_str()).map(str::to_string),
-                        helper_text: map
-                            .get("helper_text")
-                            .or_else(|| map.get("helperText"))
-                            .and_then(|value| value.as_str())
-                            .map(str::to_string),
-                        options: map
-                            .get("options")
-                            .and_then(|value| value.as_array())
-                            .map(|items| {
-                                items
-                                    .iter()
-                                    .filter_map(|value| value.as_str().map(str::to_string))
-                                    .collect::<Vec<_>>()
-                            })
-                            .unwrap_or_default(),
-                        required: map.get("required").and_then(|value| value.as_bool()).unwrap_or(true),
-                        secret: map.get("secret").and_then(|value| value.as_bool()).unwrap_or(false),
-                        store_as_credential: map
-                            .get("store_as_credential")
-                            .and_then(|value| value.as_str())
-                            .map(str::to_string),
-                        connector_type: map
-                            .get("connector_type")
-                            .and_then(|value| value.as_str())
-                            .map(str::to_string),
-                        action_label: map
-                            .get("action_label")
-                            .and_then(|value| value.as_str())
-                            .map(str::to_string),
-                    }
-                    .normalized(index))
+                    map.get("question").and_then(|value| value.as_str()).map(|prompt| {
+                        ClarificationQuestion {
+                            id: map.get("id").and_then(|value| value.as_str()).unwrap_or_default().to_string(),
+                            prompt: prompt.to_string(),
+                            placeholder: map.get("placeholder").and_then(|value| value.as_str()).map(str::to_string),
+                            helper_text: map
+                                .get("helper_text")
+                                .or_else(|| map.get("helperText"))
+                                .and_then(|value| value.as_str())
+                                .map(str::to_string),
+                            options: map
+                                .get("options")
+                                .and_then(|value| value.as_array())
+                                .map(|items| {
+                                    items
+                                        .iter()
+                                        .filter_map(|value| value.as_str().map(str::to_string))
+                                        .collect::<Vec<_>>()
+                                })
+                                .unwrap_or_default(),
+                            required: map.get("required").and_then(|value| value.as_bool()).unwrap_or(true),
+                            secret: map.get("secret").and_then(|value| value.as_bool()).unwrap_or(false),
+                            store_as_credential: map
+                                .get("store_as_credential")
+                                .and_then(|value| value.as_str())
+                                .map(str::to_string),
+                            connector_type: map
+                                .get("connector_type")
+                                .and_then(|value| value.as_str())
+                                .map(str::to_string),
+                            action_label: map.get("action_label").and_then(|value| value.as_str()).map(str::to_string),
+                        }
+                        .normalized(index)
+                    })
                 }),
             _ => None,
         })

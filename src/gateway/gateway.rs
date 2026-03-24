@@ -1,4 +1,7 @@
-use std::{collections::{HashMap, HashSet}, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -139,12 +142,8 @@ impl NarayanGateway {
         }
         .clone();
 
-        let mut enabled_provider_names: Vec<String> = config
-            .credentials
-            .values()
-            .filter(|cred| cred.enabled)
-            .map(|cred| cred.provider.clone())
-            .collect();
+        let mut enabled_provider_names: Vec<String> =
+            config.credentials.values().filter(|cred| cred.enabled).map(|cred| cred.provider.clone()).collect();
         enabled_provider_names.sort();
 
         let mut attempted = HashSet::new();
@@ -310,7 +309,8 @@ impl LlmGateway for NarayanGateway {
         })?;
 
         // 6. Track cost against tenant + agent
-        let cost_delta = self.cost_tracker.cost_for_model(&provider_name, response.input_tokens, response.output_tokens);
+        let cost_delta =
+            self.cost_tracker.cost_for_model(&provider_name, response.input_tokens, response.output_tokens);
         self.cost_tracker
             .record(
                 &request.tenant_id,
