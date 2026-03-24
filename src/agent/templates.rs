@@ -150,6 +150,13 @@ static TEMPLATES: [RoleTemplate; 20] = [
                 "Post matched invoices to QuickBooks accounts payable",
                 "Flag invoices over approval threshold for human review",
                 "Log all mismatches to workspace/reconciliation.txt"
+            ],
+            "workflow_outline": [
+                "read pdf attachment from email",
+                "match invoice against purchase orders in quickbooks",
+                "post matched invoice to quickbooks accounts payable",
+                "flag invoice for approval if over threshold",
+                "log result to workspace"
             ]
         }),
         build_role: |agent_id, tenant_id| {
@@ -208,6 +215,12 @@ static TEMPLATES: [RoleTemplate; 20] = [
                 "Draft a personalised reply matching customer's tone",
                 "Escalate billing disputes and high-frustration tickets to human",
                 "Attach draft to ticket — never auto-send"
+            ],
+            "workflow_outline": [
+                "fetch customer ticket history from zendesk",
+                "search help documentation for relevant answers",
+                "draft personalised reply and attach to zendesk ticket",
+                "escalate to human queue if billing dispute or high frustration"
             ]
         }),
         build_role: |agent_id, tenant_id| {
@@ -263,6 +276,12 @@ static TEMPLATES: [RoleTemplate; 20] = [
                 "Flag clauses that deviate from standard market terms",
                 "Produce a one-page risk summary with severity ratings",
                 "Never provide legal advice — flag for qualified legal review"
+            ],
+            "workflow_outline": [
+                "read and extract text from contract pdf",
+                "identify key clauses: liability, IP, termination, auto-renewal",
+                "flag non-standard or risky terms with severity rating",
+                "write one-page risk summary to workspace"
             ]
         }),
         build_role: |agent_id, tenant_id| {
@@ -312,6 +331,11 @@ static TEMPLATES: [RoleTemplate; 20] = [
                 "Schedule day-one orientation meeting",
                 "Send welcome email to team announcing the new hire",
                 "Create follow-up check-in at day 7 and day 30"
+            ],
+            "workflow_outline": [
+                "fetch new hire details from greenhouse",
+                "send personalised onboarding checklist email via gmail",
+                "schedule day-one orientation and follow-up check-ins"
             ]
         }),
         build_role: |agent_id, tenant_id| {
@@ -366,6 +390,12 @@ static TEMPLATES: [RoleTemplate; 20] = [
                 "Escalate overdue deadlines to compliance Slack channel",
                 "Draft remediation note for overdue items",
                 "Log all actions to workspace/deadline-log.txt"
+            ],
+            "workflow_outline": [
+                "query active clients with upcoming deadlines",
+                "send tiered reminder emails via gmail",
+                "escalate overdue deadlines to slack channel",
+                "log all actions to workspace"
             ]
         }),
         build_role: |agent_id, tenant_id| {
@@ -420,6 +450,12 @@ static TEMPLATES: [RoleTemplate; 20] = [
                 "Draft a personalised nudge email to the account owner with the news context",
                 "Update Salesforce last_reviewed_at field",
                 "Log stale deal count to workspace/pipeline-report.txt"
+            ],
+            "workflow_outline": [
+                "pull stale deals from salesforce",
+                "search web for recent news about each company",
+                "draft personalised nudge emails via gmail",
+                "update salesforce last_reviewed_at for each deal"
             ]
         }),
         build_role: |agent_id, tenant_id| {
@@ -473,6 +509,12 @@ static TEMPLATES: [RoleTemplate; 20] = [
                 "Check their website changelog or product blog for new features",
                 "Search for funding announcements or leadership changes",
                 "Synthesise into a structured brief and post to Slack"
+            ],
+            "workflow_outline": [
+                "search web for competitor news and announcements",
+                "fetch competitor blogs and changelogs",
+                "synthesise findings into structured brief",
+                "post brief to slack and save to workspace"
             ]
         }),
         build_role: |agent_id, tenant_id| {
@@ -529,6 +571,12 @@ static TEMPLATES: [RoleTemplate; 20] = [
                 "Draft investor update in concise founder voice: numbers first, narrative second",
                 "Flag any significant anomalies for the founder to address",
                 "Save as Gmail draft — never send without founder approval"
+            ],
+            "workflow_outline": [
+                "query key metrics from database",
+                "compare metrics to prior week and calculate deltas",
+                "draft investor update email in founder voice",
+                "save draft to gmail and workspace"
             ]
         }),
         build_role: |agent_id, tenant_id| {
@@ -582,6 +630,12 @@ static TEMPLATES: [RoleTemplate; 20] = [
                 "Draft a personalised re-engagement email referencing their specific usage",
                 "Queue drafts for founder review — never auto-send",
                 "Log churn risk customers to workspace/churn-watch.csv"
+            ],
+            "workflow_outline": [
+                "query inactive customers from database",
+                "look up account details and last feature used",
+                "draft personalised re-engagement emails via gmail",
+                "log at-risk customers to churn watch csv"
             ]
         }),
         build_role: |agent_id, tenant_id| {
@@ -636,6 +690,12 @@ static TEMPLATES: [RoleTemplate; 20] = [
                 "Draft personalised interview invite or respectful decline",
                 "Tag candidate profile in Greenhouse with score and research notes",
                 "Never send email without hiring manager approval"
+            ],
+            "workflow_outline": [
+                "score application against role requirements",
+                "search candidate online via web search",
+                "draft personalised invite or decline email",
+                "update candidate profile in greenhouse"
             ]
         }),
         build_role: |agent_id, tenant_id| {
@@ -692,6 +752,12 @@ static TEMPLATES: [RoleTemplate; 20] = [
                 "Find the prospect's LinkedIn profile and recent activity",
                 "Check if any mutual connections exist",
                 "Produce a one-page brief: company context, likely pain points, talking points"
+            ],
+            "workflow_outline": [
+                "research company via web search",
+                "search for recent news and job postings",
+                "look up prospect profile and activity",
+                "write one-page prep brief to workspace"
             ]
         }),
         build_role: |agent_id, tenant_id| {
@@ -745,6 +811,12 @@ static TEMPLATES: [RoleTemplate; 20] = [
                 "Flag categories that increased more than 20% month-over-month",
                 "Produce a one-page summary with anomalies highlighted",
                 "Email draft to founder for review"
+            ],
+            "workflow_outline": [
+                "pull last month expenses from quickbooks",
+                "categorise expenses and compare to 3-month average",
+                "flag anomalous categories and large new transactions",
+                "email report draft via gmail and save to workspace"
             ]
         }),
         build_role: |agent_id, tenant_id| {
@@ -797,6 +869,12 @@ static TEMPLATES: [RoleTemplate; 20] = [
                 "Flag potential issues: security risks, missing tests, breaking changes",
                 "Produce a plain-language summary for non-technical stakeholders",
                 "Post to Slack and add a review comment on the PR"
+            ],
+            "workflow_outline": [
+                "fetch pull request diff from github",
+                "identify purpose and flag risks in the changes",
+                "post plain-language summary to slack",
+                "add review comment on github pull request"
             ]
         }),
         build_role: |agent_id, tenant_id| {
@@ -849,6 +927,12 @@ static TEMPLATES: [RoleTemplate; 20] = [
                 "Track which documents have been provided and which are still missing",
                 "When a document is uploaded, extract key figures and confirm they are correct",
                 "Produce a final summary of all collected figures ready for filing"
+            ],
+            "workflow_outline": [
+                "interview user to determine filing situation",
+                "generate personalised document checklist",
+                "extract key figures from uploaded documents",
+                "save collected figures summary to workspace"
             ]
         }),
         build_role: |agent_id, tenant_id| {
@@ -895,6 +979,11 @@ static TEMPLATES: [RoleTemplate; 20] = [
                 "Draft a professional follow-up email if no response received",
                 "Track status updates when user reports hearing back",
                 "Maintain a summary of all applications with current status"
+            ],
+            "workflow_outline": [
+                "record new application details to workspace log",
+                "schedule follow-up check-in after 5 business days",
+                "draft professional follow-up email via gmail"
             ]
         }),
         build_role: |agent_id, tenant_id| {
@@ -941,6 +1030,11 @@ static TEMPLATES: [RoleTemplate; 20] = [
                 "Synthesise into 3 focused paragraphs: what happened, why it matters, what comes next",
                 "Include working citations for every claim",
                 "Email as a draft for review"
+            ],
+            "workflow_outline": [
+                "search web for topic developments from the last 7 days",
+                "synthesise findings into cited 3-paragraph brief",
+                "save brief to workspace and create gmail draft"
             ]
         }),
         build_role: |agent_id, tenant_id| {
@@ -992,6 +1086,12 @@ static TEMPLATES: [RoleTemplate; 20] = [
                 "Flag clauses that are unusual, one-sided, or risky",
                 "Highlight key dates, amounts, obligations, and penalties",
                 "Produce a summary with a plain-language verdict"
+            ],
+            "workflow_outline": [
+                "read and extract text from uploaded document",
+                "explain each section in plain english",
+                "flag unusual one-sided or risky clauses",
+                "write plain-language summary to workspace"
             ]
         }),
         build_role: |agent_id, tenant_id| {
@@ -1039,6 +1139,12 @@ static TEMPLATES: [RoleTemplate; 20] = [
                 "Compare top 3-5 options across relevant criteria",
                 "Explain trade-offs in plain language",
                 "Produce a comparison table and a recommendation summary"
+            ],
+            "workflow_outline": [
+                "clarify user decision and situation via conversation",
+                "search web for current options rates and products",
+                "compare top 3 to 5 options across key criteria",
+                "write comparison report with recommendation to workspace"
             ]
         }),
         build_role: |agent_id, tenant_id| {
@@ -1086,6 +1192,12 @@ static TEMPLATES: [RoleTemplate; 20] = [
                 "If significant news found: summarise and send alert email",
                 "If nothing significant: skip — do not send noise",
                 "Log all checked searches to workspace/monitor-log.txt"
+            ],
+            "workflow_outline": [
+                "search web for news about subject from last 24 hours",
+                "filter results for significant developments only",
+                "send alert email via gmail if significant news found",
+                "log search run to workspace monitor log"
             ]
         }),
         build_role: |agent_id, tenant_id| {
@@ -1136,6 +1248,12 @@ static TEMPLATES: [RoleTemplate; 20] = [
                 "Research their company: what they do, recent news, size, funding",
                 "Identify likely topics based on the meeting context",
                 "Produce a concise prep brief: who they are, context, talking points, questions to ask"
+            ],
+            "workflow_outline": [
+                "research person via web search",
+                "research their company via web search",
+                "identify likely topics for this meeting context",
+                "write concise prep brief to workspace"
             ]
         }),
         build_role: |agent_id, tenant_id| {
