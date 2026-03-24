@@ -384,6 +384,18 @@ pub fn infer_failure_action(lower: &str) -> FailureAction {
     FailureAction::SkipAndLog { log_path: "workspace/errors.txt".into() }
 }
 
+/// One enriched workflow step — tool-resolved at plan mode save time.
+/// Templates like `{input.topic}` are rendered at runtime from trigger input_data.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkflowStep {
+    pub description: String,
+    pub tool: Option<String>,
+    #[serde(default)]
+    pub args_template: Option<serde_json::Value>,
+    #[serde(default)]
+    pub condition: Option<crate::agent::planner::StepCondition>,
+}
+
 /// Complete, typed execution guidelines for an agent role.
 /// Composed from: domain skill (static) + intent extraction (LLM) +
 /// clarification steps (user answers) + connector overrides (derived).
@@ -393,6 +405,10 @@ pub struct ExecutionGuidelines {
     #[serde(default)] pub failure_handling:    Vec<FailureRule>,
     #[serde(default)] pub priorities:          Vec<String>,
     #[serde(default)] pub completion_criteria: Vec<CompletionCriterion>,
+    /// Enriched workflow steps with tool resolution and arg templates.
+    /// When non-empty, runtime builds a deterministic Plan from these
+    /// instead of calling the LLM planner.
+    #[serde(default)] pub workflow_outline:    Vec<WorkflowStep>,
 }
 
 impl ExecutionGuidelines {
@@ -401,9 +417,24 @@ impl ExecutionGuidelines {
     const MAX_PRIORITIES: usize = 5;
     const MAX_COMPLETION: usize = 6;
 
+    const MAX_WORKFLOW: usize = 12;
+
     pub fn is_empty(&self) -> bool {
         self.rules.is_empty() && self.failure_handling.is_empty()
             && self.priorities.is_empty() && self.completion_criteria.is_empty()
+            && self.workflow_outline.is_empty()
+    }
+
+    /// Returns true when the role has an enriched workflow outline that can
+    /// be converted directly into a deterministic Plan (no LLM planner needed).
+    pub fn has_workflow_outline(&self) -> bool {
+        !self.workflow_outline.is_empty()
+    }
+
+    pub fn add_workflow_step(&mut self, step: WorkflowStep) {
+        if self.workflow_outline.len() < Self::MAX_WORKFLOW {
+            self.workflow_outline.push(step);
+        }
     }
 
     /// Render a structured, numbered prompt block — LLMs follow numbered lists more reliably.

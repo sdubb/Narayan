@@ -1158,6 +1158,13 @@ Please create and test one in plan mode settings, then reply 'done'."
                 r.status   = RoleStatus::Active;
                 r.updated_at = Utc::now();
 
+                // Enrich workflow outline — map prose hints to tools + arg templates
+                // so the runtime can build a deterministic Plan without an LLM call.
+                let intent = session.intent_cache.as_ref()
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({}));
+                enrich_workflow_outline(&mut r, &intent);
+
                 // Resolve "name:Role Name" hints in depends_on_role_id to actual IDs
                 if let Some(hint) = r.trigger.depends_on_role_id.clone() {
                     if let Some(name) = hint.strip_prefix("name:") {
@@ -1584,6 +1591,124 @@ fn apply_execution_hints(role: &mut AgentRole, intent: &serde_json::Value) {
                 connector_categories.join(", ")
             ))
         );
+    }
+}
+
+/// Build enriched `WorkflowStep`s from the intent's `workflow_outline` hints.
+/// Maps each prose hint to the best matching tool and builds an arg template.
+/// Called at save() time so the runtime can build a deterministic Plan.
+fn enrich_workflow_outline(
+    role: &mut AgentRole,
+    intent: &serde_json::Value,
+) {
+    role.execution_guidelines.workflow_outline.clear();
+
+    let hints: Vec<String> = intent["workflow_outline"]
+        .as_array()
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+
+    if hints.is_empty() {
+        return;
+    }
+
+    let connectors = &role.connectors;
+    let tools = &role.tools;
+
+    for hint in hints.into_iter().take(12) {
+        let (tool, args_template) = resolve_tool_for_hint(&hint, connectors, tools);
+        role.execution_guidelines.add_workflow_step(
+            crate::agent::definition::WorkflowStep {
+                description: hint,
+                tool,
+                args_template,
+                condition: None,
+            }
+        );
+    }
+}
+
+/// Map a prose workflow hint to the best matching tool name and build an arg template.
+/// Returns (tool_name, args_template).
+fn resolve_tool_for_hint(
+    hint: &str,
+    connectors: &[String],
+    role_tools: &[String],
+) -> (Option<String>, Option<serde_json::Value>) {
+    let lower = hint.to_lowercase();
+
+    // 1. Check for exact connector name match first
+    for conn in connectors {
+        if lower.contains(&conn.to_lowercase()) {
+            let op = infer_connector_operation(&lower);
+            return (
+                Some(conn.clone()),
+                Some(serde_json::json!({ "operation": op })),
+            );
+        }
+    }
+
+    // 2. Check for explicit role tool matches
+    for tool in role_tools {
+        if tool.starts_with("wasm_tool:") { continue; }
+        if lower.contains(&tool.to_lowercase()) {
+            return (Some(tool.clone()), None);
+        }
+    }
+
+    // 3. Keyword-based tool matching
+    let tool_keywords: &[(&[&str], &str, Option<serde_json::Value>)] = &[
+        (&["search", "find news", "look up", "research", "latest"], "web_search_tool",
+            Some(serde_json::json!({ "query": "{input.topic}" }))),
+        (&["fetch", "scrape", "download page", "get url", "crawl"], "web_fetch",
+            Some(serde_json::json!({ "url": "{input.url}" }))),
+        (&["email", "send email", "notify via email", "mail"], "email",
+            Some(serde_json::json!({ "to": "{input.recipient}", "subject": "{input.subject}", "body": "{input.body}" }))),
+        (&["notify", "alert", "send notification", "push"], "notification",
+            Some(serde_json::json!({ "message": "{input.message}" }))),
+        (&["write file", "save to file", "create file", "output file"], "file_write",
+            Some(serde_json::json!({ "path": "{input.output_path}" }))),
+        (&["read file", "load file", "open file"], "file_read",
+            Some(serde_json::json!({ "path": "{input.file_path}" }))),
+        (&["run code", "execute", "script", "calculate"], "code_run",
+            Some(serde_json::json!({ "language": "python" }))),
+        (&["extract", "parse", "pull data"], "data_extractor", None),
+        (&["read pdf", "pdf"], "pdf_read",
+            Some(serde_json::json!({ "path": "{input.file_path}" }))),
+        (&["create pdf", "generate pdf"], "pdf_create", None),
+        (&["spreadsheet", "csv", "excel"], "spreadsheet_read", None),
+        (&["remember", "store memory", "save context"], "memory_store", None),
+        (&["recall", "retrieve memory", "past context"], "memory_recall", None),
+        (&["vector search", "similar", "semantic search"], "vector_search",
+            Some(serde_json::json!({ "query": "{input.query}" }))),
+        (&["delegate", "spawn", "paralleli"], "delegate", None),
+        (&["api call", "http request", "rest api"], "http_request", None),
+    ];
+
+    for (keywords, tool_name, default_args) in tool_keywords {
+        if keywords.iter().any(|kw| lower.contains(kw)) {
+            return (Some((*tool_name).into()), default_args.clone());
+        }
+    }
+
+    // 4. No tool match — pure LLM reasoning step
+    (None, None)
+}
+
+/// Infer the connector operation from a workflow hint.
+fn infer_connector_operation(hint: &str) -> &'static str {
+    if hint.contains("update") || hint.contains("write") || hint.contains("post") {
+        "update_record"
+    } else if hint.contains("create") || hint.contains("add") || hint.contains("insert") {
+        "create_record"
+    } else if hint.contains("delete") || hint.contains("remove") {
+        "delete_record"
+    } else if hint.contains("list") || hint.contains("fetch") || hint.contains("get") || hint.contains("query") {
+        "query_records"
+    } else if hint.contains("send") || hint.contains("reply") || hint.contains("message") {
+        "send_message"
+    } else {
+        "query_records"
     }
 }
 

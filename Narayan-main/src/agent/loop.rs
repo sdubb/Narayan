@@ -426,6 +426,13 @@ impl AgentLoop {
                     "using pre-built skill — skipping LLM planning"
                 );
                 Plan::from_skill(&skill)
+            } else if let Some(workflow_plan) = self.try_plan_from_workflow_outline(state).await {
+                tracing::info!(
+                    agent_id = %state.id,
+                    steps    = workflow_plan.steps.len(),
+                    "using workflow outline — skipping LLM planning"
+                );
+                workflow_plan
             } else {
                 // Use refined goal if user answered clarification questions
                 let refined = state
@@ -462,63 +469,71 @@ impl AgentLoop {
             });
 
             // ── Plan approval gate ──────────────────────────────────────────
-            // Collect tool names and descriptions from the new plan for the
-            // credential scan.
-            let planned_tools: Vec<Option<String>> =
-                new_plan.steps.iter().map(|s| s.tool.clone()).collect();
-            let step_descriptions: Vec<String> =
-                new_plan.steps.iter().map(|s| s.description.clone()).collect();
+            // Deterministic plans (from workflow outline or skills) were already
+            // approved during plan mode — skip the approval gate and proceed
+            // directly to execution.
+            let is_deterministic = new_plan.rationale.contains("workflow outline")
+                || new_plan.rationale.contains("pre-built skill");
 
-            // The AgentLoop doesn't have direct access to the tenant store, so
-            // we pass empty credentials here.  The server-side recheck in the
-            // POST /agents/:id/approve-plan handler uses the real installed
-            // credentials before allowing execution to start.
-            let tenant_credentials: Vec<String> = Vec::new();
+            if is_deterministic {
+                tracing::info!(
+                    agent_id = %state.id,
+                    rationale = %new_plan.rationale,
+                    steps = new_plan.steps.len(),
+                    "auto-approving deterministic plan — skipping approval gate"
+                );
+                *plan = Some(new_plan);
+                // Do NOT set PlanApprovalNeeded — fall through to step execution
+            } else {
+                // LLM-generated plan — require user approval
+                let planned_tools: Vec<Option<String>> =
+                    new_plan.steps.iter().map(|s| s.tool.clone()).collect();
+                let step_descriptions: Vec<String> =
+                    new_plan.steps.iter().map(|s| s.description.clone()).collect();
 
-            // Collect skill registry names for per-step confidence colouring.
-            let skill_names: Vec<String> = {
-                let reg = self.skill_registry.read().await;
-                reg.list().iter().map(|s| s.name.clone()).collect()
-            };
+                let tenant_credentials: Vec<String> = Vec::new();
 
-            let (missing_credentials, step_confidence) = credential_requirements::scan_plan_credentials(
-                &planned_tools,
-                &tenant_credentials,
-                &skill_names,
-                &step_descriptions,
-            );
+                let skill_names: Vec<String> = {
+                    let reg = self.skill_registry.read().await;
+                    reg.list().iter().map(|s| s.name.clone()).collect()
+                };
 
-            // Build a JSON representation of each step for the SSE event.
-            let steps_json: Vec<serde_json::Value> = new_plan
-                .steps
-                .iter()
-                .map(|s| {
-                    serde_json::json!({
-                        "index": s.index,
-                        "description": s.description,
-                        "tool": s.tool,
-                        "success_criteria": s.success_criteria,
+                let (missing_credentials, step_confidence) = credential_requirements::scan_plan_credentials(
+                    &planned_tools,
+                    &tenant_credentials,
+                    &skill_names,
+                    &step_descriptions,
+                );
+
+                let steps_json: Vec<serde_json::Value> = new_plan
+                    .steps
+                    .iter()
+                    .map(|s| {
+                        serde_json::json!({
+                            "index": s.index,
+                            "description": s.description,
+                            "tool": s.tool,
+                            "success_criteria": s.success_criteria,
+                        })
                     })
-                })
-                .collect();
+                    .collect();
 
-            // Store the plan and set status to PlanApprovalNeeded so the
-            // scheduler will not pick this agent up until it's approved.
-            *plan = Some(new_plan);
-            state.mark_plan_approval_needed();
+                *plan = Some(new_plan);
+                state.mark_plan_approval_needed();
 
-            self.event_bus.publish(AgentEvent::PlanApprovalNeeded {
-                agent_id: state.id.clone(),
-                step_count: plan.as_ref().map(|p| p.steps.len()).unwrap_or(0),
-                rationale: plan.as_ref().map(|p| p.rationale.clone()).unwrap_or_default(),
-                steps: steps_json,
-                job_type: plan.as_ref().and_then(|p| p.job_type.clone()),
-                rejection_count: state.plan_rejection_count,
-                missing_credentials,
-                step_confidence,
-            });
+                self.event_bus.publish(AgentEvent::PlanApprovalNeeded {
+                    agent_id: state.id.clone(),
+                    step_count: plan.as_ref().map(|p| p.steps.len()).unwrap_or(0),
+                    rationale: plan.as_ref().map(|p| p.rationale.clone()).unwrap_or_default(),
+                    steps: steps_json,
+                    job_type: plan.as_ref().and_then(|p| p.job_type.clone()),
+                    rejection_count: state.plan_rejection_count,
+                    missing_credentials,
+                    step_confidence,
+                });
 
-            return Ok(StepOutcome::PlanApprovalNeeded);
+                return Ok(StepOutcome::PlanApprovalNeeded);
+            }
         }
 
         let current_plan = plan.as_ref().unwrap();
@@ -1126,6 +1141,25 @@ impl AgentLoop {
                 Ok(StepOutcome::Infeasible { reason: msg })
             }
         }
+    }
+
+    /// Try to build a deterministic Plan from the role's enriched workflow outline.
+    /// Returns None if no role is found or the workflow outline is empty, causing
+    /// the caller to fall through to the LLM planner.
+    async fn try_plan_from_workflow_outline(&self, state: &AgentState) -> Option<Plan> {
+        let store = self.store.as_ref()?;
+        let role_id = state.metadata.get("role_id").and_then(|v| v.as_str())?;
+        let role = store.get_agent_role(&state.tenant_id, role_id).await.ok()??;
+
+        if !role.execution_guidelines.has_workflow_outline() {
+            return None;
+        }
+
+        let input_data = state.metadata.get("input_data")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+
+        Some(Plan::from_workflow_outline(&role, &input_data))
     }
 
     fn prompt_for_provider_credentials(&self, state: &mut AgentState) -> Result<StepOutcome> {

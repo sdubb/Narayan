@@ -59,6 +59,73 @@ impl Plan {
     pub fn is_complete(&self, current_step: usize) -> bool {
         current_step >= self.steps.len()
     }
+
+    /// Build a deterministic Plan from a role's enriched workflow outline.
+    /// No LLM call — templates are rendered against the trigger's input_data.
+    pub fn from_workflow_outline(
+        role: &crate::agent::definition::AgentRole,
+        input_data: &serde_json::Value,
+    ) -> Self {
+        let steps = role
+            .execution_guidelines
+            .workflow_outline
+            .iter()
+            .enumerate()
+            .map(|(i, ws)| PlannedStep {
+                index: i,
+                description: ws.description.clone(),
+                tool: ws.tool.clone(),
+                tool_args: ws.args_template.as_ref().map(|t| render_template(t, input_data)),
+                success_criteria: String::new(),
+                condition: ws.condition.clone(),
+            })
+            .collect();
+        Plan {
+            goal: role.purpose.clone(),
+            job_type: Some(role.role_category.as_str().into()),
+            steps,
+            rationale: "deterministic plan from workflow outline".into(),
+        }
+    }
+}
+
+/// Recursively render `{input.*}` template placeholders in a JSON value.
+/// Unresolved placeholders are left as-is so the executor LLM can handle them.
+fn render_template(template: &serde_json::Value, input_data: &serde_json::Value) -> serde_json::Value {
+    match template {
+        serde_json::Value::String(s) => {
+            let mut result = s.clone();
+            // Find all {input.X} patterns and replace with values from input_data
+            while let Some(start) = result.find("{input.") {
+                let rest = &result[start + 7..];
+                if let Some(end) = rest.find('}') {
+                    let key = &rest[..end];
+                    let replacement = input_data
+                        .get(key)
+                        .map(|v| match v {
+                            serde_json::Value::String(s) => s.clone(),
+                            other => other.to_string(),
+                        })
+                        .unwrap_or_else(|| format!("{{input.{}}}", key));
+                    result = format!("{}{}{}", &result[..start], replacement, &rest[end + 1..]);
+                } else {
+                    break;
+                }
+            }
+            serde_json::Value::String(result)
+        }
+        serde_json::Value::Object(map) => {
+            let rendered: serde_json::Map<String, serde_json::Value> = map
+                .iter()
+                .map(|(k, v)| (k.clone(), render_template(v, input_data)))
+                .collect();
+            serde_json::Value::Object(rendered)
+        }
+        serde_json::Value::Array(arr) => {
+            serde_json::Value::Array(arr.iter().map(|v| render_template(v, input_data)).collect())
+        }
+        other => other.clone(),
+    }
 }
 
 #[async_trait]
