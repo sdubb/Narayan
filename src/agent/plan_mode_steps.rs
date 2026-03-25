@@ -820,18 +820,18 @@ pub fn domain_steps_for(category: &str) -> Vec<ClarificationStep> {
         "research_analyst" => vec![
             ClarificationStep::new(
                 "ra_depth",
-                "**Research depth:** Quick summary (3-5 sources) or deep research (10+ sources with citations)?",
+                "**Evidence depth:** Quick summary of the provided material or a deeper review with supporting citations?",
                 StepField::GuidelineRule,
             ),
             ClarificationStep::new(
                 "ra_freshness",
-                "**Source freshness:** How recent must sources be? \
+                "**Evidence freshness:** How recent must the source material be? \
                  (last 7 days / 30 days / 6 months / any)",
                 StepField::AgentConstraint,
             ),
             ClarificationStep::new(
                 "ra_on_no_results",
-                "**If fewer than 3 sources found:** Stop and ask, broaden the search, or proceed anyway?",
+                "**If fewer than 3 references are available:** Stop and ask, broaden the scope, or proceed anyway?",
                 StepField::FailureHandling { tool_scope: None },
             ),
         ],

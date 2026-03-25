@@ -7,12 +7,11 @@ use std::{
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
 use tokio::{sync::RwLock, time::sleep};
 
 use crate::{
     agent::{
-        PlanModeManager, PlanModePhase, PlanModeSession, PlanModeTestConfidence, PlanModeTestResult, PlanModeTestStatus,
+        PlanModeManager, PlanModePhase, PlanModeSession, PlanModeTestResult, PlanModeTestStatus,
     },
     connectors::ConnectorInstallStore,
     gateway::{GatewayRequest, LlmGateway},
@@ -41,10 +40,6 @@ fn log_block(transcript: &Arc<Mutex<E2eTranscript>>, title: &str, body: impl Int
     let block = format!("\n=== {} ===\n{}", title, body.into());
     println!("{block}");
     transcript.lock().unwrap().push(block);
-}
-
-fn strip_json_fences(raw: &str) -> String {
-    raw.trim().trim_start_matches("```json").trim_start_matches("```").trim_end_matches("```").trim().to_string()
 }
 
 #[derive(Debug, Clone)]
@@ -166,77 +161,6 @@ async fn record_chat(
     Ok(response)
 }
 
-async fn groq_json_chat_completion(
-    api_key: &str,
-    model: &str,
-    label: &str,
-    transcript: &Arc<Mutex<E2eTranscript>>,
-    system: &str,
-    user: &str,
-) -> Result<String> {
-    let payload = serde_json::json!({
-        "model": model,
-        "messages": [
-            { "role": "system", "content": system },
-            { "role": "user", "content": user },
-        ],
-        "stream": false,
-        "response_format": { "type": "json_object" },
-        "temperature": 0.0,
-        "top_p": 1.0,
-        "max_completion_tokens": 1024,
-    });
-
-    log_block(
-        transcript,
-        &format!("{} REQUEST", label),
-        serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "<unprintable payload>".into()),
-    );
-
-    let client = reqwest::Client::new();
-    let mut attempt = 0usize;
-    loop {
-        attempt += 1;
-        let response = client
-            .post("https://api.groq.com/openai/v1/chat/completions")
-            .bearer_auth(api_key)
-            .json(&payload)
-            .send()
-            .await
-            .with_context(|| format!("{} request failed", label))?;
-
-        let status = response.status();
-        let body = response.text().await.with_context(|| format!("{} response body read failed", label))?;
-        log_block(transcript, &format!("{} RAW RESPONSE", label), format!("status: {}\n{}", status, body));
-
-        if status == reqwest::StatusCode::TOO_MANY_REQUESTS && attempt < 4 {
-            if let Some(delay) = groq_retry_delay_from_text(&body) {
-                log_block(
-                    transcript,
-                    &format!("{} RETRY", label),
-                    format!("rate limited; retrying after {:?} (attempt {})", delay, attempt + 1),
-                );
-                sleep(delay).await;
-                continue;
-            }
-        }
-
-        if !status.is_success() {
-            anyhow::bail!("{} request failed with status {}", label, status);
-        }
-
-        let parsed: serde_json::Value =
-            serde_json::from_str(&body).with_context(|| format!("{} response was not valid JSON", label))?;
-
-        let content = parsed["choices"][0]["message"]["content"].as_str().unwrap_or_default().to_string();
-        if content.trim().is_empty() {
-            anyhow::bail!("{} returned an empty content field", label);
-        }
-
-        return Ok(content);
-    }
-}
-
 fn groq_retry_delay_from_text(text: &str) -> Option<Duration> {
     if !(text.contains("status=429") || text.contains("Too Many Requests") || text.contains("rate_limit_exceeded")) {
         return None;
@@ -263,63 +187,6 @@ impl LlmGateway for GroqLoggingGateway {
         log_block(&self.transcript, "PLAN MODE GATEWAY", meta);
         record_chat("PLAN MODE GATEWAY", &self.provider, &self.transcript, request.messages, request.tools).await
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ManualValidationDecision {
-    decision: String,
-    #[serde(default)]
-    confidence: String,
-    #[serde(default)]
-    reasons: Vec<String>,
-    #[serde(default)]
-    suggested_fix: Option<String>,
-    #[serde(default)]
-    summary: String,
-}
-
-impl ManualValidationDecision {
-    fn approves(&self) -> bool {
-        matches!(
-            self.decision.trim().to_ascii_lowercase().as_str(),
-            "approve" | "approved" | "pass" | "passed" | "yes" | "ok"
-        )
-    }
-
-    fn wants_revision(&self) -> bool {
-        !self.approves()
-    }
-}
-
-fn parse_manual_validation_decision(raw: &str) -> ManualValidationDecision {
-    let cleaned = strip_json_fences(raw);
-    let parsed = serde_json::from_str::<serde_json::Value>(&cleaned);
-
-    let fallback = ManualValidationDecision {
-        decision: "revise".into(),
-        confidence: "low".into(),
-        reasons: vec![format!("manual reviewer returned invalid JSON: {}", raw)],
-        suggested_fix: Some(raw.trim().to_string()),
-        summary: "manual reviewer output could not be parsed".into(),
-    };
-
-    let Some(value) = parsed.ok() else {
-        return fallback;
-    };
-
-    let decision =
-        value.get("decision").or_else(|| value.get("status")).and_then(|v| v.as_str()).unwrap_or("revise").to_string();
-    let confidence = value.get("confidence").and_then(|v| v.as_str()).unwrap_or("low").to_string();
-    let reasons = value
-        .get("reasons")
-        .and_then(|v| v.as_array())
-        .map(|items| items.iter().filter_map(|item| item.as_str().map(String::from)).collect::<Vec<_>>())
-        .unwrap_or_default();
-    let suggested_fix =
-        value.get("suggested_fix").and_then(|v| v.as_str()).map(|s| s.to_string()).filter(|s| !s.trim().is_empty());
-    let summary = value.get("summary").and_then(|v| v.as_str()).unwrap_or("").to_string();
-
-    ManualValidationDecision { decision, confidence, reasons, suggested_fix, summary }
 }
 
 fn session_snapshot(session: &PlanModeSession) -> serde_json::Value {
@@ -385,32 +252,6 @@ async fn groq_answer_clarification(
     Ok(answer)
 }
 
-async fn groq_manual_validate(
-    api_key: &str,
-    model: &str,
-    transcript: &Arc<Mutex<E2eTranscript>>,
-    intent: &str,
-    review_summary: &str,
-    session: &PlanModeSession,
-    auto_result: &PlanModeTestResult,
-) -> Result<ManualValidationDecision> {
-    let system = "You are a rigorous plan-mode reviewer. Decide whether the plan should be approved or revised after the deterministic test. Return ONLY valid JSON with this shape: {\"decision\":\"approve|revise\",\"confidence\":\"high|medium|low\",\"reasons\":[\"...\"],\"suggested_fix\":null|string,\"summary\":\"short summary\"}.";
-
-    let user = format!(
-        "User intent:\n{}\n\nReview summary shown to the user:\n{}\n\nDraft role snapshot:\n{}\n\nDeterministic auto validation:\n{}\n\nRespond with JSON only.",
-        intent,
-        review_summary,
-        serde_json::to_string_pretty(&session.draft_role).unwrap_or_else(|_| "null".into()),
-        serde_json::to_string_pretty(auto_result).unwrap_or_else(|_| auto_result.summary.clone()),
-    );
-
-    let raw = groq_json_chat_completion(api_key, model, "MANUAL VALIDATION", transcript, system, &user).await?;
-    let decision = parse_manual_validation_decision(&raw);
-    let decision_json = serde_json::to_string_pretty(&decision).unwrap_or_else(|_| raw.clone());
-    log_block(transcript, "MANUAL VALIDATION PARSED", decision_json);
-    Ok(decision)
-}
-
 async fn drive_plan_mode_to_review(
     manager: &PlanModeManager,
     provider: &Arc<dyn Provider>,
@@ -437,29 +278,6 @@ async fn drive_plan_mode_to_review(
     }
 
     Ok(session)
-}
-
-fn make_repair_result(
-    auto_result: &PlanModeTestResult,
-    manual_review: &ManualValidationDecision,
-) -> PlanModeTestResult {
-    let mut result = auto_result.clone();
-    if manual_review.approves() && matches!(result.status, PlanModeTestStatus::Pass) {
-        return result;
-    }
-
-    result.status = PlanModeTestStatus::Partial;
-    result.confidence = PlanModeTestConfidence::Partial;
-    if !manual_review.summary.trim().is_empty() {
-        result.summary =
-            format!("{}\n\nManual reviewer requested revision:\n{}", result.summary, manual_review.summary);
-    } else if !manual_review.reasons.is_empty() {
-        result.summary =
-            format!("{}\n\nManual reviewer requested revision:\n{}", result.summary, manual_review.reasons.join("; "));
-    } else if let Some(fix) = manual_review.suggested_fix.as_deref() {
-        result.summary = format!("{}\n\nManual reviewer requested revision:\n{}", result.summary, fix);
-    }
-    result
 }
 
 async fn flush_transcript(transcript: &Arc<Mutex<E2eTranscript>>, workspace_root: &str) -> Result<PathBuf> {
@@ -523,7 +341,7 @@ async fn test_plan_mode_groq_end_to_end() -> Result<()> {
     session = next_session;
 
     session = drive_plan_mode_to_review(&manager, &provider, &transcript, session, &cfg.intent, first_reply).await?;
-    let review_summary = manager.build_review_summary_pub(&session).await;
+    let review_summary = manager.build_review_summary_pub(&mut session).await;
     log_block(&transcript, "REVIEW SUMMARY", review_summary.clone());
 
     let mut auto_result = manager.test(&session).await?;
@@ -533,33 +351,16 @@ async fn test_plan_mode_groq_end_to_end() -> Result<()> {
         serde_json::to_string_pretty(&auto_result).unwrap_or_else(|_| auto_result.summary.clone()),
     );
 
-    let mut manual_review = groq_manual_validate(
-        &cfg.groq_api_key,
-        &cfg.groq_model,
-        &transcript,
-        &cfg.intent,
-        &review_summary,
-        &session,
-        &auto_result,
-    )
-    .await?;
-
     let mut attempts = 0usize;
-    while attempts < cfg.max_repair_rounds
-        && (auto_result.status != PlanModeTestStatus::Pass || manual_review.wants_revision())
-    {
+    while attempts < cfg.max_repair_rounds && auto_result.status != PlanModeTestStatus::Pass {
         attempts += 1;
         log_block(
             &transcript,
             "REPAIR DECISION",
-            format!(
-                "attempt: {}\nauto_status: {:?}\nmanual_decision: {}\nmanual_confidence: {}\nmanual_summary: {}\nmanual_reasons: {:?}",
-                attempts, auto_result.status, manual_review.decision, manual_review.confidence, manual_review.summary, manual_review.reasons
-            ),
+            format!("attempt: {}\nauto_status: {:?}\nauto_summary: {}", attempts, auto_result.status, auto_result.summary),
         );
 
-        let repair_result = make_repair_result(&auto_result, &manual_review);
-        auto_result = repair_result.clone();
+        let repair_result = auto_result.clone();
 
         if attempts >= cfg.max_repair_rounds {
             break;
@@ -573,7 +374,7 @@ async fn test_plan_mode_groq_end_to_end() -> Result<()> {
 
         session = next_session;
         session = drive_plan_mode_to_review(&manager, &provider, &transcript, session, &cfg.intent, response).await?;
-        let review_summary = manager.build_review_summary_pub(&session).await;
+        let review_summary = manager.build_review_summary_pub(&mut session).await;
         log_block(&transcript, "REVIEW SUMMARY", review_summary.clone());
         auto_result = manager.test(&session).await?;
         log_block(
@@ -581,16 +382,6 @@ async fn test_plan_mode_groq_end_to_end() -> Result<()> {
             "AUTO VALIDATION",
             serde_json::to_string_pretty(&auto_result).unwrap_or_else(|_| auto_result.summary.clone()),
         );
-        manual_review = groq_manual_validate(
-            &cfg.groq_api_key,
-            &cfg.groq_model,
-            &transcript,
-            &cfg.intent,
-            &review_summary,
-            &session,
-            &auto_result,
-        )
-        .await?;
     }
 
     let transcript_path = flush_transcript(&transcript, "/tmp/narayan-plan-mode").await?;

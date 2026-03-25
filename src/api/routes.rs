@@ -3240,7 +3240,7 @@ pub async fn start_plan_mode_session(
             } else {
                 // Nothing to ask — jump straight to review
                 session.phase = crate::agent::definition::PlanModePhase::Reviewing;
-                manager.build_review_summary_pub(&session).await
+                manager.build_review_summary_pub(&mut session).await
             }
         } else {
             "Template not found — let's set this up from scratch. What should this agent do?".into()

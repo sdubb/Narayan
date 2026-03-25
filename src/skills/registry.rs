@@ -633,16 +633,16 @@ fn curated_skills() -> Vec<Skill> {
             vec![
                 "MANDATORY QUESTIONS — ask all of these before confirming:\n\
                  1. Sources: web search only, or also internal documents, databases, specific URLs?\n\
-                 2. Depth: quick summary (3-5 sources) or deep research (10+ sources with citations)?\n\
+                 2. Depth: quick summary of the provided material or deeper review with supporting citations?\n\
                  3. Output format: bullet summary, structured report, or raw data?\n\
-                 4. Freshness: how recent must sources be? (last 7 days / 30 days / any)\n\
+                 4. Freshness: how recent must the material be? (last 7 days / 30 days / any)\n\
                  5. Confidence threshold: flag uncertain findings, or only report high-confidence data?".into(),
                 "EXECUTION BRIEF for the agent:\n\
-                 - Always cite sources with URLs — never present findings without attribution\n\
+                 - Always cite source URLs or file references — never present findings without attribution\n\
                  - Contradictory sources: present both views, do not pick one without evidence\n\
                  - On paywalled content: note the source exists but could not be accessed\n\
                  - Distinguish clearly between facts and inferences\n\
-                 - If fewer than 3 sources found: say so and ask whether to proceed or broaden scope".into(),
+                 - If fewer than 3 references are available: say so and ask whether to proceed or broaden scope".into(),
             ],
         ).with_aliases(vec!["research_analyst", "research", "analysis", "report", "competitor analysis", "market research"]),
     ]

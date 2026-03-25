@@ -1357,11 +1357,13 @@ Please create and test one in plan mode settings, then reply 'done'."
                 }
             }
 
+            self.materialize_review_workflow_outline(session);
             session.phase = PlanModePhase::Reviewing;
             return Ok(format!("✓ {}\n\n{}", summary, self.build_review_summary(session).await));
         }
 
         // pending_steps was already empty — go straight to review
+        self.materialize_review_workflow_outline(session);
         session.phase = PlanModePhase::Reviewing;
         Ok(self.build_review_summary(session).await)
     }
@@ -1394,13 +1396,25 @@ Please create and test one in plan mode settings, then reply 'done'."
             session.draft_agent.constraints.extend(constraint_items);
         }
 
+        self.materialize_review_workflow_outline(session);
         session.phase = PlanModePhase::Reviewing;
         Ok(self.build_review_summary(session).await)
     }
 
     /// Public wrapper for build_review_summary — used by the template fast-path in routes.rs
-    pub async fn build_review_summary_pub(&self, session: &PlanModeSession) -> String {
+    pub async fn build_review_summary_pub(&self, session: &mut PlanModeSession) -> String {
+        self.materialize_review_workflow_outline(session);
         self.build_review_summary(session).await
+    }
+
+    fn materialize_review_workflow_outline(&self, session: &mut PlanModeSession) {
+        if let Some(intent) = session.intent_cache.as_ref() {
+            if let Some(role) = session.draft_role.as_mut() {
+                if role.execution_guidelines.workflow_outline.is_empty() {
+                    materialize_workflow_outline(role, intent);
+                }
+            }
+        }
     }
 
     async fn build_review_summary(&self, session: &PlanModeSession) -> String {
