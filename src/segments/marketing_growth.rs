@@ -4,7 +4,10 @@
 use crate::{
     connectors::hubspot::HubSpotConnector,
     policy::rules::{PolicyAction, PolicyCondition, PolicyRule, PolicyRuleSet},
-    segments::registry::{SegmentPlugin, SegmentServices, SharedDeps},
+    segments::{
+        registry::{SegmentPlugin, SegmentServices, SharedDeps},
+        DomainProfile,
+    },
 };
 use std::sync::Arc;
 
@@ -38,6 +41,7 @@ pub fn plugin(deps: &SharedDeps, tenant_id: &str) -> SegmentPlugin {
     SegmentPlugin {
         id: "marketing_growth",
         name: "Marketing & Growth",
+        domain: DomainProfile::marketing_growth(),
         connectors: vec![Arc::new(HubSpotConnector::new())],
         services: SegmentServices {
             policy: Some(deps.policy_engine.clone()),

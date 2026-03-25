@@ -286,6 +286,12 @@ export const planMode = {
       message,
       ...(attachments.length ? { attachments } : {}),
     }),
+  // Run deterministic workflow validation before save
+  test: (sessionId) =>
+    req('POST', `/plan-mode/sessions/${sessionId}/test`, {}),
+  // Feed a failing/partial test result back into plan mode for repair
+  revise: (sessionId, testResult) =>
+    req('POST', `/plan-mode/sessions/${sessionId}/revise`, { test_result: testResult }),
   // Save and deploy — creates AgentDefinition + AgentRole in DB
   // The draft_role is stored in the session, no need to send it from the frontend
   save: (sessionId) =>

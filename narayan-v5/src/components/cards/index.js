@@ -6,6 +6,7 @@ export { default as ClarificationCard } from './ClarificationCard';
 export { default as PolicyCard } from './PolicyCard';
 export { default as ReviewCard } from './ReviewCard';
 export { default as CitationCard } from './CitationCard';
+export { default as JudgementCard } from './JudgementCard';
 export { default as GoalCompleteCard } from './GoalCompleteCard';
 export { default as GoalFailedCard } from './GoalFailedCard';
 export { default as ConnectorTriggerCard } from './ConnectorTriggerCard';

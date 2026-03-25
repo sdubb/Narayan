@@ -143,6 +143,22 @@ pub enum AgentEvent {
         rule_id: Option<String>,
     },
 
+    // ── Judgement ─────────────────────────────────────────────────────────────
+    /// Emitted when the judgment layer sees a step worth surfacing to the UI.
+    JudgementSignal {
+        agent_id: String,
+        step_index: usize,
+        step_description: String,
+        job_type: Option<String>,
+        profile: String,
+        score: f64,
+        confidence: f64,
+        recommendation: String,
+        summary: String,
+        reasons: Vec<String>,
+        timestamp: String,
+    },
+
     // ── Connector triggers ─────────────────────────────────────────────────
     /// Emitted when an inbound connector webhook creates this agent.
     ConnectorTrigger {
@@ -246,6 +262,7 @@ impl AgentEvent {
             AgentEvent::CitationRecorded { agent_id, .. } => agent_id,
             AgentEvent::EvidencePackaged { agent_id, .. } => agent_id,
             AgentEvent::ReviewRequired { agent_id, .. } => agent_id,
+            AgentEvent::JudgementSignal { agent_id, .. } => agent_id,
             AgentEvent::ConnectorTrigger { agent_id, .. } => agent_id,
             AgentEvent::ChildSpawned { agent_id, .. } => agent_id,
             AgentEvent::ChildrenComplete { agent_id, .. } => agent_id,
@@ -376,5 +393,27 @@ mod tests {
         let json = serde_json::to_value(&ev).unwrap();
         assert_eq!(json["event"], "review_required");
         assert_eq!(json["review_id"], "rev-123");
+    }
+
+    #[test]
+    fn test_judgement_signal_serialises_correctly() {
+        let ev = AgentEvent::JudgementSignal {
+            agent_id: "a1".into(),
+            step_index: 2,
+            step_description: "Review the output".into(),
+            job_type: Some("finance_accounting".into()),
+            profile: "finance".into(),
+            score: 0.81,
+            confidence: 0.78,
+            recommendation: "watch".into(),
+            summary: "Judgement: watch closely".into(),
+            reasons: vec!["retry count is 1".into()],
+            timestamp: "2026-03-25T00:00:00Z".into(),
+        };
+        let json = serde_json::to_value(&ev).unwrap();
+        assert_eq!(json["event"], "judgement_signal");
+        assert_eq!(json["recommendation"], "watch");
+        assert_eq!(json["step_index"], 2);
+        assert_eq!(json["profile"], "finance");
     }
 }

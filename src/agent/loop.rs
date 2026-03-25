@@ -8,12 +8,15 @@ use crate::{
         clarifier::{ClarificationResult, Clarifier},
         evaluator::{check_completion_criteria, EvalVerdict, Evaluator},
         executor::Executor,
-        planner::{Plan, Planner},
+        planner::Plan,
         preflight::{Preflight, PreflightResult},
         prompts::{is_direct_response_goal, StepHistory},
         reflector::Reflector,
     },
-    cognition::control_loop::CognitiveControlLoop,
+    cognition::{
+        control_loop::CognitiveControlLoop,
+        judgement::{JudgementContext, JudgementEngine, JudgementRecommendation, JudgementSignal},
+    },
     compliance::sla::{EscalationAction, SlaStatus},
     debug::recorder::AgentRecorder,
     events::{AgentEvent, EventBus},
@@ -22,7 +25,7 @@ use crate::{
     skill_evolution::evolution::evolve_skill,
     skills::registry::SkillRegistry,
     state::{AgentState, AgentStatus},
-    tools::{credential_requirements, ToolRegistry},
+    tools::ToolRegistry,
     util::next_run_after,
 };
 
@@ -142,6 +145,27 @@ fn persist_skipped_step_output(state: &mut AgentState, step: &crate::agent::plan
     }
 }
 
+fn persist_judgement_signal(state: &mut AgentState, signal: &JudgementSignal) {
+    let record = serde_json::json!({
+        "step_index": signal.step_index,
+        "step_description": signal.step_description,
+        "job_type": signal.job_type,
+        "profile": signal.profile,
+        "score": signal.score,
+        "confidence": signal.confidence,
+        "recommendation": signal.recommendation,
+        "summary": signal.summary,
+        "reasons": signal.reasons,
+        "timestamp": signal.timestamp,
+    });
+
+    if let Some(signals) = state.metadata.get_mut("judgement_signals").and_then(|value| value.as_array_mut()) {
+        signals.push(record);
+    } else {
+        state.metadata["judgement_signals"] = serde_json::json!([record]);
+    }
+}
+
 fn condition_truthy(value: &serde_json::Value) -> bool {
     match value {
         serde_json::Value::Null => false,
@@ -254,7 +278,6 @@ fn provider_credentials_questions() -> Vec<crate::agent::clarifier::Clarificatio
 // ── AgentLoop ──────────────────────────────────────────────────────────────
 
 pub struct AgentLoop {
-    planner: Arc<dyn Planner>,
     executor: Arc<dyn Executor>,
     evaluator: Arc<dyn Evaluator>,
     reflector: Arc<dyn Reflector>,
@@ -275,7 +298,6 @@ pub struct AgentLoop {
 impl AgentLoop {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        planner: Arc<dyn Planner>,
         executor: Arc<dyn Executor>,
         evaluator: Arc<dyn Evaluator>,
         reflector: Arc<dyn Reflector>,
@@ -290,7 +312,6 @@ impl AgentLoop {
         services: Arc<AgentServices>,
     ) -> Self {
         Self {
-            planner,
             executor,
             evaluator,
             reflector,
@@ -393,8 +414,7 @@ impl AgentLoop {
                 }
             }
 
-            let tool_names: Vec<&str> = self.tools.list();
-            let ctx = state.metadata.get("last_reflection").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let _tool_names: Vec<&str> = self.tools.list();
 
             // 4a. Check skill registry first — skip LLM planning if a skill matches
             let maybe_skill = {
@@ -450,19 +470,21 @@ impl AgentLoop {
                 if refined != orig {
                     state.goal = refined;
                 }
-                let p = match self.planner.create_plan(state, &ctx, &tool_names).await {
-                    Ok(plan) => plan,
-                    Err(error) if is_missing_provider_credentials_error(&error) => {
-                        state.goal = orig;
-                        return self.prompt_for_provider_credentials(state);
-                    }
-                    Err(error) => {
-                        state.goal = orig;
-                        return Err(error);
-                    }
-                };
+                let reason = format!(
+                    "runtime does not invent plans anymore; rerun plan mode to produce a workflow outline for '{}'",
+                    state.goal
+                );
+                tracing::error!(
+                    agent_id = %state.id,
+                    goal = %state.goal,
+                    reason = %reason,
+                    "no deterministic runtime plan available"
+                );
                 state.goal = orig;
-                p
+                state.mark_failed();
+                self.event_bus.publish(AgentEvent::GoalFailed { agent_id: state.id.clone(), reason: reason.clone() });
+                self.event_bus.close(&state.id);
+                return Ok(StepOutcome::Failed(reason));
             };
 
             self.event_bus.publish(AgentEvent::PlanCreated {
@@ -473,70 +495,13 @@ impl AgentLoop {
                 steps: new_plan.steps.iter().map(plan_step_event).collect(),
             });
 
-            // ── Plan approval gate ──────────────────────────────────────────
-            // Deterministic plans (from workflow outline or skills) were already
-            // approved during plan mode — skip the approval gate and proceed
-            // directly to execution.
-            let is_deterministic =
-                new_plan.rationale.contains("workflow outline") || new_plan.rationale.contains("pre-built skill");
-
-            if is_deterministic {
-                tracing::info!(
-                    agent_id = %state.id,
-                    rationale = %new_plan.rationale,
-                    steps = new_plan.steps.len(),
-                    "auto-approving deterministic plan — skipping approval gate"
-                );
-                *plan = Some(new_plan);
-                // Do NOT set PlanApprovalNeeded — fall through to step execution
-            } else {
-                // LLM-generated plan — require user approval
-                let planned_tools: Vec<Option<String>> = new_plan.steps.iter().map(|s| s.tool.clone()).collect();
-                let step_descriptions: Vec<String> = new_plan.steps.iter().map(|s| s.description.clone()).collect();
-
-                let tenant_credentials: Vec<String> = Vec::new();
-
-                let skill_names: Vec<String> = {
-                    let reg = self.skill_registry.read().await;
-                    reg.list().iter().map(|s| s.name.clone()).collect()
-                };
-
-                let (missing_credentials, step_confidence) = credential_requirements::scan_plan_credentials(
-                    &planned_tools,
-                    &tenant_credentials,
-                    &skill_names,
-                    &step_descriptions,
-                );
-
-                let steps_json: Vec<serde_json::Value> = new_plan
-                    .steps
-                    .iter()
-                    .map(|s| {
-                        serde_json::json!({
-                            "index": s.index,
-                            "description": s.description,
-                            "tool": s.tool,
-                            "success_criteria": s.success_criteria,
-                        })
-                    })
-                    .collect();
-
-                *plan = Some(new_plan);
-                state.mark_plan_approval_needed();
-
-                self.event_bus.publish(AgentEvent::PlanApprovalNeeded {
-                    agent_id: state.id.clone(),
-                    step_count: plan.as_ref().map(|p| p.steps.len()).unwrap_or(0),
-                    rationale: plan.as_ref().map(|p| p.rationale.clone()).unwrap_or_default(),
-                    steps: steps_json,
-                    job_type: plan.as_ref().and_then(|p| p.job_type.clone()),
-                    rejection_count: state.plan_rejection_count,
-                    missing_credentials,
-                    step_confidence,
-                });
-
-                return Ok(StepOutcome::PlanApprovalNeeded);
-            }
+            tracing::info!(
+                agent_id = %state.id,
+                rationale = %new_plan.rationale,
+                steps = new_plan.steps.len(),
+                "auto-approving deterministic plan — skipping approval gate"
+            );
+            *plan = Some(new_plan);
         }
 
         let current_plan = plan.as_ref().unwrap();
@@ -761,20 +726,53 @@ impl AgentLoop {
             let role_id = state.metadata.get("role_id").and_then(|v| v.as_str()).map(String::from);
             if let (Some(ref store), Some(ref rid)) = (&self.store, role_id.as_ref()) {
                 if let Ok(Some(role)) = store.get_agent_role(&state.tenant_id, rid).await {
-                    apply_failure_action_override(eval.verdict, &result, &role, state, &self.services)
+                    apply_failure_action_override(eval.verdict.clone(), &result, &role, state, &self.services)
                 } else {
-                    eval.verdict
+                    eval.verdict.clone()
                 }
             } else {
-                eval.verdict
+                eval.verdict.clone()
             }
         } else {
-            eval.verdict
+            eval.verdict.clone()
         };
 
         // Update step history for next executor call
         let history_summary = step_history_summary(&result, &eval.summary);
         history.push(step.index, step.description.clone(), result.success, &history_summary);
+        let judgement = JudgementEngine::default().evaluate(JudgementContext {
+            state,
+            plan: current_plan,
+            step: &step,
+            result: &result,
+            eval: &eval,
+            eval_verdict: eval_verdict.clone(),
+            retry_count,
+        });
+        state.metadata["last_judgement"] = serde_json::to_value(&judgement).unwrap_or_default();
+        if !matches!(judgement.recommendation, JudgementRecommendation::Continue) {
+            persist_judgement_signal(state, &judgement);
+            let recommendation = match judgement.recommendation {
+                JudgementRecommendation::Continue => "continue",
+                JudgementRecommendation::Watch => "watch",
+                JudgementRecommendation::Revise => "revise",
+                JudgementRecommendation::Escalate => "escalate",
+            }
+            .to_string();
+            self.event_bus.publish(AgentEvent::JudgementSignal {
+                agent_id: state.id.clone(),
+                step_index: judgement.step_index,
+                step_description: judgement.step_description.clone(),
+                job_type: judgement.job_type.clone(),
+                profile: judgement.profile.clone(),
+                score: judgement.score,
+                confidence: judgement.confidence,
+                recommendation,
+                summary: judgement.summary.clone(),
+                reasons: judgement.reasons.clone(),
+                timestamp: judgement.timestamp.clone(),
+            });
+        }
 
         // ── 11. Knowledge graph — extract and store entities ────────────────
         {
@@ -814,23 +812,12 @@ impl AgentLoop {
         }
 
         // ── 12a. Optional plan revision from combined eval ───────────────────
-        let maybe_revised = if eval.should_revise && !eval.revision_feedback.is_empty() {
-            match self.reflector.revise_plan(current_plan, state, &eval.revision_feedback).await {
-                Ok(p) => {
-                    tracing::info!(agent_id = %state.id, "plan revised from eval feedback");
-                    Some(p)
-                }
-                Err(e) => {
-                    tracing::warn!(agent_id = %state.id, error = %e, "plan revision failed");
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
-        if let Some(revised) = maybe_revised {
-            *plan = Some(revised);
+        if eval.should_revise && !eval.revision_feedback.is_empty() {
+            tracing::info!(
+                agent_id = %state.id,
+                step_index = step.index,
+                "runtime revision requested by evaluator; leaving repair to plan mode"
+            );
         }
 
         // ── 12b. Persist key findings to pgvector ────────────────────────────
@@ -996,8 +983,10 @@ impl AgentLoop {
                 // Write per-criterion results into goal_instance.result for the UI
                 let criteria_json = serde_json::to_value(&criterion_results).unwrap_or_default();
                 let base_result = state.metadata.get("step_outputs").cloned().unwrap_or(serde_json::json!({}));
+                let judgement_json = state.metadata.get("judgement_signals").cloned().unwrap_or(serde_json::json!([]));
                 let enriched_result = serde_json::json!({
                     "step_outputs":   base_result,
+                    "judgement_signals": judgement_json,
                     "criteria_checks": criteria_json,
                     "all_criteria_satisfied": all_satisfied,
                 });
@@ -1137,7 +1126,7 @@ impl AgentLoop {
 
     /// Try to build a deterministic Plan from the role's enriched workflow outline.
     /// Returns None if no role is found or the workflow outline is empty, causing
-    /// the caller to fall through to the LLM planner.
+    /// the caller to fail fast and let plan mode repair the role.
     async fn try_plan_from_workflow_outline(&self, state: &AgentState) -> Option<Plan> {
         let store = self.store.as_ref()?;
         let role_id = state.metadata.get("role_id").and_then(|v| v.as_str())?;
@@ -1459,7 +1448,7 @@ mod tests {
         agent::{
             evaluator::EvalVerdict,
             executor::StepResult,
-            planner::{Plan, PlannedStep},
+            planner::{Plan, PlannedStep, Planner},
             reflector::Reflection,
             test_helpers::{MockClarifier, MockEvaluator, MockExecutor, MockPlanner, MockPreflight, MockReflector},
         },
@@ -1500,7 +1489,7 @@ mod tests {
     }
 
     fn make_loop_with_registry(
-        planner: Arc<dyn Planner>,
+        _planner: Arc<dyn Planner>,
         executor: Arc<dyn Executor>,
         evaluator: Arc<dyn Evaluator>,
         reflector: Arc<dyn Reflector>,
@@ -1516,7 +1505,6 @@ mod tests {
             Arc::new(crate::memory::embeddings::StubEmbeddingModel::new(4));
 
         AgentLoop::new(
-            planner,
             executor,
             evaluator,
             reflector,
@@ -1893,29 +1881,19 @@ mod tests {
         let mut plan = None;
         let mut history = StepHistory::new();
 
-        // First call creates the plan and returns PlanApprovalNeeded.
+        // First call creates the plan and immediately executes it.
         let outcome =
             loop_runtime.run_step(&mut state, &mut plan, &mut history).await.expect("skill plan path should succeed");
 
         match outcome {
-            StepOutcome::PlanApprovalNeeded => {}
-            other => panic!("expected PlanApprovalNeeded outcome, got {other:?}"),
+            StepOutcome::Continue { delay_secs } => assert_eq!(delay_secs, 0),
+            other => panic!("expected immediate execution outcome, got {other:?}"),
         }
         let p = plan.as_ref().expect("skill plan should be created");
         assert_eq!(p.steps.len(), 2);
         assert_eq!(p.rationale, "using pre-built skill: ci");
-
-        // Simulate plan approval — set status to Running and run again.
-        state.mark_running();
-        let outcome = loop_runtime
-            .run_step(&mut state, &mut plan, &mut history)
-            .await
-            .expect("execution after approval should succeed");
-
-        match outcome {
-            StepOutcome::Continue { delay_secs } => assert_eq!(delay_secs, 0),
-            other => panic!("expected continue outcome after approval, got {other:?}"),
-        }
+        assert_eq!(state.status, AgentStatus::Waiting);
+        assert_eq!(state.current_step, 1);
     }
 
     #[tokio::test]

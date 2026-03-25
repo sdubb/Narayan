@@ -5,7 +5,10 @@
 use crate::{
     connectors::notion::NotionConnector,
     policy::rules::{PolicyAction, PolicyCondition, PolicyRule, PolicyRuleSet},
-    segments::registry::{SegmentPlugin, SegmentServices, SharedDeps},
+    segments::{
+        registry::{SegmentPlugin, SegmentServices, SharedDeps},
+        DomainProfile,
+    },
 };
 use std::sync::Arc;
 
@@ -27,6 +30,7 @@ pub fn plugin(deps: &SharedDeps, tenant_id: &str) -> SegmentPlugin {
     SegmentPlugin {
         id: "research_intelligence",
         name: "Research & Intelligence",
+        domain: DomainProfile::research_intelligence(),
         connectors: vec![Arc::new(NotionConnector::new())],
         services: SegmentServices {
             policy: Some(deps.policy_engine.clone()),

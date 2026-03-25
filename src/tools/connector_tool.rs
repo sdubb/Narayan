@@ -20,9 +20,11 @@
 //! plan_mode.rs uses `keywords` from this list for intent matching.
 //! The executor's connector catalogue is also derived from this list.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
+use sha2::{Digest, Sha256};
+use tokio::time::sleep;
 
 use crate::tools::{mcp_session::McpSessionTool, ParameterSchema, Tool, ToolResult};
 
@@ -208,6 +210,36 @@ pub static ALL_CONNECTORS: &[ConnectorDef] = &[
     },
     // ── Communication ───────────────────────────────────────────────────────
     ConnectorDef {
+        name: "linear",
+        category: "connector/project_management",
+        mcp_url: "https://mcp.linear.app/mcp",
+        summary: "Linear: issues, projects, comments, triage",
+        description: "Interact with Linear. List issues, create and update issues, add comments, \
+                       and inspect project work in a fast issue-tracking workflow.",
+        operations: &[
+            "list_issues   â€” list recent issues, optionally filter by team or text",
+            "create_issue  â€” create a new issue in a team",
+            "update_issue  â€” update title or description of an issue",
+            "add_comment   â€” add a comment to an issue",
+        ],
+        keywords: &["linear", "issue", "project", "product", "bug", "task", "triage", "roadmap"],
+    },
+    ConnectorDef {
+        name: "monday",
+        category: "connector/project_management",
+        mcp_url: "https://mcp.monday.com/sse",
+        summary: "monday.com: boards, items, updates, workflows",
+        description: "Interact with monday.com. List boards, create items, update item columns, \
+                       and add updates to keep teams aligned.",
+        operations: &[
+            "list_boards  â€” list accessible boards and their names",
+            "create_item  â€” create a new item on a board",
+            "update_item  â€” update multiple column values on an item",
+            "add_update   â€” add an update/comment to an item",
+        ],
+        keywords: &["monday", "board", "item", "workflow", "project", "task", "tracker", "crm"],
+    },
+    ConnectorDef {
         name: "slack",
         category: "connector/communication",
         mcp_url: "https://mcp.slack.com/sse",
@@ -390,6 +422,132 @@ pub fn find_by_name(name: &str) -> Option<&'static ConnectorDef> {
 // Each connector section handles all operations declared in ALL_CONNECTORS.
 // Returns serde_json::Value of the API response body.
 
+fn with_idempotency(builder: reqwest::RequestBuilder, idempotency_key: Option<&str>) -> reqwest::RequestBuilder {
+    match idempotency_key.filter(|value| !value.trim().is_empty()) {
+        Some(key) => builder.header("Idempotency-Key", key),
+        None => builder,
+    }
+}
+
+fn derive_idempotency_key(
+    connector: &str,
+    tenant_id: &str,
+    goal_instance_id: Option<&str>,
+    step_index: Option<u64>,
+    operation: &str,
+    params: &serde_json::Value,
+) -> String {
+    let normalized = serde_json::json!({
+        "connector": connector,
+        "tenant_id": tenant_id,
+        "goal_instance_id": goal_instance_id,
+        "step_index": step_index,
+        "operation": operation,
+        "params": params,
+    });
+    let bytes = serde_json::to_vec(&normalized).unwrap_or_default();
+    let digest = Sha256::digest(bytes);
+    format!("narayan-{}", hex::encode(digest))
+}
+
+fn retryable_graphql_error(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("rate limit")
+        || lower.contains("too many requests")
+        || lower.contains("timeout")
+        || lower.contains("timed out")
+        || lower.contains("temporarily unavailable")
+        || lower.contains("service unavailable")
+        || lower.contains("connection reset")
+        || lower.contains("broken pipe")
+}
+
+#[derive(Debug, Clone, Copy)]
+enum GraphqlAuthMode {
+    AuthorizationHeader,
+}
+
+async fn graphql_execute_with_retry(
+    http: &reqwest::Client,
+    url: &str,
+    token: &str,
+    auth_mode: GraphqlAuthMode,
+    query: &str,
+    variables: serde_json::Value,
+    idempotency_key: Option<&str>,
+    connector: &str,
+    operation: &str,
+    api_version: Option<&str>,
+) -> anyhow::Result<serde_json::Value> {
+    let payload = serde_json::json!({
+        "query": query,
+        "variables": variables,
+    });
+
+    let mut attempt = 0usize;
+    let mut delay = Duration::from_millis(250);
+    loop {
+        attempt += 1;
+
+        let mut request = http.post(url);
+        request = match auth_mode {
+            GraphqlAuthMode::AuthorizationHeader => request.header("Authorization", token),
+        };
+        if let Some(version) = api_version {
+            request = request.header("API-Version", version);
+        }
+        request = with_idempotency(request, idempotency_key);
+
+        let response = match request.json(&payload).send().await {
+            Ok(resp) => resp,
+            Err(err) if attempt < 4 && retryable_graphql_error(&err.to_string()) => {
+                sleep(delay).await;
+                delay = delay.saturating_mul(2);
+                continue;
+            }
+            Err(err) => return Err(err.into()),
+        };
+
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        if (status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error()) && attempt < 4 {
+            sleep(delay).await;
+            delay = delay.saturating_mul(2);
+            continue;
+        }
+
+        let json: serde_json::Value = match serde_json::from_str(&text) {
+            Ok(value) => value,
+            Err(err) => {
+                return Err(anyhow::anyhow!(
+                    "{} {}: invalid GraphQL response (HTTP {}): {} ({})",
+                    connector,
+                    operation,
+                    status,
+                    text,
+                    err
+                ));
+            }
+        };
+
+        if let Some(errors) = json.get("errors") {
+            let error_text = serde_json::to_string(errors).unwrap_or_default();
+            if attempt < 4 && retryable_graphql_error(&error_text) {
+                sleep(delay).await;
+                delay = delay.saturating_mul(2);
+                continue;
+            }
+            return Err(anyhow::anyhow!("{} {} GraphQL error: {}", connector, operation, error_text));
+        }
+
+        if !status.is_success() {
+            return Err(anyhow::anyhow!("{} {} HTTP {}: {}", connector, operation, status, text));
+        }
+
+        return Ok(json.get("data").cloned().unwrap_or_default());
+    }
+}
+
 async fn rest_execute(
     http: &reqwest::Client,
     connector: &str,
@@ -397,6 +555,7 @@ async fn rest_execute(
     operation: &str,
     params: &serde_json::Value,
     settings: &serde_json::Value,
+    idempotency_key: Option<&str>,
 ) -> anyhow::Result<serde_json::Value> {
     match connector {
         // ── Salesforce ─────────────────────────────────────────────────────
@@ -682,6 +841,350 @@ async fn rest_execute(
         }
 
         // ── Slack ──────────────────────────────────────────────────────────
+        "linear" => {
+            let url = "https://api.linear.app/graphql";
+            match operation {
+                "list_issues" => {
+                    let query = params["query"].as_str().unwrap_or("").trim().to_string();
+                    let team_id = params["team_id"].as_str().unwrap_or("").trim().to_string();
+                    let limit = params["limit"].as_u64().unwrap_or(20) as usize;
+                    let data = graphql_execute_with_retry(
+                        http,
+                        url,
+                        token,
+                        GraphqlAuthMode::AuthorizationHeader,
+                        r#"
+                        query {
+                          issues {
+                            nodes {
+                              id
+                              identifier
+                              title
+                              description
+                              url
+                              priority
+                              team { id key name }
+                            }
+                          }
+                        }
+                        "#,
+                        serde_json::json!({}),
+                        idempotency_key,
+                        "Linear",
+                        "list_issues",
+                        None,
+                    )
+                    .await?;
+                    let mut issues = data
+                        .get("issues")
+                        .and_then(|value| value.get("nodes"))
+                        .and_then(|value| value.as_array())
+                        .cloned()
+                        .unwrap_or_default();
+                    if !team_id.is_empty() {
+                        issues.retain(|issue| {
+                            let team = issue.get("team").and_then(|v| v.as_object());
+                            let matches_id =
+                                team.and_then(|team| team.get("id")).and_then(|v| v.as_str()) == Some(team_id.as_str());
+                            let matches_key = team.and_then(|team| team.get("key")).and_then(|v| v.as_str())
+                                == Some(team_id.as_str());
+                            matches_id || matches_key
+                        });
+                    }
+                    if !query.is_empty() {
+                        let needle = query.to_ascii_lowercase();
+                        issues.retain(|issue| {
+                            let haystack = [
+                                issue.get("identifier").and_then(|v| v.as_str()).unwrap_or(""),
+                                issue.get("title").and_then(|v| v.as_str()).unwrap_or(""),
+                                issue.get("description").and_then(|v| v.as_str()).unwrap_or(""),
+                            ]
+                            .join(" ")
+                            .to_ascii_lowercase();
+                            haystack.contains(&needle)
+                        });
+                    }
+                    if issues.len() > limit {
+                        issues.truncate(limit);
+                    }
+                    Ok(serde_json::json!({
+                        "issues": issues,
+                        "count": issues.len(),
+                        "team_id": team_id,
+                        "query": query,
+                    }))
+                }
+                "create_issue" => {
+                    let team_id = params["team_id"].as_str().ok_or_else(|| anyhow::anyhow!("team_id required"))?;
+                    let title = params["title"].as_str().unwrap_or("New issue");
+                    let description = params["description"].as_str().unwrap_or("");
+                    let data = graphql_execute_with_retry(
+                        http,
+                        url,
+                        token,
+                        GraphqlAuthMode::AuthorizationHeader,
+                        r#"
+                        mutation($teamId: String!, $title: String!, $description: String) {
+                          issueCreate(input: { teamId: $teamId, title: $title, description: $description }) {
+                            success
+                            issue { id identifier title url }
+                          }
+                        }
+                        "#,
+                        serde_json::json!({
+                            "teamId": team_id,
+                            "title": title,
+                            "description": description,
+                        }),
+                        idempotency_key,
+                        "Linear",
+                        "create_issue",
+                        None,
+                    )
+                    .await?;
+                    Ok(serde_json::json!({
+                        "created": true,
+                        "issue": data.get("issueCreate").and_then(|v| v.get("issue")).cloned().unwrap_or_default(),
+                        "result": data.get("issueCreate").cloned().unwrap_or_default(),
+                    }))
+                }
+                "update_issue" => {
+                    let issue_id = params["issue_id"].as_str().ok_or_else(|| anyhow::anyhow!("issue_id required"))?;
+                    let title = params["title"].as_str().unwrap_or("");
+                    let description = params["description"].as_str().unwrap_or("");
+                    let data = graphql_execute_with_retry(
+                        http,
+                        url,
+                        token,
+                        GraphqlAuthMode::AuthorizationHeader,
+                        r#"
+                        mutation($issueId: String!, $title: String, $description: String) {
+                          issueUpdate(id: $issueId, input: { title: $title, description: $description }) {
+                            success
+                            issue { id identifier title url }
+                          }
+                        }
+                        "#,
+                        serde_json::json!({
+                            "issueId": issue_id,
+                            "title": title,
+                            "description": description,
+                        }),
+                        idempotency_key,
+                        "Linear",
+                        "update_issue",
+                        None,
+                    )
+                    .await?;
+                    Ok(serde_json::json!({
+                        "updated": true,
+                        "issue": data.get("issueUpdate").and_then(|v| v.get("issue")).cloned().unwrap_or_default(),
+                        "result": data.get("issueUpdate").cloned().unwrap_or_default(),
+                    }))
+                }
+                "add_comment" => {
+                    let issue_id = params["issue_id"].as_str().ok_or_else(|| anyhow::anyhow!("issue_id required"))?;
+                    let body = params["body"].as_str().unwrap_or("");
+                    let data = graphql_execute_with_retry(
+                        http,
+                        url,
+                        token,
+                        GraphqlAuthMode::AuthorizationHeader,
+                        r#"
+                        mutation($issueId: String!, $body: String!) {
+                          commentCreate(input: { issueId: $issueId, body: $body }) {
+                            success
+                            comment { id body }
+                          }
+                        }
+                        "#,
+                        serde_json::json!({
+                            "issueId": issue_id,
+                            "body": body,
+                        }),
+                        idempotency_key,
+                        "Linear",
+                        "add_comment",
+                        None,
+                    )
+                    .await?;
+                    Ok(serde_json::json!({
+                        "added": true,
+                        "comment": data.get("commentCreate").and_then(|v| v.get("comment")).cloned().unwrap_or_default(),
+                        "result": data.get("commentCreate").cloned().unwrap_or_default(),
+                    }))
+                }
+                _ => anyhow::bail!("Linear: unknown operation '{}'", operation),
+            }
+        }
+
+        "monday" => {
+            let url = "https://api.monday.com/v2";
+            match operation {
+                "list_boards" => {
+                    let query = params["query"].as_str().unwrap_or("").trim().to_string();
+                    let limit = params["limit"].as_u64().unwrap_or(20) as usize;
+                    let data = graphql_execute_with_retry(
+                        http,
+                        url,
+                        token,
+                        GraphqlAuthMode::AuthorizationHeader,
+                        r#"
+                        query {
+                          boards {
+                            id
+                            name
+                            description
+                            state
+                          }
+                        }
+                        "#,
+                        serde_json::json!({}),
+                        idempotency_key,
+                        "monday.com",
+                        "list_boards",
+                        Some("2025-10"),
+                    )
+                    .await?;
+                    let mut boards = data.get("boards").and_then(|value| value.as_array()).cloned().unwrap_or_default();
+                    if !query.is_empty() {
+                        let needle = query.to_ascii_lowercase();
+                        boards.retain(|board| {
+                            let haystack = [
+                                board.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+                                board.get("description").and_then(|v| v.as_str()).unwrap_or(""),
+                            ]
+                            .join(" ")
+                            .to_ascii_lowercase();
+                            haystack.contains(&needle)
+                        });
+                    }
+                    if boards.len() > limit {
+                        boards.truncate(limit);
+                    }
+                    Ok(serde_json::json!({
+                        "boards": boards,
+                        "count": boards.len(),
+                        "query": query,
+                    }))
+                }
+                "create_item" => {
+                    let board_id = params["board_id"].as_str().ok_or_else(|| anyhow::anyhow!("board_id required"))?;
+                    let item_name = params["item_name"].as_str().unwrap_or("New item");
+                    let group_id = params["group_id"].as_str().unwrap_or("");
+                    let column_values = params.get("column_values").cloned().unwrap_or_default();
+                    let data = graphql_execute_with_retry(
+                        http,
+                        url,
+                        token,
+                        GraphqlAuthMode::AuthorizationHeader,
+                        r#"
+                        mutation($boardId: ID!, $itemName: String!, $groupId: String, $columnValues: JSON) {
+                          create_item(board_id: $boardId, item_name: $itemName, group_id: $groupId, column_values: $columnValues) {
+                            id
+                            name
+                          }
+                        }
+                        "#,
+                        serde_json::json!({
+                            "boardId": board_id,
+                            "itemName": item_name,
+                            "groupId": if group_id.is_empty() { serde_json::Value::Null } else { serde_json::json!(group_id) },
+                            "columnValues": if column_values.is_null() {
+                                serde_json::Value::Null
+                            } else if let Some(s) = column_values.as_str() {
+                                serde_json::json!(s)
+                            } else {
+                                serde_json::json!(column_values)
+                            },
+                        }),
+                        idempotency_key,
+                        "monday.com",
+                        "create_item",
+                        Some("2025-10"),
+                    )
+                    .await?;
+                    Ok(serde_json::json!({
+                        "created": true,
+                        "item": data.get("create_item").cloned().unwrap_or_default(),
+                        "result": data.get("create_item").cloned().unwrap_or_default(),
+                    }))
+                }
+                "update_item" => {
+                    let board_id = params["board_id"].as_str().ok_or_else(|| anyhow::anyhow!("board_id required"))?;
+                    let item_id = params["item_id"].as_str().ok_or_else(|| anyhow::anyhow!("item_id required"))?;
+                    let column_values = params.get("column_values").cloned().unwrap_or_default();
+                    let data = graphql_execute_with_retry(
+                        http,
+                        url,
+                        token,
+                        GraphqlAuthMode::AuthorizationHeader,
+                        r#"
+                        mutation($boardId: ID!, $itemId: ID!, $columnValues: JSON) {
+                          change_multiple_column_values(board_id: $boardId, item_id: $itemId, column_values: $columnValues) {
+                            id
+                          }
+                        }
+                        "#,
+                        serde_json::json!({
+                            "boardId": board_id,
+                            "itemId": item_id,
+                            "columnValues": if column_values.is_null() {
+                                serde_json::Value::Null
+                            } else if let Some(s) = column_values.as_str() {
+                                serde_json::json!(s)
+                            } else {
+                                serde_json::json!(column_values)
+                            },
+                        }),
+                        idempotency_key,
+                        "monday.com",
+                        "update_item",
+                        Some("2025-10"),
+                    )
+                    .await?;
+                    Ok(serde_json::json!({
+                        "updated": true,
+                        "item": data.get("change_multiple_column_values").cloned().unwrap_or_default(),
+                        "result": data.get("change_multiple_column_values").cloned().unwrap_or_default(),
+                    }))
+                }
+                "add_update" => {
+                    let item_id = params["item_id"].as_str().ok_or_else(|| anyhow::anyhow!("item_id required"))?;
+                    let body = params["body"].as_str().unwrap_or("");
+                    let data = graphql_execute_with_retry(
+                        http,
+                        url,
+                        token,
+                        GraphqlAuthMode::AuthorizationHeader,
+                        r#"
+                        mutation($itemId: ID!, $body: String!) {
+                          create_update(item_id: $itemId, body: $body) {
+                            id
+                            body
+                          }
+                        }
+                        "#,
+                        serde_json::json!({
+                            "itemId": item_id,
+                            "body": body,
+                        }),
+                        idempotency_key,
+                        "monday.com",
+                        "add_update",
+                        Some("2025-10"),
+                    )
+                    .await?;
+                    Ok(serde_json::json!({
+                        "added": true,
+                        "update": data.get("create_update").cloned().unwrap_or_default(),
+                        "result": data.get("create_update").cloned().unwrap_or_default(),
+                    }))
+                }
+                _ => anyhow::bail!("monday: unknown operation '{}'", operation),
+            }
+        }
+
         "slack" => match operation {
             "send_message" => {
                 let channel = params["channel"].as_str().unwrap_or("#general");
@@ -1663,6 +2166,7 @@ impl ConnectorTool {
         operation: &str,
         params: &serde_json::Value,
         tenant_id: &str,
+        idempotency_key: Option<&str>,
     ) -> anyhow::Result<ToolResult> {
         // Get any stored settings (e.g. Salesforce instance_url, Zendesk subdomain)
         let settings = if let Some(store) = &self.install_store {
@@ -1671,7 +2175,8 @@ impl ConnectorTool {
             serde_json::json!({})
         };
 
-        let result = rest_execute(&self.http, self.def.name, token, operation, params, &settings).await?;
+        let result =
+            rest_execute(&self.http, self.def.name, token, operation, params, &settings, idempotency_key).await?;
 
         Ok(ToolResult::ok(result))
     }
@@ -1700,6 +2205,21 @@ impl Tool for ConnectorTool {
             ParameterSchema::optional("params", "object", "Operation-specific parameters as a JSON object."),
             ParameterSchema::optional("tenant_id", "string", "Tenant ID for credential lookup (injected by executor)."),
             ParameterSchema::optional(
+                "goal_instance_id",
+                "string",
+                "Goal instance ID injected by the executor to keep retries idempotent.",
+            ),
+            ParameterSchema::optional(
+                "step_index",
+                "integer",
+                "Current plan step index injected by the executor for stable retries.",
+            ),
+            ParameterSchema::optional(
+                "idempotency_key",
+                "string",
+                "Stable idempotency key injected by the executor; derived automatically when omitted.",
+            ),
+            ParameterSchema::optional(
                 "auth_token",
                 "string",
                 "Bearer token override. Omit to use the stored tenant credential.",
@@ -1714,6 +2234,16 @@ impl Tool for ConnectorTool {
         };
         let params = args.get("params").cloned().unwrap_or_default();
         let tenant_id = args["tenant_id"].as_str().unwrap_or("").to_string();
+        let goal_instance_id = args["goal_instance_id"].as_str().filter(|value| !value.trim().is_empty());
+        let step_index = args["step_index"].as_u64();
+        let idempotency_key = args
+            .get("idempotency_key")
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.trim().is_empty())
+            .map(String::from)
+            .unwrap_or_else(|| {
+                derive_idempotency_key(self.def.name, &tenant_id, goal_instance_id, step_index, &operation, &params)
+            });
 
         // 1. Explicit token override → try MCP session
         if let Some(token) = args["auth_token"].as_str() {
@@ -1730,7 +2260,7 @@ impl Tool for ConnectorTool {
         // 2. Load stored token → real REST API
         if !tenant_id.is_empty() {
             if let Some(token) = self.stored_token(&tenant_id).await {
-                return self.execute_rest(&token, &operation, &params, &tenant_id).await;
+                return self.execute_rest(&token, &operation, &params, &tenant_id, Some(&idempotency_key)).await;
             }
         }
 
@@ -1798,6 +2328,23 @@ mod tests {
         for def in ALL_CONNECTORS {
             assert!(!def.keywords.is_empty(), "connector '{}' needs at least one keyword", def.name);
         }
+    }
+
+    #[test]
+    fn test_linear_and_monday_are_registered() {
+        assert!(find_by_name("linear").is_some(), "linear must be in the connector catalogue");
+        assert!(find_by_name("monday").is_some(), "monday must be in the connector catalogue");
+    }
+
+    #[test]
+    fn test_idempotency_key_is_stable_for_same_payload() {
+        let params = serde_json::json!({ "title": "hello" });
+        let key_a = derive_idempotency_key("linear", "tenant-1", Some("gi-1"), Some(4), "create_issue", &params);
+        let key_b = derive_idempotency_key("linear", "tenant-1", Some("gi-1"), Some(4), "create_issue", &params);
+        let key_c = derive_idempotency_key("linear", "tenant-1", Some("gi-1"), Some(5), "create_issue", &params);
+
+        assert_eq!(key_a, key_b, "same payload must yield the same key");
+        assert_ne!(key_a, key_c, "different step should produce a different key");
     }
 
     #[test]

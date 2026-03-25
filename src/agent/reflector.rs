@@ -4,11 +4,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::{
-    agent::{
-        executor::StepResult,
-        planner::{Plan, Planner},
-        prompts::ReflectorPrompt,
-    },
+    agent::{executor::StepResult, planner::Plan, prompts::ReflectorPrompt},
     gateway::{GatewayRequest, LlmGateway, TaskComplexity},
     providers::Message,
     state::AgentState,
@@ -31,12 +27,11 @@ pub trait Reflector: Send + Sync {
 
 pub struct LlmReflector {
     gateway: Arc<dyn LlmGateway>,
-    planner: Arc<dyn Planner>,
 }
 
 impl LlmReflector {
-    pub fn new(gateway: Arc<dyn LlmGateway>, planner: Arc<dyn Planner>) -> Self {
-        Self { gateway, planner }
+    pub fn new(gateway: Arc<dyn LlmGateway>) -> Self {
+        Self { gateway }
     }
 }
 
@@ -87,26 +82,22 @@ impl Reflector for LlmReflector {
             "reflection complete"
         );
 
-        let revised_plan = if should_revise && !feedback.is_empty() {
-            match self.planner.revise_plan(plan, state, &feedback).await {
-                Ok(p) => {
-                    tracing::info!(agent_id = %state.id, "plan revised");
-                    Some(p)
-                }
-                Err(e) => {
-                    tracing::warn!(agent_id = %state.id, error = %e, "plan revision failed");
-                    None
-                }
-            }
-        } else {
-            None
-        };
+        if should_revise && !feedback.is_empty() {
+            tracing::info!(
+                agent_id = %state.id,
+                feedback = %feedback,
+                "runtime requested plan revision, but plan mode owns repairs; leaving plan unchanged"
+            );
+        }
+
+        let revised_plan = None;
 
         Ok(Reflection { summary, key_findings, revised_plan })
     }
 
     async fn revise_plan(&self, plan: &Plan, state: &AgentState, feedback: &str) -> Result<Plan> {
-        self.planner.revise_plan(plan, state, feedback).await
+        let _ = (state, feedback);
+        Ok(plan.clone())
     }
 }
 
@@ -117,10 +108,7 @@ mod tests {
     use async_trait::async_trait;
 
     use super::*;
-    use crate::{
-        agent::{planner::PlannedStep, test_helpers::MockPlanner},
-        providers::ChatResponse,
-    };
+    use crate::{agent::planner::PlannedStep, providers::ChatResponse};
 
     struct MockGateway {
         responses: Mutex<Vec<ChatResponse>>,
@@ -189,7 +177,7 @@ mod tests {
         let mut state = make_state();
         state.current_step = 0;
         let plan = make_plan();
-        let reflector = LlmReflector::new(Arc::new(MockGateway::from_contents(vec![])), Arc::new(MockPlanner::new()));
+        let reflector = LlmReflector::new(Arc::new(MockGateway::from_contents(vec![])));
 
         let reflection = reflector
             .reflect(&state, &plan, &make_result(true, "STEP COMPLETE"))
@@ -202,41 +190,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_reflect_parses_json_and_requests_plan_revision_when_needed() {
-        let revised = Plan {
-            goal: "fix CI pipeline".into(),
-            job_type: Some("software_engineer".into()),
-            steps: vec![
-                PlannedStep {
-                    index: 0,
-                    description: "Inspect failing workflow".into(),
-                    tool: Some("file_read".into()),
-                    tool_args: None,
-                    success_criteria: "workflow reviewed".into(),
-                    condition: None,
-                },
-                PlannedStep {
-                    index: 1,
-                    description: "Patch the workflow".into(),
-                    tool: Some("file_edit".into()),
-                    tool_args: None,
-                    success_criteria: "workflow fixed".into(),
-                    condition: None,
-                },
-            ],
-            rationale: "adapt remaining work".into(),
-        };
-        let reflector = LlmReflector::new(
-            Arc::new(MockGateway::from_contents(vec![
-                r#"{
-                "summary":"workflow path was wrong",
-                "key_findings":["ci file moved to another directory"],
-                "revise":true,
-                "feedback":"update the remaining plan to target the new workflow path"
-            }"#,
-            ])),
-            Arc::new(MockPlanner::from_revise_responses(vec![revised.clone()])),
-        );
+    async fn test_reflect_parses_json_but_defers_revision_to_plan_mode() {
+        let reflector = LlmReflector::new(Arc::new(MockGateway::from_contents(vec![
+            r#"{
+            "summary":"workflow path was wrong",
+            "key_findings":["ci file moved to another directory"],
+            "revise":true,
+            "feedback":"update the remaining plan to target the new workflow path"
+        }"#,
+        ])));
         let state = make_state();
         let plan = Plan {
             goal: "fix CI pipeline".into(),
@@ -269,16 +231,13 @@ mod tests {
 
         assert_eq!(reflection.summary, "workflow path was wrong");
         assert_eq!(reflection.key_findings, vec!["ci file moved to another directory"]);
-        assert!(reflection.revised_plan.is_some());
-        assert_eq!(reflection.revised_plan.expect("revised plan expected").steps[1].description, "Patch the workflow");
+        assert!(reflection.revised_plan.is_none());
     }
 
     #[tokio::test]
     async fn test_reflect_falls_back_to_raw_output_summary_on_invalid_json() {
-        let reflector = LlmReflector::new(
-            Arc::new(MockGateway::from_contents(vec!["plain text reflection without json"])),
-            Arc::new(MockPlanner::new()),
-        );
+        let reflector =
+            LlmReflector::new(Arc::new(MockGateway::from_contents(vec!["plain text reflection without json"])));
         let mut state = make_state();
         state.current_step = 1;
         let plan = Plan {

@@ -135,6 +135,14 @@ fn known_servers() -> Vec<McpServerEntry> {
             connected: false,
         },
         McpServerEntry {
+            name: "monday.com".into(),
+            url: "https://mcp.monday.com/sse".into(),
+            description: "Boards, items, columns, and updates for monday.com".into(),
+            categories: vec!["tasks".into(), "project".into(), "ops".into()],
+            auth_type: "api_key".into(),
+            connected: false,
+        },
+        McpServerEntry {
             name: "HubSpot".into(),
             url: "https://mcp.hubspot.com/sse".into(),
             description: "Contacts, deals, companies, marketing automation".into(),

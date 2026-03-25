@@ -73,7 +73,11 @@ impl Plan {
                 description: ws.description.clone(),
                 tool: ws.tool.clone(),
                 tool_args: ws.args_template.as_ref().map(|t| render_template(t, input_data)),
-                success_criteria: String::new(),
+                success_criteria: if ws.success_criteria.trim().is_empty() {
+                    format!("step {} complete", i + 1)
+                } else {
+                    ws.success_criteria.clone()
+                },
                 condition: ws.condition.clone(),
             })
             .collect();
@@ -454,6 +458,24 @@ mod tests {
         AgentState::new("agent-1".into(), "tenant-1".into(), "fix CI pipeline".into(), "/tmp/ws".into())
     }
 
+    fn make_role() -> crate::agent::definition::AgentRole {
+        let mut role = crate::agent::definition::AgentRole::new(
+            "role-1".into(),
+            "agent-1".into(),
+            "tenant-1".into(),
+            "Planner role".into(),
+        );
+        role.purpose = "Run a deterministic workflow".into();
+        role.execution_guidelines.workflow_outline = vec![crate::agent::definition::WorkflowStep {
+            description: "Inspect the source file".into(),
+            tool: Some("file_read".into()),
+            args_template: Some(serde_json::json!({ "path": "{input.file_path}" })),
+            success_criteria: "source file inspected".into(),
+            condition: None,
+        }];
+        role
+    }
+
     #[tokio::test]
     async fn test_create_plan_parses_valid_json_response() {
         let planner = LlmPlanner::new(Arc::new(MockGateway::from_contents(vec![
@@ -517,5 +539,25 @@ mod tests {
         assert_eq!(revised.goal, original.goal);
         assert_eq!(revised.steps.len(), original.steps.len());
         assert_eq!(revised.steps[0].description, original.steps[0].description);
+    }
+
+    #[test]
+    fn test_from_workflow_outline_preserves_success_criteria() {
+        let role = make_role();
+        let plan = Plan::from_workflow_outline(
+            &role,
+            &serde_json::json!({
+                "file_path": "/tmp/ws/input.txt"
+            }),
+        );
+
+        assert_eq!(plan.steps.len(), 1);
+        assert_eq!(plan.steps[0].description, "Inspect the source file");
+        assert_eq!(plan.steps[0].tool.as_deref(), Some("file_read"));
+        assert_eq!(plan.steps[0].success_criteria, "source file inspected");
+        assert_eq!(
+            plan.steps[0].tool_args.as_ref().and_then(|v| v.get("path")).and_then(|v| v.as_str()),
+            Some("/tmp/ws/input.txt")
+        );
     }
 }

@@ -5,7 +5,10 @@ use crate::{
     compliance::sla::{EscalationAction, EscalationRule, SlaPolicy, SlaPriority},
     connectors::salesforce::SalesforceConnector,
     policy::rules::{PolicyAction, PolicyCondition, PolicyRule, PolicyRuleSet},
-    segments::registry::{SegmentPlugin, SegmentServices, SharedDeps},
+    segments::{
+        registry::{SegmentPlugin, SegmentServices, SharedDeps},
+        DomainProfile,
+    },
 };
 use std::sync::Arc;
 
@@ -37,6 +40,7 @@ pub fn plugin(deps: &SharedDeps, tenant_id: &str) -> SegmentPlugin {
     SegmentPlugin {
         id: "sales_revops",
         name: "Sales & RevOps",
+        domain: DomainProfile::sales_revops(),
         connectors: vec![Arc::new(SalesforceConnector::new())],
         services: SegmentServices {
             policy: Some(deps.policy_engine.clone()),

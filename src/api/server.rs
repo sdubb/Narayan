@@ -110,6 +110,8 @@ pub fn build_router(
         .route("/plan-mode/templates", get(list_plan_mode_templates))
         .route("/plan-mode/sessions", post(start_plan_mode_session))
         .route("/plan-mode/sessions/:id/turn", post(plan_mode_turn))
+        .route("/plan-mode/sessions/:id/test", post(test_plan_mode_session))
+        .route("/plan-mode/sessions/:id/revise", post(revise_plan_mode_session))
         .route("/plan-mode/sessions/:id/save", post(save_plan_mode_session))
         // Tenant connectors (custom)
         .route("/tenant-connectors", get(list_tenant_connectors))

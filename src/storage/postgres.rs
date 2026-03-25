@@ -387,6 +387,10 @@ impl PostgresStore {
                 id             TEXT PRIMARY KEY,
                 tenant_id      TEXT NOT NULL,
                 agent_id       TEXT NOT NULL,
+                goal_fingerprint TEXT NOT NULL DEFAULT '',
+                repair_version INTEGER NOT NULL DEFAULT 1,
+                reused_from_session_id TEXT,
+                repair_root_session_id TEXT,
                 phase          TEXT NOT NULL,
                 conversation   JSONB NOT NULL DEFAULT '[]',
                 attachments    JSONB NOT NULL DEFAULT '[]',
@@ -405,6 +409,22 @@ impl PostgresStore {
             .execute(&self.pool)
             .await?;
         sqlx::query(
+            "ALTER TABLE plan_mode_sessions ADD COLUMN IF NOT EXISTS goal_fingerprint TEXT NOT NULL DEFAULT ''",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "ALTER TABLE plan_mode_sessions ADD COLUMN IF NOT EXISTS repair_version INTEGER NOT NULL DEFAULT 1",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query("ALTER TABLE plan_mode_sessions ADD COLUMN IF NOT EXISTS reused_from_session_id TEXT")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("ALTER TABLE plan_mode_sessions ADD COLUMN IF NOT EXISTS repair_root_session_id TEXT")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query(
             "ALTER TABLE plan_mode_sessions ADD COLUMN IF NOT EXISTS attachment_context TEXT NOT NULL DEFAULT ''",
         )
         .execute(&self.pool)
@@ -415,6 +435,12 @@ impl PostgresStore {
         sqlx::query("CREATE INDEX IF NOT EXISTS plan_mode_sessions_tenant ON plan_mode_sessions (tenant_id)")
             .execute(&self.pool)
             .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS plan_mode_sessions_goal_fingerprint
+             ON plan_mode_sessions (tenant_id, goal_fingerprint, repair_version DESC, updated_at DESC)",
+        )
+        .execute(&self.pool)
+        .await?;
 
         // ── RoleChatSessions ─────────────────────────────────────────────
         sqlx::query(
@@ -817,9 +843,13 @@ impl PostgresStore {
         sqlx::query(
             r#"
             INSERT INTO plan_mode_sessions
-                (id, tenant_id, agent_id, phase, conversation, attachments, attachment_context, session_workspace, draft_role, intent_cache, pending_steps, created_at, updated_at)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+                (id, tenant_id, agent_id, goal_fingerprint, repair_version, reused_from_session_id, repair_root_session_id, phase, conversation, attachments, attachment_context, session_workspace, draft_role, intent_cache, pending_steps, created_at, updated_at)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
             ON CONFLICT (id) DO UPDATE SET
+                goal_fingerprint = EXCLUDED.goal_fingerprint,
+                repair_version   = EXCLUDED.repair_version,
+                reused_from_session_id = EXCLUDED.reused_from_session_id,
+                repair_root_session_id = EXCLUDED.repair_root_session_id,
                 phase         = EXCLUDED.phase,
                 conversation  = EXCLUDED.conversation,
                 attachments   = EXCLUDED.attachments,
@@ -834,6 +864,10 @@ impl PostgresStore {
         .bind(&session.id)
         .bind(&session.tenant_id)
         .bind(&session.draft_agent.id)
+        .bind(session.goal_fingerprint.as_deref().unwrap_or(""))
+        .bind(session.repair_version as i32)
+        .bind(&session.reused_from_session_id)
+        .bind(&session.repair_root_session_id)
         .bind(phase.as_str().unwrap_or("capturing_intent"))
         .bind(&conversation)
         .bind(&attachments)
@@ -855,11 +889,104 @@ impl PostgresStore {
         session_id: &str,
     ) -> Result<Option<crate::agent::definition::PlanModeSession>> {
         let row = sqlx::query(
-            "SELECT id, tenant_id, agent_id, phase, conversation, attachments, attachment_context, session_workspace, draft_role, intent_cache, pending_steps, created_at, updated_at
+            "SELECT id, tenant_id, agent_id, goal_fingerprint, repair_version, reused_from_session_id, repair_root_session_id, phase, conversation, attachments, attachment_context, session_workspace, draft_role, intent_cache, pending_steps, created_at, updated_at
              FROM plan_mode_sessions WHERE id = $1 AND tenant_id = $2",
         )
         .bind(session_id)
         .bind(tenant_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        match row {
+            None => Ok(None),
+            Some(r) => {
+                let agent_id: String = r.get("agent_id");
+                let draft_agent = self.get_agent_definition(tenant_id, &agent_id).await?.unwrap_or_else(|| {
+                    crate::agent::definition::AgentDefinition::new(
+                        agent_id.clone(),
+                        tenant_id.to_string(),
+                        "Agent".into(),
+                    )
+                });
+
+                let phase: crate::agent::definition::PlanModePhase = {
+                    let s: String = r.get("phase");
+                    serde_json::from_value(serde_json::json!(s))
+                        .unwrap_or(crate::agent::definition::PlanModePhase::CapturingIntent)
+                };
+                let conversation: Vec<crate::agent::definition::PlanModeMessage> = {
+                    let v: serde_json::Value = r.get("conversation");
+                    serde_json::from_value(v).unwrap_or_default()
+                };
+                let goal_fingerprint: Option<String> = {
+                    let value: String = r.get("goal_fingerprint");
+                    if value.trim().is_empty() {
+                        None
+                    } else {
+                        Some(value)
+                    }
+                };
+                let repair_version: u32 = r.try_get::<i32, _>("repair_version").unwrap_or(1).max(1) as u32;
+                let reused_from_session_id: Option<String> =
+                    r.try_get::<Option<String>, _>("reused_from_session_id").ok().flatten();
+                let repair_root_session_id: Option<String> =
+                    r.try_get::<Option<String>, _>("repair_root_session_id").ok().flatten();
+                let attachments: Vec<crate::agent::definition::PlanModeAttachment> = {
+                    let v: serde_json::Value = r.get("attachments");
+                    serde_json::from_value(v).unwrap_or_default()
+                };
+                let attachment_context: String = r.get("attachment_context");
+                let session_workspace: Option<String> = r.get("session_workspace");
+                let draft_role: Option<crate::agent::definition::AgentRole> = r
+                    .try_get::<Option<serde_json::Value>, _>("draft_role")
+                    .ok()
+                    .flatten()
+                    .and_then(|v| serde_json::from_value(v).ok());
+                let intent_cache: Option<serde_json::Value> =
+                    r.try_get::<Option<serde_json::Value>, _>("intent_cache").ok().flatten();
+                let pending_steps: Vec<serde_json::Value> = r
+                    .try_get::<serde_json::Value, _>("pending_steps")
+                    .ok()
+                    .and_then(|v| serde_json::from_value(v).ok())
+                    .unwrap_or_default();
+
+                Ok(Some(crate::agent::definition::PlanModeSession {
+                    id: r.get("id"),
+                    tenant_id: r.get("tenant_id"),
+                    draft_agent,
+                    draft_role,
+                    conversation,
+                    attachments,
+                    attachment_context,
+                    session_workspace,
+                    goal_fingerprint,
+                    repair_version,
+                    reused_from_session_id,
+                    repair_root_session_id,
+                    phase,
+                    intent_cache,
+                    pending_steps,
+                    created_at: r.get("created_at"),
+                    updated_at: r.get("updated_at"),
+                }))
+            }
+        }
+    }
+
+    pub async fn get_latest_plan_mode_session_by_goal_fingerprint(
+        &self,
+        tenant_id: &str,
+        goal_fingerprint: &str,
+    ) -> Result<Option<crate::agent::definition::PlanModeSession>> {
+        let row = sqlx::query(
+            "SELECT id, tenant_id, agent_id, goal_fingerprint, repair_version, reused_from_session_id, repair_root_session_id, phase, conversation, attachments, attachment_context, session_workspace, draft_role, intent_cache, pending_steps, created_at, updated_at
+             FROM plan_mode_sessions
+             WHERE tenant_id = $1 AND goal_fingerprint = $2 AND goal_fingerprint <> '' AND draft_role IS NOT NULL
+             ORDER BY repair_version DESC, updated_at DESC
+             LIMIT 1",
+        )
+        .bind(tenant_id)
+        .bind(goal_fingerprint)
         .fetch_optional(&self.pool)
         .await?;
 
@@ -902,6 +1029,19 @@ impl PostgresStore {
                     .ok()
                     .and_then(|v| serde_json::from_value(v).ok())
                     .unwrap_or_default();
+                let goal_fingerprint: Option<String> = {
+                    let value: String = r.get("goal_fingerprint");
+                    if value.trim().is_empty() {
+                        None
+                    } else {
+                        Some(value)
+                    }
+                };
+                let repair_version: u32 = r.try_get::<i32, _>("repair_version").unwrap_or(1).max(1) as u32;
+                let reused_from_session_id: Option<String> =
+                    r.try_get::<Option<String>, _>("reused_from_session_id").ok().flatten();
+                let repair_root_session_id: Option<String> =
+                    r.try_get::<Option<String>, _>("repair_root_session_id").ok().flatten();
 
                 Ok(Some(crate::agent::definition::PlanModeSession {
                     id: r.get("id"),
@@ -912,6 +1052,10 @@ impl PostgresStore {
                     attachments,
                     attachment_context,
                     session_workspace,
+                    goal_fingerprint,
+                    repair_version,
+                    reused_from_session_id,
+                    repair_root_session_id,
                     phase,
                     intent_cache,
                     pending_steps,

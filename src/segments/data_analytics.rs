@@ -5,7 +5,10 @@ use crate::{
     compliance::sla::{EscalationAction, EscalationRule, SlaPolicy, SlaPriority},
     connectors::dbt_cloud::DbtCloudConnector,
     policy::rules::{PolicyAction, PolicyCondition, PolicyRule, PolicyRuleSet},
-    segments::registry::{SegmentPlugin, SegmentServices, SharedDeps},
+    segments::{
+        registry::{SegmentPlugin, SegmentServices, SharedDeps},
+        DomainProfile,
+    },
 };
 use std::sync::Arc;
 
@@ -37,6 +40,7 @@ pub fn plugin(deps: &SharedDeps, tenant_id: &str) -> SegmentPlugin {
     SegmentPlugin {
         id: "data_analytics",
         name: "Data & Analytics Ops",
+        domain: DomainProfile::data_analytics(),
         connectors: vec![Arc::new(DbtCloudConnector::new())],
         services: SegmentServices {
             policy: Some(deps.policy_engine.clone()),

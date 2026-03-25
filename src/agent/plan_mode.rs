@@ -29,12 +29,15 @@ use std::{
 use anyhow::Result;
 use base64::Engine as _;
 use chrono::Utc;
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
     agent::definition::{
-        AgentDefinition, AgentDefinitionStatus, AgentRole, PlanModeMessage, PlanModePhase,
-        PlanModeSession, RoleCategory, RoleStatus, TenantConnector, TenantWasmTool, TriggerDef, TriggerType,
+        AgentDefinition, AgentDefinitionStatus, AgentRole, PlanModeMessage, PlanModePhase, PlanModePreflightResult,
+        PlanModeSandboxResult, PlanModeSession, PlanModeTestCheck, PlanModeTestConfidence, PlanModeTestResult,
+        PlanModeTestStatus, PlanModeTestStepResult, RoleCategory, RoleStatus, TenantConnector, TenantWasmTool,
+        TriggerDef, TriggerType,
     },
     connectors::ConnectorInstallStore,
     gateway::{GatewayRequest, LlmGateway, TaskComplexity},
@@ -119,6 +122,9 @@ Rules:
 - Use exact tool names only from the capability directory or detailed context
 - Use candidate_wasm_tools only from the listed registered tenant WASM tools
 - Use exact connector names only when they are clearly supported by the context
+- Uploaded documents, local files, and workspace-only summaries do not imply an external connector.
+  If the agent only reads uploaded documents or local files and summarizes them in chat/workspace,
+  leave candidate_connectors empty, needed_connector_categories empty, and missing_capabilities empty.
 - If the user likely needs a database not in the installed connectors, prefer missing_capabilities=["custom_db"]
 - If the user likely needs a custom REST backend, prefer missing_capabilities=["custom_api"]
 - If the needed connector category is clear but no installed connector is obvious, add connector/<category> to missing_capabilities
@@ -167,6 +173,7 @@ Rules:
 - Fill preferred_tools with exact tool names only when the tool is clearly relevant
 - Fill candidate_wasm_tools with exact names only when custom deterministic logic is clearly needed
 - Fill candidate_connectors with exact names only when the connector is clearly relevant
+- Uploaded documents, local files, and workspace-only summaries remain connector-free unless the detailed context explicitly requires a connector.
 - Keep missing_capabilities accurate if no installed/custom option satisfies the need
 - Keep workflow_outline ordered and practical
 "#,
@@ -227,6 +234,11 @@ impl ConnectorResolver {
 
         let all_terms: Vec<&str> =
             sources.iter().chain(writes.iter()).chain(actions.iter()).map(String::as_str).collect();
+
+        if intent_prefers_local_document_workflow(intent) {
+            return (Vec::new(), Vec::new(), None);
+        }
+
         let candidate_connectors: Vec<String> = intent["candidate_connectors"]
             .as_array()
             .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
@@ -409,6 +421,80 @@ fn build_missing_connector_question(
     None
 }
 
+fn text_mentions_local_document_workflow(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    let has_document_terms =
+        ["document", "documents", "file", "files", "pdf", "csv", "spreadsheet", "attachment", "uploaded", "upload"]
+            .iter()
+            .any(|term| lower.contains(term));
+    let has_read_terms =
+        ["read", "review", "analyze", "analyse", "summarize", "summarise", "extract", "inspect", "highlight", "report"]
+            .iter()
+            .any(|term| lower.contains(term));
+    has_document_terms && has_read_terms
+}
+
+fn intent_prefers_local_document_workflow(intent: &serde_json::Value) -> bool {
+    let mut text = String::new();
+    for key in ["data_sources", "actions", "workflow_outline"] {
+        if let Some(values) = intent[key].as_array() {
+            for value in values {
+                if let Some(text_value) = value.as_str() {
+                    text.push_str(text_value);
+                    text.push(' ');
+                }
+            }
+        }
+    }
+    if let Some(output_hint) = intent["output_hint"].as_str() {
+        text.push_str(output_hint);
+        text.push(' ');
+    }
+
+    let write_targets_empty = intent["write_targets"].as_array().map(|arr| arr.is_empty()).unwrap_or(true);
+    let output_hint = intent["output_hint"].as_str().unwrap_or("").to_lowercase();
+    let local_output_hint = matches!(output_hint.as_str(), "" | "workspace" | "report") || output_hint.contains("chat");
+
+    write_targets_empty && local_output_hint && text_mentions_local_document_workflow(&text)
+}
+
+#[cfg(test)]
+fn text_prefers_local_document_workflow(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    text_mentions_local_document_workflow(&lower)
+        && (lower.contains("no external")
+            || lower.contains("never send")
+            || lower.contains("never sends")
+            || lower.contains("never write")
+            || lower.contains("never writes")
+            || lower.contains("read-only")
+            || lower.contains("read only"))
+}
+
+fn answer_declines_external_connector(answer_lower: &str) -> bool {
+    [
+        "none",
+        "no connector",
+        "no external connector",
+        "no external connectors",
+        "built-in",
+        "builtin",
+        "local",
+        "local only",
+        "read-only",
+        "read only",
+        "workspace",
+        "document",
+        "documents",
+        "file",
+        "files",
+        "uploaded file",
+        "uploaded documents",
+    ]
+    .iter()
+    .any(|phrase| answer_lower.contains(phrase))
+}
+
 /// Returns true if any intent term meaningfully matches the connector's name/summary.
 /// Uses proper tokenization (split on non-alphanumeric) rather than whitespace.
 fn terms_match_connector(all_terms: &[&str], tc: &TenantConnector) -> bool {
@@ -446,6 +532,7 @@ pub struct PlanModeManager {
     store: Arc<PostgresStore>,
     installs: Arc<ConnectorInstallStore>,
     tools: Arc<ToolRegistry>,
+    workspace_root: PathBuf,
     extractor: IntentExtractor,
     skill_registry: Option<Arc<tokio::sync::RwLock<crate::skills::registry::SkillRegistry>>>,
 }
@@ -456,9 +543,10 @@ impl PlanModeManager {
         store: Arc<PostgresStore>,
         installs: Arc<ConnectorInstallStore>,
         tools: Arc<ToolRegistry>,
+        workspace_root: impl Into<PathBuf>,
     ) -> Self {
         let extractor = IntentExtractor::new(Arc::clone(&gateway));
-        Self { gateway, store, installs, tools, extractor, skill_registry: None }
+        Self { gateway, store, installs, tools, workspace_root: workspace_root.into(), extractor, skill_registry: None }
     }
 
     pub fn with_skill_registry(
@@ -467,6 +555,10 @@ impl PlanModeManager {
     ) -> Self {
         self.skill_registry = Some(registry);
         self
+    }
+
+    pub fn workspace_root(&self) -> &Path {
+        &self.workspace_root
     }
 
     /// Build the clarification step queue for the given intent, store it in the
@@ -519,18 +611,149 @@ impl PlanModeManager {
             .map(|skill| skill.steps.iter().map(|s| s.description()).collect::<Vec<_>>().join("\n\n"))
     }
 
+    async fn superpowers_guidance_text(&self, phase: &PlanModePhase) -> Option<String> {
+        let names = superpowers_skill_names_for_phase(phase);
+        if names.is_empty() {
+            return None;
+        }
+
+        let reg = self.skill_registry.as_ref()?.read().await;
+        let mut sections = Vec::new();
+
+        for name in names {
+            if let Some(skill) = reg.get(name) {
+                let body =
+                    skill.steps.iter().map(|step| step.description().to_string()).collect::<Vec<_>>().join("\n- ");
+                sections.push(format!("{}:\n- {}", skill.name, body));
+            }
+        }
+
+        if sections.is_empty() {
+            None
+        } else {
+            Some(sections.join("\n\n"))
+        }
+    }
+
+    pub async fn test(&self, session: &PlanModeSession) -> Result<PlanModeTestResult> {
+        let mut role = match session.draft_role.as_ref() {
+            Some(role) => role.clone(),
+            None => {
+                return Ok(PlanModeTestResult {
+                    status: PlanModeTestStatus::Fail,
+                    confidence: PlanModeTestConfidence::Low,
+                    preflight: PlanModePreflightResult {
+                        status: PlanModeTestStatus::Fail,
+                        checks: vec![PlanModeTestCheck {
+                            label: "draft role exists".into(),
+                            success: false,
+                            detail: Some("no draft role is available for testing".into()),
+                        }],
+                        summary: "No draft role exists yet, so the workflow cannot be tested.".into(),
+                    },
+                    sandbox: PlanModeSandboxResult {
+                        status: PlanModeTestStatus::Fail,
+                        steps: Vec::new(),
+                        summary: "Sandbox skipped because the draft role is missing.".into(),
+                    },
+                    steps: Vec::new(),
+                    criteria_checks: vec![],
+                    summary: "No draft role exists yet, so the workflow cannot be tested.".into(),
+                });
+            }
+        };
+
+        if role.execution_guidelines.workflow_outline.is_empty() {
+            if let Some(intent) = session.intent_cache.as_ref() {
+                materialize_workflow_outline(&mut role, intent);
+            }
+        }
+
+        let workspace_root = session.session_workspace.as_ref().map(PathBuf::from).unwrap_or_else(|| {
+            plan_mode_workspace_root(&self.workspace_root, &session.tenant_id, &session.draft_agent.id)
+        });
+        tokio::fs::create_dir_all(workspace_root.join("files")).await?;
+        tokio::fs::create_dir_all(workspace_root.join("artifacts")).await?;
+        tokio::fs::create_dir_all(workspace_root.join("logs")).await?;
+        let sandbox_input_path = workspace_root.join("artifacts").join("sandbox_input.txt");
+        let sandbox_output_path = workspace_root.join("artifacts").join("sandbox_output.txt");
+        let _ = tokio::fs::write(
+            &sandbox_input_path,
+            b"Sandbox fixture input. This file exists so read-only steps can be exercised safely.",
+        )
+        .await;
+        let _ = tokio::fs::write(&sandbox_output_path, b"").await;
+
+        let synthetic_input = synthetic_input_data_for_role(&role, session, &workspace_root);
+        let plan = crate::agent::planner::Plan::from_workflow_outline(&role, &synthetic_input);
+
+        let preflight = self.preflight_workflow(&plan, &role).await;
+        let sandbox = if matches!(preflight.status, PlanModeTestStatus::Fail) {
+            PlanModeSandboxResult {
+                status: PlanModeTestStatus::Fail,
+                steps: Vec::new(),
+                summary: "Sandbox skipped because preflight failed.".into(),
+            }
+        } else {
+            self.run_sandbox(&plan, &role, &workspace_root).await
+        };
+
+        let status = combine_test_status(&preflight.status, &sandbox.status);
+        let confidence = match status {
+            PlanModeTestStatus::Pass => PlanModeTestConfidence::High,
+            PlanModeTestStatus::Partial => PlanModeTestConfidence::Partial,
+            PlanModeTestStatus::Fail => PlanModeTestConfidence::Low,
+        };
+
+        let mut criteria_checks = preflight.checks.clone();
+        criteria_checks.extend(sandbox.steps.iter().map(|step| PlanModeTestCheck {
+            label: format!("step {}: {}", step.step + 1, step.description),
+            success: step.success && !step.blocked,
+            detail: step.error.clone().or_else(|| Some(step.output.to_string())),
+        }));
+
+        let mut summary_parts = vec![preflight.summary.clone(), sandbox.summary.clone()];
+        if let Some(guidance) = self.superpowers_guidance_text(&PlanModePhase::Reviewing).await {
+            if !guidance.trim().is_empty() {
+                summary_parts.push(format!("Review guidance:\n{}", guidance));
+            }
+        }
+
+        Ok(PlanModeTestResult {
+            status,
+            confidence,
+            preflight,
+            sandbox: sandbox.clone(),
+            steps: sandbox.steps,
+            criteria_checks,
+            summary: summary_parts.join("\n\n"),
+        })
+    }
+
+    /// Feed a failing/partial test result back through plan mode so the LLM can repair the draft.
+    pub async fn revise_from_test_result(
+        &self,
+        mut session: PlanModeSession,
+        test_result: &PlanModeTestResult,
+    ) -> Result<(String, PlanModeSession)> {
+        session.phase = PlanModePhase::Reviewing;
+        let prompt = build_revision_prompt_from_test_result(test_result);
+        self.turn(session, &prompt).await
+    }
+
     /// Create a new plan mode session for a tenant.
     pub fn new_session(&self, tenant_id: &str, agent_name: &str) -> PlanModeSession {
         let session_id = Uuid::new_v4().to_string();
         let agent_id = Uuid::new_v4().to_string();
         let now = Utc::now();
-        let session_workspace = plan_mode_workspace_root(tenant_id, &session_id).display().to_string();
+        let session_workspace =
+            plan_mode_workspace_root(&self.workspace_root, tenant_id, &agent_id).display().to_string();
 
         let mut draft_agent = AgentDefinition::new(agent_id, tenant_id.to_string(), agent_name.to_string());
         draft_agent.memory_ref = format!("agent:{}", &draft_agent.id[..8]);
 
         PlanModeSession {
-            id: session_id,
+            id: session_id.clone(),
             tenant_id: tenant_id.to_string(),
             draft_agent,
             draft_role: None,
@@ -538,6 +761,10 @@ impl PlanModeManager {
             attachments: Vec::new(),
             attachment_context: String::new(),
             session_workspace: Some(session_workspace),
+            goal_fingerprint: None,
+            repair_version: 1,
+            reused_from_session_id: None,
+            repair_root_session_id: Some(session_id.clone()),
             phase: PlanModePhase::CapturingIntent,
             intent_cache: None,
             pending_steps: Vec::new(),
@@ -645,11 +872,9 @@ impl PlanModeManager {
     }
 
     async fn ensure_session_workspace(&self, session: &mut PlanModeSession) -> Result<PathBuf> {
-        let root = session
-            .session_workspace
-            .as_ref()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| plan_mode_workspace_root(&session.tenant_id, &session.id));
+        let root = session.session_workspace.as_ref().map(PathBuf::from).unwrap_or_else(|| {
+            plan_mode_workspace_root(&self.workspace_root, &session.tenant_id, &session.draft_agent.id)
+        });
 
         tokio::fs::create_dir_all(root.join("files")).await?;
         tokio::fs::create_dir_all(root.join("artifacts")).await?;
@@ -727,7 +952,13 @@ impl PlanModeManager {
             .collect();
 
         let user_description = description.trim().to_string();
-        let description = combine_user_message_with_attachment_context(description, &session.attachment_context);
+        let mut description = combine_user_message_with_attachment_context(description, &session.attachment_context);
+        if let Some(guidance) = self.superpowers_guidance_text(&PlanModePhase::CapturingIntent).await {
+            if !guidance.trim().is_empty() {
+                description.push_str("\n\nINTERNAL PLANNING GUIDANCE:\n");
+                description.push_str(&guidance);
+            }
+        }
 
         let tenant_connectors = self.store.list_tenant_connectors(&session.tenant_id).await.unwrap_or_default();
         let tenant_wasm_tools = self.store.list_tenant_wasm_tools(&session.tenant_id).await.unwrap_or_default();
@@ -757,7 +988,7 @@ impl PlanModeManager {
         let role_id = Uuid::new_v4().to_string();
         let mut role =
             AgentRole::new(role_id, session.draft_agent.id.clone(), session.tenant_id.clone(), "Primary Role".into());
-        role.purpose = user_description;
+        role.purpose = user_description.clone();
         role.role_category = RoleCategory::from_slug(intent["category"].as_str().unwrap_or("general"));
         apply_role_policy_defaults(&mut session.draft_agent, &mut role);
 
@@ -818,6 +1049,11 @@ impl PlanModeManager {
         role.trigger = parsed_trigger;
         role.trigger.confidence = confidence;
 
+        let goal_fingerprint = compute_plan_mode_goal_fingerprint(&user_description, &intent, &role);
+        session.goal_fingerprint = Some(goal_fingerprint.clone());
+        let reused_snapshot =
+            self.store.get_latest_plan_mode_session_by_goal_fingerprint(&session.tenant_id, &goal_fingerprint).await?;
+
         let pending_custom_tool_categories = missing_tool_categories(&intent)
             .into_iter()
             .filter(|category| !category.trim().is_empty())
@@ -825,7 +1061,7 @@ impl PlanModeManager {
         let custom_tool_resolution_pending =
             !pending_custom_tool_categories.is_empty() && inferred_wasm_candidates.is_empty();
 
-        session.draft_role = Some(role);
+        session.draft_role = Some(role.clone());
 
         // Cache the extracted intent — used throughout all subsequent phases
         let mut cached_intent = intent.clone();
@@ -841,6 +1077,54 @@ impl PlanModeManager {
             }
         }
         session.intent_cache = Some(cached_intent.clone());
+
+        if let Some(previous) = reused_snapshot {
+            if previous.id != session.id {
+                tracing::info!(
+                    agent_id = %session.draft_agent.id,
+                    goal_fingerprint = %goal_fingerprint,
+                    source_session = %previous.id,
+                    version = previous.repair_version + 1,
+                    "reusing prior repaired plan-mode snapshot for matching goal"
+                );
+
+                session.repair_version = previous.repair_version.saturating_add(1);
+                session.reused_from_session_id = Some(previous.id.clone());
+                session.repair_root_session_id =
+                    previous.repair_root_session_id.clone().or_else(|| Some(previous.id.clone()));
+
+                if let Some(mut previous_role) = previous.draft_role.clone() {
+                    previous_role.id = role.id.clone();
+                    previous_role.agent_id = session.draft_agent.id.clone();
+                    previous_role.tenant_id = session.tenant_id.clone();
+                    previous_role.status = RoleStatus::Draft;
+                    previous_role.version = previous_role.version.saturating_add(1);
+                    previous_role.created_at = Utc::now();
+                    previous_role.updated_at = Utc::now();
+                    role = previous_role;
+                    session.draft_agent.connectors = role.connectors.clone();
+                }
+
+                if !previous.attachment_context.trim().is_empty() {
+                    session.attachment_context = previous.attachment_context.clone();
+                }
+                if session.attachments.is_empty() && !previous.attachments.is_empty() {
+                    session.attachments = previous.attachments.clone();
+                }
+                if session.pending_steps.is_empty() && !previous.pending_steps.is_empty() {
+                    session.pending_steps = previous.pending_steps.clone();
+                }
+                if previous.intent_cache.is_some() {
+                    session.intent_cache = previous.intent_cache.clone();
+                    cached_intent = previous.intent_cache.clone().unwrap_or(cached_intent);
+                }
+                if phase_rank(&previous.phase) > phase_rank(&session.phase) {
+                    session.phase = phase_for_reuse(&previous.phase);
+                }
+            }
+        }
+
+        session.draft_role = Some(role);
 
         if clarifying_q.is_some() || custom_tool_resolution_pending {
             session.phase = PlanModePhase::ResolvingConnectors;
@@ -881,6 +1165,8 @@ Reply with one exact name: {}",
                 .map(|arr| arr.iter().filter_map(|value| value.as_str().map(String::from)).collect())
                 .unwrap_or_default();
         }
+        let local_document_workflow =
+            session.intent_cache.as_ref().map(intent_prefers_local_document_workflow).unwrap_or(false);
 
         if let Some(role) = session.draft_role.as_mut() {
             if !pending_custom_tool_categories.is_empty() {
@@ -939,37 +1225,52 @@ Please create and test one in plan mode settings, then reply 'done'."
                     .filter(|entry| contains_connector_name(&answer_lower, entry.name))
                     .collect();
 
-                if matched.len() > 1 {
-                    let choices = matched.iter().map(|entry| entry.name).collect::<Vec<_>>().join(", ");
-                    session.phase = PlanModePhase::ResolvingConnectors;
-                    return Ok(format!(
-                        "I found multiple connector names in your answer: {}. Please reply with one exact connector name.",
-                        choices
-                    ));
-                }
-
-                if let Some(entry) = matched.first().copied() {
-                    role.connectors.retain(|connector_name| {
-                        BUILTIN_CONNECTORS
-                            .iter()
-                            .find(|candidate| candidate.name == connector_name.as_str())
-                            .map(|candidate| candidate.category != entry.category)
-                            .unwrap_or(true)
-                    });
-                    role.connectors.push(entry.name.to_string());
-                    role.connectors.sort();
-                    role.connectors.dedup();
-                    session.draft_agent.connectors = role.connectors.clone();
+                if answer_declines_external_connector(&answer_lower) || (local_document_workflow && matched.is_empty())
+                {
                     if let Some(intent) = session.intent_cache.as_mut().and_then(|value| value.as_object_mut()) {
                         intent.remove("_pending_connector_resolution");
                     }
                     pending_connector_resolution = false;
-                } else {
-                    session.phase = PlanModePhase::ResolvingConnectors;
-                    return Ok(
-                        "Please reply with the exact connector name to use (for example: salesforce, hubspot, zendesk)."
-                            .into()
-                    );
+                }
+
+                if pending_connector_resolution {
+                    if matched.len() > 1 {
+                        let choices = matched.iter().map(|entry| entry.name).collect::<Vec<_>>().join(", ");
+                        session.phase = PlanModePhase::ResolvingConnectors;
+                        return Ok(format!(
+                            "I found multiple connector names in your answer: {}. Please reply with one exact connector name.",
+                            choices
+                        ));
+                    }
+
+                    if let Some(entry) = matched.first().copied() {
+                        role.connectors.retain(|connector_name| {
+                            BUILTIN_CONNECTORS
+                                .iter()
+                                .find(|candidate| candidate.name == connector_name.as_str())
+                                .map(|candidate| candidate.category != entry.category)
+                                .unwrap_or(true)
+                        });
+                        role.connectors.push(entry.name.to_string());
+                        role.connectors.sort();
+                        role.connectors.dedup();
+                        session.draft_agent.connectors = role.connectors.clone();
+                        if let Some(intent) = session.intent_cache.as_mut().and_then(|value| value.as_object_mut()) {
+                            intent.remove("_pending_connector_resolution");
+                        }
+                        pending_connector_resolution = false;
+                    } else if local_document_workflow {
+                        if let Some(intent) = session.intent_cache.as_mut().and_then(|value| value.as_object_mut()) {
+                            intent.remove("_pending_connector_resolution");
+                        }
+                        pending_connector_resolution = false;
+                    } else {
+                        session.phase = PlanModePhase::ResolvingConnectors;
+                        return Ok(
+                            "Please reply with the exact connector name to use (for example: salesforce, hubspot, zendesk)."
+                                .into()
+                        );
+                    }
                 }
             }
         }
@@ -1057,12 +1358,12 @@ Please create and test one in plan mode settings, then reply 'done'."
             }
 
             session.phase = PlanModePhase::Reviewing;
-            return Ok(format!("✓ {}\n\n{}", summary, self.build_review_summary(session)));
+            return Ok(format!("✓ {}\n\n{}", summary, self.build_review_summary(session).await));
         }
 
         // pending_steps was already empty — go straight to review
         session.phase = PlanModePhase::Reviewing;
-        Ok(self.build_review_summary(session))
+        Ok(self.build_review_summary(session).await)
     }
     async fn handle_constraints(&self, session: &mut PlanModeSession, answer: &str) -> Result<String> {
         let lower = answer.to_lowercase();
@@ -1094,20 +1395,26 @@ Please create and test one in plan mode settings, then reply 'done'."
         }
 
         session.phase = PlanModePhase::Reviewing;
-        Ok(self.build_review_summary(session))
+        Ok(self.build_review_summary(session).await)
     }
 
     /// Public wrapper for build_review_summary — used by the template fast-path in routes.rs
-    pub fn build_review_summary_pub(&self, session: &PlanModeSession) -> String {
-        self.build_review_summary(session)
+    pub async fn build_review_summary_pub(&self, session: &PlanModeSession) -> String {
+        self.build_review_summary(session).await
     }
 
-    fn build_review_summary(&self, session: &PlanModeSession) -> String {
+    async fn build_review_summary(&self, session: &PlanModeSession) -> String {
         let agent = &session.draft_agent;
-        let role = match session.draft_role.as_ref() {
-            Some(r) => r,
+        let mut preview_role = match session.draft_role.as_ref() {
+            Some(r) => r.clone(),
             None => return "Configuration incomplete — no role defined.".into(),
         };
+        if preview_role.execution_guidelines.workflow_outline.is_empty() {
+            if let Some(intent) = session.intent_cache.as_ref() {
+                materialize_workflow_outline(&mut preview_role, intent);
+            }
+        }
+        let role = &preview_role;
 
         let trigger_desc = match &role.trigger.trigger_type {
             TriggerType::Webhook => format!(
@@ -1191,6 +1498,13 @@ Please create and test one in plan mode settings, then reply 'done'."
             }
         };
 
+        let review_focus = if self.superpowers_guidance_text(&PlanModePhase::Reviewing).await.is_some() {
+            "\n**Review checklist:** validate the workflow outline, run the sandbox test, then save only if the result is clear."
+                .to_string()
+        } else {
+            String::new()
+        };
+
         format!(
             "Here's what I've configured:\n\n\
             **Agent:** {name}\n\
@@ -1199,7 +1513,7 @@ Please create and test one in plan mode settings, then reply 'done'."
             **Connectors:** {connectors}{tools}\n\
             **Output:** {output}\n\
             **Uploaded docs:** {attachments}\n\
-            **Constraints:** {constraints}{services}\n\n\
+            **Constraints:** {constraints}{services}{review_focus}\n\n\
             Does this look right? Say **yes** to save, or tell me what to change.",
             name = agent.name,
             purpose = role.purpose,
@@ -1210,17 +1524,12 @@ Please create and test one in plan mode settings, then reply 'done'."
             attachments = attachments,
             constraints = constraints,
             services = services_line,
+            review_focus = review_focus,
         )
     }
 
     async fn handle_review(&self, session: &mut PlanModeSession, answer: &str) -> Result<String> {
-        let lower = answer.to_lowercase();
-        if lower.contains("yes")
-            || lower.contains("save")
-            || lower.contains("looks good")
-            || lower.contains("correct")
-            || lower.contains("confirmed")
-        {
+        if is_explicit_review_confirmation(answer) {
             session.phase = PlanModePhase::Complete;
             return Ok("✓ Agent saved. You can find it in your agent list. \
                        Add more roles anytime from the agent settings page."
@@ -1282,6 +1591,256 @@ Please create and test one in plan mode settings, then reply 'done'."
 
         Ok((agent, role))
     }
+
+    async fn preflight_workflow(
+        &self,
+        plan: &crate::agent::planner::Plan,
+        role: &AgentRole,
+    ) -> PlanModePreflightResult {
+        let mut checks = Vec::new();
+        if plan.steps.is_empty() {
+            return PlanModePreflightResult {
+                status: PlanModeTestStatus::Fail,
+                checks: vec![PlanModeTestCheck {
+                    label: "workflow outline".into(),
+                    success: false,
+                    detail: Some("workflow_outline is empty".into()),
+                }],
+                summary: "No workflow outline was drafted, so there is nothing to preflight.".into(),
+            };
+        }
+
+        let mut has_failure = false;
+        let mut has_partial = false;
+
+        for step in &plan.steps {
+            let label = format!("step {}: {}", step.index + 1, step.description);
+            match step.tool.as_deref() {
+                None => {
+                    has_partial = true;
+                    checks.push(PlanModeTestCheck {
+                        label,
+                        success: true,
+                        detail: Some("no tool specified; conceptual step only".into()),
+                    });
+                }
+                Some(tool_name) => {
+                    let Some(tool) = self.tools.get(tool_name) else {
+                        has_failure = true;
+                        checks.push(PlanModeTestCheck {
+                            label,
+                            success: false,
+                            detail: Some(format!("tool '{}' not found", tool_name)),
+                        });
+                        continue;
+                    };
+
+                    let mut args = step.tool_args.clone().unwrap_or_else(|| serde_json::json!({}));
+                    materialize_validation_tool_args(tool_name, &mut args, &self.workspace_root);
+                    if value_contains_placeholder(&args) {
+                        has_failure = true;
+                        checks.push(PlanModeTestCheck {
+                            label,
+                            success: false,
+                            detail: Some("args still contain unresolved placeholders".into()),
+                        });
+                        continue;
+                    }
+
+                    let schema = tool.parameters_schema();
+                    let missing = missing_required_args_for_schema(&args, &schema);
+                    if !missing.is_empty() {
+                        has_failure = true;
+                        checks.push(PlanModeTestCheck {
+                            label,
+                            success: false,
+                            detail: Some(format!("missing required args: {}", missing.join(", "))),
+                        });
+                        continue;
+                    }
+
+                    match sandbox_tool_policy(tool_name, &args) {
+                        SandboxPolicy::Block(reason) => {
+                            has_partial = true;
+                            checks.push(PlanModeTestCheck { label, success: true, detail: Some(reason) });
+                        }
+                        SandboxPolicy::NoOp(reason) => {
+                            has_partial = true;
+                            checks.push(PlanModeTestCheck { label, success: true, detail: Some(reason) });
+                        }
+                        SandboxPolicy::Allow => {
+                            checks.push(PlanModeTestCheck {
+                                label,
+                                success: true,
+                                detail: Some("preflight checks passed".into()),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        let status = if has_failure {
+            PlanModeTestStatus::Fail
+        } else if has_partial {
+            PlanModeTestStatus::Partial
+        } else {
+            PlanModeTestStatus::Pass
+        };
+
+        let summary = match status {
+            PlanModeTestStatus::Pass => format!("Preflight passed for {} step(s).", checks.len()),
+            PlanModeTestStatus::Partial => format!("Preflight completed with {} warning(s).", checks.len()),
+            PlanModeTestStatus::Fail => "Preflight failed; fix the draft before relying on the sandbox.".into(),
+        };
+
+        let _ = role; // role-specific checks can expand here without changing the API.
+
+        PlanModePreflightResult { status, checks, summary }
+    }
+
+    async fn run_sandbox(
+        &self,
+        plan: &crate::agent::planner::Plan,
+        role: &AgentRole,
+        workspace_root: &Path,
+    ) -> PlanModeSandboxResult {
+        let mut steps = Vec::new();
+        let mut has_failure = false;
+        let mut has_partial = false;
+
+        for step in &plan.steps {
+            let result = self.run_sandbox_step(step, role, workspace_root).await;
+            if result.blocked {
+                has_partial = true;
+            }
+            if !result.success && !result.blocked {
+                has_failure = true;
+            }
+            steps.push(result);
+        }
+
+        let status = if has_failure {
+            PlanModeTestStatus::Fail
+        } else if has_partial {
+            PlanModeTestStatus::Partial
+        } else {
+            PlanModeTestStatus::Pass
+        };
+
+        let summary = match status {
+            PlanModeTestStatus::Pass => format!("Sandbox executed {} step(s) successfully.", steps.len()),
+            PlanModeTestStatus::Partial => format!("Sandbox executed {} step(s) with safety no-ops.", steps.len()),
+            PlanModeTestStatus::Fail => "Sandbox encountered at least one hard failure.".into(),
+        };
+
+        PlanModeSandboxResult { status, steps, summary }
+    }
+
+    async fn run_sandbox_step(
+        &self,
+        step: &crate::agent::planner::PlannedStep,
+        role: &AgentRole,
+        workspace_root: &Path,
+    ) -> PlanModeTestStepResult {
+        let label = step.description.clone();
+        let Some(tool_name) = step.tool.as_deref() else {
+            return PlanModeTestStepResult {
+                step: step.index,
+                description: label,
+                tool: None,
+                success: true,
+                output: serde_json::json!({
+                    "mode": "no_op",
+                    "reason": "no tool specified for this step",
+                }),
+                error: None,
+                blocked: false,
+            };
+        };
+
+        let mut args = step.tool_args.clone().unwrap_or_else(|| serde_json::json!({}));
+        materialize_validation_tool_args(tool_name, &mut args, workspace_root);
+        match sandbox_tool_policy(tool_name, &args) {
+            SandboxPolicy::NoOp(reason) => {
+                return PlanModeTestStepResult {
+                    step: step.index,
+                    description: label,
+                    tool: Some(tool_name.to_string()),
+                    success: true,
+                    output: serde_json::json!({
+                        "mode": "log_only",
+                        "reason": reason,
+                    }),
+                    error: None,
+                    blocked: true,
+                };
+            }
+            SandboxPolicy::Block(reason) => {
+                return PlanModeTestStepResult {
+                    step: step.index,
+                    description: label,
+                    tool: Some(tool_name.to_string()),
+                    success: true,
+                    output: serde_json::json!({
+                        "mode": "blocked",
+                        "reason": reason,
+                    }),
+                    error: None,
+                    blocked: true,
+                };
+            }
+            SandboxPolicy::Allow => {}
+        }
+
+        let Some(tool) = self.tools.get(tool_name) else {
+            return PlanModeTestStepResult {
+                step: step.index,
+                description: label,
+                tool: Some(tool_name.to_string()),
+                success: false,
+                output: serde_json::Value::Null,
+                error: Some(format!("tool '{}' is not available", tool_name)),
+                blocked: false,
+            };
+        };
+
+        let mut resolved_args = step.tool_args.clone().unwrap_or_else(|| serde_json::json!({}));
+        normalize_sandbox_tool_args(tool_name, &mut resolved_args, workspace_root, role);
+
+        if value_contains_placeholder(&resolved_args) {
+            return PlanModeTestStepResult {
+                step: step.index,
+                description: label,
+                tool: Some(tool_name.to_string()),
+                success: false,
+                output: serde_json::Value::Null,
+                error: Some("unresolved placeholders remain after sandbox rendering".into()),
+                blocked: false,
+            };
+        }
+
+        match tool.execute(resolved_args).await {
+            Ok(result) => PlanModeTestStepResult {
+                step: step.index,
+                description: label,
+                tool: Some(tool_name.to_string()),
+                success: result.success,
+                output: result.output,
+                error: result.error,
+                blocked: false,
+            },
+            Err(error) => PlanModeTestStepResult {
+                step: step.index,
+                description: label,
+                tool: Some(tool_name.to_string()),
+                success: false,
+                output: serde_json::Value::Null,
+                error: Some(error.to_string()),
+                blocked: false,
+            },
+        }
+    }
 }
 
 // ── Free helper functions ───────────────────────────────────────────────────
@@ -1298,8 +1857,414 @@ fn apply_role_policy_defaults(agent: &mut AgentDefinition, role: &mut AgentRole)
     }
 }
 
-fn plan_mode_workspace_root(tenant_id: &str, session_id: &str) -> PathBuf {
-    std::env::temp_dir().join("narayan-plan-mode").join(tenant_id).join(session_id)
+fn plan_mode_workspace_root(workspace_root: &Path, tenant_id: &str, agent_id: &str) -> PathBuf {
+    workspace_root.join(tenant_id).join("agents").join(agent_id)
+}
+
+#[derive(Debug, Clone)]
+enum SandboxPolicy {
+    Allow,
+    NoOp(String),
+    Block(String),
+}
+
+fn superpowers_skill_names_for_phase(phase: &PlanModePhase) -> &'static [&'static str] {
+    match phase {
+        PlanModePhase::CapturingIntent => &["brainstorming"],
+        PlanModePhase::CapturingClarifications => &["writing-plans"],
+        PlanModePhase::Reviewing => &["verification-before-completion", "receiving-code-review"],
+        _ => &[],
+    }
+}
+
+fn combine_test_status(preflight: &PlanModeTestStatus, sandbox: &PlanModeTestStatus) -> PlanModeTestStatus {
+    if matches!(preflight, PlanModeTestStatus::Fail) || matches!(sandbox, PlanModeTestStatus::Fail) {
+        PlanModeTestStatus::Fail
+    } else if matches!(preflight, PlanModeTestStatus::Partial) || matches!(sandbox, PlanModeTestStatus::Partial) {
+        PlanModeTestStatus::Partial
+    } else {
+        PlanModeTestStatus::Pass
+    }
+}
+
+fn materialize_workflow_outline(role: &mut AgentRole, intent: &serde_json::Value) {
+    if role.execution_guidelines.workflow_outline.is_empty() {
+        enrich_workflow_outline(role, intent);
+    }
+}
+
+fn materialize_validation_tool_args(tool_name: &str, args: &mut serde_json::Value, workspace_root: &Path) {
+    let Some(object) = args.as_object_mut() else {
+        return;
+    };
+
+    let input_file = workspace_root.join("artifacts").join("sandbox_input.txt").display().to_string();
+    let output_file = workspace_root.join("artifacts").join("sandbox_output.txt").display().to_string();
+    let workspace_dir = workspace_root.display().to_string();
+    let workspace_files = workspace_root.join("files").display().to_string();
+
+    let set_if_missing =
+        |object: &mut serde_json::Map<String, serde_json::Value>, key: &str, value: serde_json::Value| {
+            let missing = match object.get(key) {
+                None | Some(serde_json::Value::Null) => true,
+                Some(serde_json::Value::String(text)) => text.trim().is_empty(),
+                Some(serde_json::Value::Array(items)) => items.is_empty(),
+                _ => false,
+            };
+            if missing {
+                object.insert(key.to_string(), value);
+            }
+        };
+
+    match tool_name {
+        "file_read" | "pdf_read" | "spreadsheet_read" => {
+            set_if_missing(object, "path", serde_json::json!(input_file));
+        }
+        "file_write" | "pdf_create" | "browser_pdf" | "screenshot" => {
+            set_if_missing(object, "path", serde_json::json!(output_file));
+        }
+        "content_search" => {
+            set_if_missing(object, "path", serde_json::json!(workspace_dir));
+        }
+        "glob_search" => {
+            set_if_missing(object, "root", serde_json::json!(workspace_dir));
+        }
+        "data_extractor" => {
+            set_if_missing(
+                object,
+                "content",
+                serde_json::json!("Sandbox document content. Key points: summarize uploaded documents, highlight action items, and surface risks."),
+            );
+        }
+        _ => {}
+    }
+
+    if object.get("path").is_none() && object.get("root").is_none() && tool_name == "content_search" {
+        object.insert("path".into(), serde_json::json!(workspace_files));
+    }
+}
+
+pub(crate) fn build_revision_prompt_from_test_result(test_result: &PlanModeTestResult) -> String {
+    let rendered = serde_json::to_string_pretty(test_result).unwrap_or_else(|_| test_result.summary.clone());
+    format!(
+        "The deterministic plan test failed or only partially passed.\n\
+Please repair the current draft using the structured test result below.\n\
+Keep the workflow deterministic and only change what is needed so the plan will pass the next test run.\n\n\
+TEST RESULT:\n{}\n",
+        rendered
+    )
+}
+
+fn is_explicit_review_confirmation(answer: &str) -> bool {
+    let normalized = answer.trim().to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "y" | "yes"
+            | "save"
+            | "save it"
+            | "save now"
+            | "confirm"
+            | "confirmed"
+            | "approve"
+            | "approved"
+            | "ok"
+            | "okay"
+            | "looks good"
+            | "looks good to me"
+    )
+}
+
+fn synthetic_input_data_for_role(
+    role: &AgentRole,
+    session: &PlanModeSession,
+    workspace_root: &Path,
+) -> serde_json::Value {
+    let mut values = serde_json::Map::new();
+    let input_fixture = workspace_root.join("artifacts").join("sandbox_input.txt").display().to_string();
+    let output_fixture = workspace_root.join("artifacts").join("sandbox_output.txt").display().to_string();
+
+    values.insert("file_path".into(), serde_json::json!(input_fixture));
+    values.insert(
+        "path".into(),
+        serde_json::json!(workspace_root.join("artifacts").join("sandbox_input.txt").display().to_string()),
+    );
+    values.insert("output_path".into(), serde_json::json!(output_fixture));
+    values.insert("output".into(), serde_json::json!(output_fixture));
+    values.insert(
+        "content".into(),
+        serde_json::json!("Sandbox document content. Key points: summarize uploaded documents, highlight action items, and surface risks."),
+    );
+    values.insert("code".into(), serde_json::json!("print('sandbox ok')"));
+    values.insert("key".into(), serde_json::json!("sandbox-key"));
+    values.insert("value".into(), serde_json::json!("sandbox value"));
+    values.insert("sub_goal_1".into(), serde_json::json!("Read the uploaded document"));
+    values.insert("sub_goal_2".into(), serde_json::json!("Summarize key points and risks"));
+    values.insert("selector".into(), serde_json::json!(".content"));
+    values.insert("attribute".into(), serde_json::json!("href"));
+    values.insert("pattern".into(), serde_json::json!(".*"));
+    values.insert("url".into(), serde_json::json!("https://example.com"));
+    values.insert("topic".into(), serde_json::json!("sandbox test"));
+    values.insert("query".into(), serde_json::json!("sandbox test query"));
+    values.insert("message".into(), serde_json::json!("sandbox message"));
+    values.insert("body".into(), serde_json::json!("sandbox message body"));
+    values.insert("subject".into(), serde_json::json!("sandbox test subject"));
+    values.insert("recipient".into(), serde_json::json!("test@example.com"));
+    values.insert("input".into(), serde_json::json!({ "file_path": input_fixture, "output_path": output_fixture }));
+    values.insert("workspace".into(), serde_json::json!(workspace_root.display().to_string()));
+
+    if let Some(intent) = session.intent_cache.as_ref().and_then(|value| value.as_object()) {
+        for (key, value) in intent {
+            values.entry(key.clone()).or_insert_with(|| value.clone());
+        }
+    }
+
+    for step in &role.execution_guidelines.workflow_outline {
+        if let Some(template) = &step.args_template {
+            collect_template_placeholders(template, &mut values, workspace_root);
+        }
+    }
+
+    serde_json::Value::Object(values)
+}
+
+fn collect_template_placeholders(
+    template: &serde_json::Value,
+    values: &mut serde_json::Map<String, serde_json::Value>,
+    workspace_root: &Path,
+) {
+    match template {
+        serde_json::Value::String(text) => {
+            for key in extract_input_placeholders(text) {
+                values.entry(key.clone()).or_insert_with(|| synthetic_placeholder_value(&key, workspace_root));
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_template_placeholders(item, values, workspace_root);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for value in map.values() {
+                collect_template_placeholders(value, values, workspace_root);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn extract_input_placeholders(text: &str) -> Vec<String> {
+    let mut keys = Vec::new();
+    let mut search_from = 0usize;
+    while let Some(start_rel) = text[search_from..].find("{input.") {
+        let start = search_from + start_rel + 7;
+        let Some(end_rel) = text[start..].find('}') else {
+            break;
+        };
+        let key = text[start..start + end_rel].trim();
+        if !key.is_empty() {
+            keys.push(key.to_string());
+        }
+        search_from = start + end_rel + 1;
+    }
+    keys
+}
+
+fn synthetic_placeholder_value(key: &str, workspace_root: &Path) -> serde_json::Value {
+    let lower = key.to_ascii_lowercase();
+    if lower.contains("file") || lower.contains("path") {
+        return serde_json::json!(workspace_root.join("artifacts").join("sandbox_input.txt").display().to_string());
+    }
+    if lower.contains("url") {
+        return serde_json::json!("https://example.com");
+    }
+    if lower.contains("email") || lower.contains("recipient") {
+        return serde_json::json!("test@example.com");
+    }
+    if lower.contains("subject") {
+        return serde_json::json!("sandbox test subject");
+    }
+    if lower.contains("body") || lower.contains("message") {
+        return serde_json::json!("sandbox message body");
+    }
+    if lower.contains("query") || lower.contains("topic") {
+        return serde_json::json!("sandbox test query");
+    }
+    serde_json::json!(format!("sandbox_{}", key.replace(|ch: char| !ch.is_ascii_alphanumeric(), "_")))
+}
+
+fn value_contains_placeholder(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::String(text) => {
+            let lower = text.to_ascii_lowercase();
+            lower.contains("{input.") || lower.contains("{{result_of_step_") || lower.contains("replace_me")
+        }
+        serde_json::Value::Array(items) => items.iter().any(value_contains_placeholder),
+        serde_json::Value::Object(map) => map.values().any(value_contains_placeholder),
+        _ => false,
+    }
+}
+
+fn missing_required_args_for_schema(args: &serde_json::Value, schema: &[crate::tools::ParameterSchema]) -> Vec<String> {
+    let Some(object) = args.as_object() else {
+        return schema
+            .iter()
+            .filter(|parameter| parameter.required)
+            .filter(|parameter| !is_runtime_injected_schema_field(&parameter.name))
+            .map(|parameter| parameter.name.clone())
+            .collect();
+    };
+
+    schema
+        .iter()
+        .filter(|parameter| parameter.required)
+        .filter(|parameter| !is_runtime_injected_schema_field(&parameter.name))
+        .filter(|parameter| match object.get(&parameter.name) {
+            None | Some(serde_json::Value::Null) => true,
+            Some(serde_json::Value::String(text)) => text.trim().is_empty(),
+            Some(serde_json::Value::Array(items)) => items.is_empty(),
+            _ => false,
+        })
+        .map(|parameter| parameter.name.clone())
+        .collect()
+}
+
+fn is_runtime_injected_schema_field(name: &str) -> bool {
+    matches!(name, "tenant_id" | "agent_id" | "parent_agent_id" | "role_id" | "goal_instance_id")
+}
+
+fn normalize_sandbox_tool_args(tool_name: &str, args: &mut serde_json::Value, workspace_root: &Path, role: &AgentRole) {
+    let Some(object) = args.as_object_mut() else {
+        return;
+    };
+
+    let absolutize_key = |object: &mut serde_json::Map<String, serde_json::Value>, key: &str| {
+        if let Some(path) = object.get(key).and_then(|value| value.as_str()) {
+            let resolved = if Path::new(path).is_absolute() {
+                path.to_string()
+            } else {
+                workspace_root.join(path).display().to_string()
+            };
+            object.insert(key.to_string(), serde_json::Value::String(resolved));
+        }
+    };
+
+    match tool_name {
+        "file_read" | "file_write" | "file_edit" | "pdf_read" | "decompress" | "pdf_create" => {
+            absolutize_key(object, "path");
+        }
+        "spreadsheet_read" | "spreadsheet_write" => {
+            absolutize_key(object, "path");
+        }
+        "web_fetch" | "web_search_tool" => {}
+        "http_request" | "api_call" => {
+            if let Some(method) = object.get("method").and_then(|value| value.as_str()) {
+                object.insert("method".into(), serde_json::Value::String(method.to_ascii_uppercase()));
+            }
+        }
+        "external_db" | "external_api" => {
+            object.entry("tenant_id").or_insert_with(|| serde_json::json!(role.tenant_id));
+        }
+        "run_registered_wasm" => {
+            object.entry("workspace").or_insert_with(|| serde_json::json!(workspace_root.display().to_string()));
+            object.entry("agent_id").or_insert_with(|| serde_json::json!(role.agent_id));
+        }
+        _ => {
+            absolutize_key(object, "path");
+        }
+    }
+}
+
+fn sandbox_tool_policy(tool_name: &str, args: &serde_json::Value) -> SandboxPolicy {
+    let lower = tool_name.to_ascii_lowercase();
+    match lower.as_str() {
+        "email" | "notification" | "pushover" => {
+            SandboxPolicy::NoOp("outbound communication is log-only in sandbox".into())
+        }
+        "ask_user" => SandboxPolicy::NoOp("interactive step logged only in sandbox".into()),
+        "file_read" | "pdf_read" | "spreadsheet_read" | "data_extractor" | "content_search" | "glob_search"
+        | "memory_recall" | "vector_search" | "web_search_tool" | "web_fetch" | "browser_pdf" | "browser_open" => {
+            SandboxPolicy::Allow
+        }
+        "external_db" | "external_api" => {
+            if tool_args_is_read_only(args) {
+                SandboxPolicy::Allow
+            } else {
+                SandboxPolicy::Block("database and API writes are blocked in sandbox".into())
+            }
+        }
+        "http_request" | "api_call" => {
+            if tool_args_is_read_only(args) {
+                SandboxPolicy::Allow
+            } else {
+                SandboxPolicy::Block("HTTP writes are blocked in sandbox".into())
+            }
+        }
+        "file_write"
+        | "file_edit"
+        | "pdf_create"
+        | "decompress"
+        | "create_workspace_tool"
+        | "run_registered_wasm"
+        | "delegate"
+        | "git_operations"
+        | "sql_query" => {
+            if lower == "sql_query" && tool_args_is_read_only(args) {
+                SandboxPolicy::Allow
+            } else {
+                SandboxPolicy::Block("write or destructive actions are blocked in sandbox".into())
+            }
+        }
+        _ => {
+            if tool_args_is_read_only(args) {
+                SandboxPolicy::Allow
+            } else {
+                SandboxPolicy::Block("unclassified tool is blocked in sandbox by default".into())
+            }
+        }
+    }
+}
+
+fn tool_args_is_read_only(args: &serde_json::Value) -> bool {
+    if let Some(method) = args.get("method").and_then(|value| value.as_str()) {
+        return matches!(method.to_ascii_uppercase().as_str(), "GET" | "HEAD" | "OPTIONS");
+    }
+
+    if let Some(operation) = args.get("operation").and_then(|value| value.as_str()) {
+        let lower = operation.to_ascii_lowercase();
+        return matches!(
+            lower.as_str(),
+            "read"
+                | "get"
+                | "list"
+                | "query"
+                | "fetch"
+                | "schema"
+                | "inspect"
+                | "search"
+                | "preview"
+                | "describe"
+                | "status"
+                | "read_only"
+        );
+    }
+
+    if let Some(query) = args.get("query").and_then(|value| value.as_str()) {
+        let lower = query.to_ascii_lowercase();
+        if lower.contains("insert")
+            || lower.contains("update")
+            || lower.contains("delete")
+            || lower.contains("drop")
+            || lower.contains("alter")
+            || lower.contains("create ")
+            || lower.contains("truncate")
+            || lower.contains("replace")
+        {
+            return false;
+        }
+        return true;
+    }
+
+    true
 }
 
 fn combine_user_message_with_attachment_context(message: &str, attachment_context: &str) -> String {
@@ -1760,8 +2725,77 @@ fn enrich_workflow_outline(role: &mut AgentRole, intent: &serde_json::Value) {
             description: hint,
             tool,
             args_template,
+            success_criteria: String::new(),
             condition: None,
         });
+    }
+}
+
+fn compute_plan_mode_goal_fingerprint(description: &str, intent: &serde_json::Value, role: &AgentRole) -> String {
+    let payload = serde_json::json!({
+        "goal": normalize_fingerprint_text(description),
+        "category": normalize_fingerprint_text(intent["category"].as_str().unwrap_or("general")),
+        "trigger_hint": normalize_fingerprint_text(intent["trigger_hint"].as_str().unwrap_or("manual")),
+        "output_hint": normalize_fingerprint_text(intent["output_hint"].as_str().unwrap_or("workspace")),
+        "actions": normalize_fingerprint_strings(
+            intent["actions"]
+                .as_array()
+                .map(|arr| arr.iter().filter_map(|value| value.as_str().map(normalize_fingerprint_text)).collect::<Vec<_>>())
+                .unwrap_or_default(),
+        ),
+        "workflow_outline": role
+            .execution_guidelines
+            .workflow_outline
+            .iter()
+            .map(|step| serde_json::json!({
+                "description": normalize_fingerprint_text(&step.description),
+                "tool": step.tool.as_deref().map(normalize_fingerprint_text),
+                "args_template": step.args_template.as_ref().map(|value| normalize_fingerprint_text(&serde_json::to_string(value).unwrap_or_default())),
+                "success_criteria": normalize_fingerprint_text(&step.success_criteria),
+                "condition": step.condition.as_ref().map(|value| normalize_fingerprint_text(&serde_json::to_string(value).unwrap_or_default())),
+            }))
+            .collect::<Vec<_>>(),
+        "connectors": normalize_fingerprint_strings(role.connectors.clone()),
+        "tools": normalize_fingerprint_strings(role.tools.clone()),
+    });
+
+    let digest = Sha256::digest(serde_json::to_vec(&payload).unwrap_or_default());
+    format!("pmg_{}", hex::encode(digest))
+}
+
+fn normalize_fingerprint_text(value: &str) -> String {
+    value
+        .split_whitespace()
+        .map(|part| part.trim_matches(|ch: char| !ch.is_alphanumeric() && ch != '_'))
+        .filter(|part| !part.is_empty())
+        .map(|part| part.to_ascii_lowercase())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn normalize_fingerprint_strings(values: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> =
+        values.into_iter().map(|value| normalize_fingerprint_text(&value)).filter(|value| !value.is_empty()).collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn phase_rank(phase: &PlanModePhase) -> u8 {
+    match phase {
+        PlanModePhase::CapturingIntent => 0,
+        PlanModePhase::ResolvingConnectors => 1,
+        PlanModePhase::CapturingClarifications => 2,
+        PlanModePhase::CapturingConstraints => 3,
+        PlanModePhase::Reviewing => 4,
+        PlanModePhase::Complete => 5,
+    }
+}
+
+fn phase_for_reuse(phase: &PlanModePhase) -> PlanModePhase {
+    match phase {
+        PlanModePhase::Complete => PlanModePhase::Reviewing,
+        other => other.clone(),
     }
 }
 
@@ -1792,7 +2826,28 @@ fn resolve_tool_for_hint(
         }
     }
 
-    // 3. Keyword-based tool matching
+    // 3. Keep summary-style document review steps conceptual so the model can
+    // summarize the content rather than forcing a brittle extraction tool.
+    if lower.contains("key points")
+        || lower.contains("action items")
+        || lower.contains("risks")
+        || lower.contains("main points")
+        || lower.contains("summary")
+        || lower.contains("summarize")
+    {
+        return (None, None);
+    }
+
+    if (lower.contains("read") || lower.contains("load") || lower.contains("open") || lower.contains("inspect"))
+        && (lower.contains("uploaded")
+            || lower.contains("attachment")
+            || lower.contains("document")
+            || lower.contains("file"))
+    {
+        return (Some("file_read".into()), Some(serde_json::json!({ "path": "{input.file_path}" })));
+    }
+
+    // 4. Keyword-based tool matching
     let tool_keywords: &[(&[&str], &str, Option<serde_json::Value>)] = &[
         (
             &["search", "find news", "look up", "research", "latest"],
@@ -1829,20 +2884,39 @@ fn resolve_tool_for_hint(
         (
             &["run code", "execute", "script", "calculate"],
             "code_run",
-            Some(serde_json::json!({ "language": "python" })),
+            Some(serde_json::json!({ "language": "python", "code": "{input.code}" })),
         ),
-        (&["extract", "parse", "pull data"], "data_extractor", None),
         (&["read pdf", "pdf"], "pdf_read", Some(serde_json::json!({ "path": "{input.file_path}" }))),
-        (&["create pdf", "generate pdf"], "pdf_create", None),
-        (&["spreadsheet", "csv", "excel"], "spreadsheet_read", None),
-        (&["remember", "store memory", "save context"], "memory_store", None),
-        (&["recall", "retrieve memory", "past context"], "memory_recall", None),
+        (
+            &["create pdf", "generate pdf"],
+            "pdf_create",
+            Some(serde_json::json!({ "content": "{input.content}", "path": "{input.output_path}" })),
+        ),
+        (
+            &["spreadsheet", "csv", "excel"],
+            "spreadsheet_read",
+            Some(serde_json::json!({ "path": "{input.file_path}" })),
+        ),
+        (
+            &["remember", "store memory", "save context"],
+            "memory_store",
+            Some(serde_json::json!({ "key": "{input.key}", "value": "{input.value}" })),
+        ),
+        (
+            &["recall", "retrieve memory", "past context"],
+            "memory_recall",
+            Some(serde_json::json!({ "key": "{input.key}" })),
+        ),
         (
             &["vector search", "similar", "semantic search"],
             "vector_search",
             Some(serde_json::json!({ "query": "{input.query}" })),
         ),
-        (&["delegate", "spawn", "paralleli"], "delegate", None),
+        (
+            &["delegate", "spawn", "paralleli"],
+            "delegate",
+            Some(serde_json::json!({ "sub_goals": ["{input.sub_goal_1}", "{input.sub_goal_2}"] })),
+        ),
         (&["api call", "http request", "rest api"], "http_request", None),
     ];
 
@@ -1852,8 +2926,50 @@ fn resolve_tool_for_hint(
         }
     }
 
-    // 4. No tool match — pure LLM reasoning step
+    if lower.contains("extract") || lower.contains("parse") || lower.contains("pull data") {
+        if let Some(args) = resolve_data_extractor_args(&lower) {
+            return (Some("data_extractor".into()), Some(args));
+        }
+    }
+
+    // 5. No tool match — pure LLM reasoning step
     (None, None)
+}
+
+fn resolve_data_extractor_args(lower: &str) -> Option<serde_json::Value> {
+    let extract = if lower.contains("email") || lower.contains("emails") {
+        Some("emails")
+    } else if lower.contains("url") || lower.contains("urls") {
+        Some("urls")
+    } else if lower.contains("link") || lower.contains("links") {
+        Some("links")
+    } else if lower.contains("price") || lower.contains("cost") || lower.contains("amount") {
+        Some("prices")
+    } else if lower.contains("phone") || lower.contains("phones") {
+        Some("phones")
+    } else if lower.contains("table") || lower.contains("tables") || lower.contains("row") || lower.contains("csv") {
+        Some("tables")
+    } else if lower.contains("selector") || lower.contains("css") {
+        Some("selector")
+    } else if lower.contains("regex") || lower.contains("pattern") {
+        Some("regex")
+    } else {
+        None
+    }?;
+
+    let mut args = serde_json::json!({
+        "content": "{input.content}",
+        "extract": extract,
+    });
+    if extract == "selector" {
+        args["selector"] = serde_json::json!("{input.selector}");
+        args["attribute"] = serde_json::json!("{input.attribute}");
+    }
+    if extract == "regex" {
+        args["pattern"] = serde_json::json!("{input.pattern}");
+    }
+
+    Some(args)
 }
 
 /// Infer the connector operation from a workflow hint.
@@ -2311,6 +3427,26 @@ fn active_services_for_category(category: &str) -> Vec<&'static str> {
 mod tests {
     use super::*;
     use crate::agent::definition::ConnectorAuthType;
+    use std::{
+        env,
+        path::PathBuf,
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
+
+    use anyhow::{Context, Result};
+    use async_trait::async_trait;
+    use serde::{Deserialize, Serialize};
+    use tokio::{sync::RwLock, time::sleep};
+
+    use crate::{
+        connectors::ConnectorInstallStore,
+        gateway::{GatewayRequest, LlmGateway},
+        providers::{build_provider, ChatResponse, Message, Provider, ToolSpec},
+        skills::registry::SkillRegistry,
+        storage::PostgresStore,
+        tools::default_registry,
+    };
 
     #[test]
     fn test_connector_resolver_matches_salesforce() {
@@ -2411,6 +3547,21 @@ mod tests {
     }
 
     #[test]
+    fn test_connector_resolver_skips_connector_clarification_for_local_document_workflow() {
+        let intent = serde_json::json!({
+            "data_sources": ["uploaded documents", "local files"],
+            "write_targets": [],
+            "actions": ["read uploaded documents", "summarize main points", "highlight action items"],
+            "output_hint": "report",
+        });
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (resolved, tools, clarifying) = rt.block_on(ConnectorResolver::resolve(&intent, &[], &[]));
+        assert!(resolved.is_empty());
+        assert!(tools.is_empty());
+        assert!(clarifying.is_none(), "local document workflows should not ask for connectors");
+    }
+
+    #[test]
     fn test_attachment_context_combines_message_and_documents() {
         let message = "Analyze these files.";
         let context = "Attachment: report.pdf (pdf, 1200 bytes)\n{\"text\":\"hello\"}";
@@ -2432,6 +3583,83 @@ mod tests {
         assert_eq!(sheet, crate::agent::definition::PlanModeAttachmentKind::Spreadsheet);
         assert_eq!(csv, crate::agent::definition::PlanModeAttachmentKind::Csv);
         assert_eq!(text, crate::agent::definition::PlanModeAttachmentKind::Text);
+    }
+
+    #[test]
+    fn test_goal_fingerprint_is_stable_for_normalized_goal_text() {
+        let intent = serde_json::json!({
+            "category": "general",
+            "trigger_hint": "manual",
+            "output_hint": "workspace",
+            "actions": ["collect inputs", "draft summary"],
+        });
+
+        let mut role = AgentRole::new("role-1".into(), "agent-1".into(), "tenant-1".into(), "Primary".into());
+        role.execution_guidelines.workflow_outline = vec![crate::agent::definition::WorkflowStep {
+            description: "Collect inputs".into(),
+            tool: Some("file_read".into()),
+            args_template: None,
+            success_criteria: "inputs collected".into(),
+            condition: None,
+        }];
+
+        let fp_a = compute_plan_mode_goal_fingerprint("   Draft   a summary  ", &intent, &role);
+        let fp_b = compute_plan_mode_goal_fingerprint("draft a summary", &intent, &role);
+        assert_eq!(fp_a, fp_b);
+    }
+
+    #[test]
+    fn test_phase_for_reuse_caps_completed_sessions_at_reviewing() {
+        assert_eq!(phase_for_reuse(&PlanModePhase::Complete), PlanModePhase::Reviewing);
+        assert_eq!(phase_for_reuse(&PlanModePhase::Reviewing), PlanModePhase::Reviewing);
+    }
+
+    #[test]
+    fn test_resolve_tool_for_hint_reads_uploaded_document_with_file_read() {
+        let (tool, args) = resolve_tool_for_hint("Agent reads the uploaded file", &[], &[]);
+        assert_eq!(tool.as_deref(), Some("file_read"));
+        assert_eq!(args.unwrap()["path"], serde_json::json!("{input.file_path}"));
+    }
+
+    #[test]
+    fn test_resolve_tool_for_hint_keeps_summary_extraction_conceptual() {
+        let (tool, args) = resolve_tool_for_hint("Agent extracts key points, action items, and risks", &[], &[]);
+        assert!(tool.is_none());
+        assert!(args.is_none());
+    }
+
+    #[test]
+    fn test_resolve_tool_for_hint_builds_data_extractor_args_for_emails() {
+        let (tool, args) = resolve_tool_for_hint("Extract emails from the HTML", &[], &[]);
+        assert_eq!(tool.as_deref(), Some("data_extractor"));
+        let args = args.expect("expected args for data_extractor");
+        assert_eq!(args["content"], serde_json::json!("{input.content}"));
+        assert_eq!(args["extract"], serde_json::json!("emails"));
+    }
+
+    #[test]
+    fn test_materialize_validation_tool_args_fills_missing_file_read_path() {
+        let tmp = std::env::temp_dir().join("narayan-plan-mode-test");
+        let mut args = serde_json::json!({});
+        materialize_validation_tool_args("file_read", &mut args, &tmp);
+        assert_eq!(
+            args["path"],
+            serde_json::json!(tmp.join("artifacts").join("sandbox_input.txt").display().to_string())
+        );
+    }
+
+    #[test]
+    fn test_missing_required_args_ignores_runtime_injected_fields() {
+        let args = serde_json::json!({ "content": "hello" });
+        let schema = vec![
+            crate::tools::ParameterSchema::required("content", "string", "Content"),
+            crate::tools::ParameterSchema::required("tenant_id", "string", "Tenant ID"),
+            crate::tools::ParameterSchema::required("agent_id", "string", "Agent ID"),
+            crate::tools::ParameterSchema::required("parent_agent_id", "string", "Parent agent"),
+        ];
+
+        let missing = missing_required_args_for_schema(&args, &schema);
+        assert!(missing.is_empty(), "runtime injected fields should be ignored in preflight");
     }
 
     #[test]
@@ -2505,7 +3733,7 @@ mod tests {
         role.execution_guidelines.add_rule(crate::agent::definition::GuidelineRule::always(
             "Prefer connectors from these categories when relevant: crm.",
         ));
-        role.execution_guidelines.add_priority("step: old sequencing".into());
+        role.execution_guidelines.add_priority("step: old sequencing");
 
         let intent = serde_json::json!({
             "preferred_tool_categories": ["data", "web"],

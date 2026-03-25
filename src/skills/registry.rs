@@ -217,6 +217,23 @@ mod tests {
         assert_eq!(plan.steps[0].description, "build");
         assert_eq!(plan.steps[2].description, "push");
     }
+
+    #[test]
+    fn test_curated_superpowers_skills_resolve_by_name_and_alias() {
+        let reg = SkillRegistry::with_curated_defaults();
+
+        let brainstorming = reg.get("brainstorming").expect("brainstorming skill should exist");
+        assert_eq!(brainstorming.name, "brainstorming");
+
+        let planning = reg
+            .find_matching("let's brainstorm the plan before we code")
+            .expect("alias match should find brainstorming");
+        assert_eq!(planning.name, "brainstorming");
+
+        let writing =
+            reg.find_matching("write a detailed plan for the workflow").expect("alias match should find writing-plans");
+        assert_eq!(writing.name, "writing-plans");
+    }
 }
 
 fn curated_skills() -> Vec<Skill> {
@@ -377,6 +394,125 @@ fn curated_skills() -> Vec<Skill> {
         // intent category matches. Each skill encodes the mandatory questions to ask
         // for that domain AND the execution brief that goes into the role's guidelines.
 
+        Skill::structured(
+            "brainstorming",
+            "Clarify the goal, surface unknowns, and shape the workflow before planning.",
+            vec![
+                SkillStepDefinition {
+                    description: "Restate the user's goal in plain language and list the unknowns that still matter.".into(),
+                    tool: None,
+                    tool_args: None,
+                    success_criteria: "The goal is clear enough to scope the plan.".into(),
+                },
+                SkillStepDefinition {
+                    description: "Identify constraints, risks, and missing inputs that affect the plan.".into(),
+                    tool: None,
+                    tool_args: None,
+                    success_criteria: "The main unknowns are visible before the plan is drafted.".into(),
+                },
+                SkillStepDefinition {
+                    description: "Shape a practical workflow outline from the user's intent.".into(),
+                    tool: None,
+                    tool_args: None,
+                    success_criteria: "A concrete workflow outline can be drafted.".into(),
+                },
+            ],
+        )
+        .with_aliases(vec!["brainstorm", "ideation", "goal framing"]),
+        Skill::structured(
+            "writing-plans",
+            "Turn the workflow into a deterministic execution outline with typed steps.",
+            vec![
+                SkillStepDefinition {
+                    description: "Convert the workflow into ordered steps with tools, args, conditions, and success criteria.".into(),
+                    tool: None,
+                    tool_args: None,
+                    success_criteria: "Each step is deterministic and testable.".into(),
+                },
+                SkillStepDefinition {
+                    description: "Prefer the smallest viable step that can be executed safely and independently.".into(),
+                    tool: None,
+                    tool_args: None,
+                    success_criteria: "The outline stays concrete instead of becoming generic prose.".into(),
+                },
+                SkillStepDefinition {
+                    description: "Make the plan ready for preflight validation and sandbox execution.".into(),
+                    tool: None,
+                    tool_args: None,
+                    success_criteria: "The output can be executed without another planner pass.".into(),
+                },
+            ],
+        )
+        .with_aliases(vec!["plan writing", "draft plan", "write plans"]),
+        Skill::structured(
+            "verification-before-completion",
+            "Validate the drafted plan before save and look for missing safety checks.",
+            vec![
+                SkillStepDefinition {
+                    description: "Verify the workflow outline has the right tools, arguments, and safety boundaries.".into(),
+                    tool: None,
+                    tool_args: None,
+                    success_criteria: "The draft is structurally sound before completion.".into(),
+                },
+                SkillStepDefinition {
+                    description: "Run the quick preflight checks before the deeper sandbox test.".into(),
+                    tool: None,
+                    tool_args: None,
+                    success_criteria: "The plan is checked before any save decision.".into(),
+                },
+                SkillStepDefinition {
+                    description: "Summarize the remaining risks clearly so the user can make an informed save decision.".into(),
+                    tool: None,
+                    tool_args: None,
+                    success_criteria: "The user sees a clear pass, partial, or fail signal.".into(),
+                },
+            ],
+        )
+        .with_aliases(vec!["verification", "pre-save verification", "completion check"]),
+        Skill::structured(
+            "receiving-code-review",
+            "Treat feedback as review input and revise the draft precisely.",
+            vec![
+                SkillStepDefinition {
+                    description: "Read the critique as concrete change requests rather than general commentary.".into(),
+                    tool: None,
+                    tool_args: None,
+                    success_criteria: "The feedback is translated into specific edits.".into(),
+                },
+                SkillStepDefinition {
+                    description: "Revise only the affected parts of the draft and keep the rest stable.".into(),
+                    tool: None,
+                    tool_args: None,
+                    success_criteria: "The plan changes are narrow and traceable.".into(),
+                },
+                SkillStepDefinition {
+                    description: "Re-run the review mindset after revision so the draft is ready to save.".into(),
+                    tool: None,
+                    tool_args: None,
+                    success_criteria: "The revised draft is ready for another approval check.".into(),
+                },
+            ],
+        )
+        .with_aliases(vec!["code review", "review feedback", "receiving review"]),
+        Skill::structured(
+            "using-git-worktrees",
+            "Keep isolated workspaces when multiple plan branches or test runs are needed.",
+            vec![
+                SkillStepDefinition {
+                    description: "Use isolated worktrees or separate workspaces for independent attempts.".into(),
+                    tool: None,
+                    tool_args: None,
+                    success_criteria: "Each branch of work stays isolated.".into(),
+                },
+                SkillStepDefinition {
+                    description: "Keep the main draft untouched while testing alternatives.".into(),
+                    tool: None,
+                    tool_args: None,
+                    success_criteria: "The primary plan remains stable while experiments happen elsewhere.".into(),
+                },
+            ],
+        )
+        .with_aliases(vec!["git worktrees", "isolated worktree", "worktree workflow"]),
         Skill::new(
             "planmode:customer_support",
             "Domain configuration for customer support agents.",

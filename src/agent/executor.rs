@@ -1677,6 +1677,12 @@ impl Executor for LlmExecutor {
                 if needs_tenant {
                     if let Some(obj) = tool_call.arguments.as_object_mut() {
                         obj.entry("tenant_id").or_insert_with(|| serde_json::json!(state.tenant_id));
+                        obj.entry("step_index").or_insert_with(|| serde_json::json!(step.index));
+                        if let Some(goal_instance_id) =
+                            state.metadata.get("goal_instance_id").and_then(|value| value.as_str())
+                        {
+                            obj.entry("goal_instance_id").or_insert_with(|| serde_json::json!(goal_instance_id));
+                        }
                     }
                 }
 

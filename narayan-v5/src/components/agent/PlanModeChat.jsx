@@ -72,6 +72,109 @@ function attachmentPrompt(attachments) {
   return `Please analyze the attached file${attachments.length === 1 ? '' : 's'}${names ? `: ${names}` : ''}.`;
 }
 
+function testStatusTone(status) {
+  if (status === 'pass') return 'bg-ok-soft text-ok border-ok/20';
+  if (status === 'partial') return 'bg-amber-500/10 text-amber-600 border-amber-500/20';
+  return 'bg-err-soft text-err border-err/20';
+}
+
+function confidenceTone(confidence) {
+  if (confidence === 'high') return 'text-ok';
+  if (confidence === 'partial') return 'text-amber-600';
+  return 'text-err';
+}
+
+function TestResultPanel({ result, onRevise, revising = false }) {
+  if (!result) {
+    return (
+      <div className="rounded-xl border border-dashed border-border bg-bg px-3 py-3 text-xs text-tx-3">
+        Run the deterministic test to validate the workflow outline before saving.
+      </div>
+    );
+  }
+
+  const preflightChecks = result.preflight?.checks || [];
+  const sandboxSteps = result.sandbox?.steps || [];
+  const statusLabel = String(result.status || 'partial').replace('_', ' ');
+  const confidenceLabel = String(result.confidence || 'partial').replace('_', ' ');
+
+  return (
+    <div className="rounded-xl border border-border bg-bg px-3 py-3 text-xs text-tx-2 space-y-3">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <span className={clsx('inline-flex items-center rounded-full border px-2 py-0.5 font-medium capitalize', testStatusTone(result.status))}>
+            {statusLabel}
+          </span>
+          <span className={clsx('font-medium capitalize', confidenceTone(result.confidence))}>
+            {confidenceLabel} confidence
+          </span>
+        </div>
+      </div>
+
+      {result.summary ? <p className="text-[11px] leading-relaxed text-tx-3 whitespace-pre-wrap">{result.summary}</p> : null}
+
+      {preflightChecks.length > 0 && (
+        <div className="space-y-1">
+          <p className="text-[10px] font-semibold uppercase tracking-wide text-tx-4">Preflight</p>
+          <div className="space-y-1">
+            {preflightChecks.slice(0, 4).map((check, idx) => (
+              <div key={`${check.label}-${idx}`} className="flex items-start gap-2">
+                <span className={clsx('mt-1 size-1.5 rounded-full shrink-0', check.success ? 'bg-ok' : 'bg-err')} />
+                <div className="min-w-0">
+                  <p className="text-[11px] text-tx-2">{check.label}</p>
+                  {check.detail ? <p className="text-[10px] text-tx-4 whitespace-pre-wrap">{check.detail}</p> : null}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {sandboxSteps.length > 0 && (
+        <div className="space-y-1">
+          <p className="text-[10px] font-semibold uppercase tracking-wide text-tx-4">Sandbox</p>
+          <div className="space-y-1">
+            {sandboxSteps.slice(0, 4).map((step, idx) => (
+              <div key={`${step.step}-${idx}`} className="flex items-start gap-2">
+                <span className={clsx('mt-1 size-1.5 rounded-full shrink-0', step.success && !step.blocked ? 'bg-ok' : step.blocked ? 'bg-amber-500' : 'bg-err')} />
+                <div className="min-w-0">
+                  <p className="text-[11px] text-tx-2">
+                    Step {step.step + 1}: {step.description}
+                  </p>
+                  {step.error ? (
+                    <p className="text-[10px] text-err whitespace-pre-wrap">{step.error}</p>
+                  ) : step.output ? (
+                    <p className="text-[10px] text-tx-4 whitespace-pre-wrap break-words">{JSON.stringify(step.output)}</p>
+                  ) : null}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {result.status !== 'pass' && (
+        <div className="flex items-center justify-between gap-2 pt-1">
+          <p className="text-[10px] text-tx-4">
+            {result.status === 'partial'
+              ? 'Partial results can usually be repaired and retested.'
+              : 'This draft should be revised before saving.'}
+          </p>
+          <button
+            type="button"
+            onClick={onRevise}
+            disabled={!onRevise || revising}
+            className="btn-secondary flex items-center gap-2 disabled:opacity-50"
+          >
+            {revising ? <Loader2 size={13} className="animate-spin" /> : <Sparkles size={13} />}
+            {revising ? 'Revising…' : 'Revise plan'}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Phase progress strip ───────────────────────────────────────────────────
 function PhaseStrip({ phase }) {
   const current = PHASE_ORDER.indexOf(phase);
@@ -339,6 +442,9 @@ export default function PlanModeChat({ agentName = 'New Agent', existingAgentId 
   const [sending,    setSending]    = useState(false);
   const [complete,   setComplete]   = useState(false);
   const [saving,     setSaving]     = useState(false);
+  const [testing,    setTesting]    = useState(false);
+  const [revising,   setRevising]   = useState(false);
+  const [testResult, setTestResult]  = useState(null);
   const [error,      setError]      = useState('');
   const [pendingAttachments, setPendingAttachments] = useState([]);
   const [attachmentsBusy, setAttachmentsBusy] = useState(false);
@@ -375,6 +481,7 @@ export default function PlanModeChat({ agentName = 'New Agent', existingAgentId 
       setSessionId(res.session_id);
       setMessages([{ role: 'assistant', content: res.message || 'What should this agent do?', isNew: true }]);
       setPhase(res.phase || 'capturing_intent');
+      setTestResult(null);
       setSelectedTemplate(template);
       setStep('chat');
     } catch (e) {
@@ -459,6 +566,7 @@ export default function PlanModeChat({ agentName = 'New Agent', existingAgentId 
       setPhase(newPhase);
       setMessages(prev => [...prev, { role: 'assistant', content: res.reply, isNew: true }]);
       setPendingAttachments([]);
+      setTestResult(null);
 
       if (res.complete || newPhase === 'complete') {
         setComplete(true);
@@ -473,17 +581,62 @@ export default function PlanModeChat({ agentName = 'New Agent', existingAgentId 
   }, [sessionId, sending, phase, pendingAttachments, attachmentsBusy]);
 
   // ── Save and deploy ────────────────────────────────────────────────────
+  const runTest = useCallback(async () => {
+    if (!sessionId || testing) return;
+    setTesting(true);
+    setError('');
+    try {
+      const res = await planModeApi.test(sessionId);
+      setTestResult(res);
+    } catch (e) {
+      setError(e.message || 'Failed to run test');
+    } finally {
+      setTesting(false);
+    }
+  }, [sessionId, testing]);
+
+  const handleRevise = useCallback(async () => {
+    if (!sessionId || revising || !testResult || testResult.status === 'pass') return;
+    setRevising(true);
+    setError('');
+    setMessages(prev => [...prev, {
+      role: 'user',
+      content: 'Please revise the draft using the latest test result and keep the workflow deterministic.',
+      isNew: true,
+    }]);
+    try {
+      const res = await planModeApi.revise(sessionId, testResult);
+      const newPhase = res.phase || phase;
+      setPhase(newPhase);
+      setMessages(prev => [...prev, { role: 'assistant', content: res.reply, isNew: true }]);
+      setTestResult(null);
+      setComplete(newPhase === 'complete');
+    } catch (e) {
+      setError(e.message || 'Failed to revise plan');
+      setMessages(prev => prev.slice(0, -1));
+    } finally {
+      setRevising(false);
+    }
+  }, [sessionId, revising, testResult, phase]);
+
   const handleSave = useCallback(async () => {
     if (!sessionId) return;
+    const status = testResult?.status;
+    if (!status || status !== 'pass') {
+      const label = status ? `The test result is "${status}".` : 'This plan has not been tested yet.';
+      const proceed = window.confirm(`${label}\n\nSave anyway?`);
+      if (!proceed) return;
+    }
     setSaving(true); setError('');
     try {
       const res = await planModeApi.save(sessionId);
       onComplete?.({ agentId: res.agent_id, roleId: res.role_id });
     } catch (e) {
       setError(e.message || 'Failed to save agent');
+    } finally {
       setSaving(false);
     }
-  }, [sessionId, onComplete]);
+  }, [sessionId, onComplete, testResult]);
 
   // ── Keyboard submit ────────────────────────────────────────────────────
   function onKeyDown(e) {
@@ -598,21 +751,34 @@ export default function PlanModeChat({ agentName = 'New Agent', existingAgentId 
             <div className="shrink-0 border-t border-border bg-bg-card px-4 py-3">
               {complete ? (
                 // Phase complete — show save button
-                <div className="flex items-center gap-3">
-                  <div className="flex-1 flex items-center gap-2 text-sm text-ok">
-                    <CheckCircle2 size={15} />
-                    <span>Plan confirmed — ready to save</span>
+                <div className="space-y-3">
+                  <div className="flex items-center gap-3">
+                    <div className="flex-1 flex items-center gap-2 text-sm text-ok">
+                      <CheckCircle2 size={15} />
+                      <span>Plan confirmed — ready to test and save</span>
+                    </div>
+                    <button
+                      onClick={runTest}
+                      disabled={testing || saving}
+                      className="btn-secondary flex items-center gap-2 disabled:opacity-50"
+                    >
+                      {testing
+                        ? <Loader2 size={14} className="animate-spin" />
+                        : <Zap size={14} />}
+                      {testing ? 'Testing…' : testResult ? 'Re-run test' : 'Run test'}
+                    </button>
+                    <button
+                      onClick={handleSave}
+                      disabled={saving || testing}
+                      className="btn-primary flex items-center gap-2 disabled:opacity-50"
+                    >
+                      {saving
+                        ? <Loader2 size={14} className="animate-spin" />
+                        : <ArrowRight size={14} />}
+                      {saving ? 'Saving…' : isAddingRole ? 'Add role' : 'Create agent'}
+                    </button>
                   </div>
-                  <button
-                    onClick={handleSave}
-                    disabled={saving}
-                    className="btn-primary flex items-center gap-2 disabled:opacity-50"
-                  >
-                    {saving
-                      ? <Loader2 size={14} className="animate-spin" />
-                      : <ArrowRight size={14} />}
-                    {saving ? 'Saving…' : isAddingRole ? 'Add role' : 'Create agent'}
-                  </button>
+                  <TestResultPanel result={testResult} onRevise={handleRevise} revising={revising} />
                 </div>
               ) : (
                 // Chat input

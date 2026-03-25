@@ -14,6 +14,7 @@ use sqlx::Row;
 
 use crate::{
     agent::AgentManager,
+    agent::PlanModeTestResult,
     auth::{hash_password, issue_token, verify_password},
     gateway::{cost::AgentUsage, CostTracker},
     metrics::Metrics,
@@ -1518,9 +1519,12 @@ pub async fn replay_agent(
         Ok(Some(agent)) => {
             let recording: Vec<serde_json::Value> =
                 agent.metadata.get("debug_recording").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+            let judgements: Vec<serde_json::Value> =
+                agent.metadata.get("judgement_signals").and_then(|v| v.as_array()).cloned().unwrap_or_default();
             Json(serde_json::json!({
                 "agent_id": agent_id,
                 "steps":    recording,
+                "judgements": judgements,
                 "count":    recording.len(),
             }))
             .into_response()
@@ -3236,7 +3240,7 @@ pub async fn start_plan_mode_session(
             } else {
                 // Nothing to ask — jump straight to review
                 session.phase = crate::agent::definition::PlanModePhase::Reviewing;
-                manager.build_review_summary_pub(&session)
+                manager.build_review_summary_pub(&session).await
             }
         } else {
             "Template not found — let's set this up from scratch. What should this agent do?".into()
@@ -3263,6 +3267,10 @@ pub async fn start_plan_mode_session(
             "message":     first_message,
             "from_template": body["template_id"].as_str().is_some(),
             "attachments": session.attachments.len(),
+            "goal_fingerprint": session.goal_fingerprint,
+            "repair_version": session.repair_version,
+            "reused_from_session_id": session.reused_from_session_id,
+            "repair_root_session_id": session.repair_root_session_id,
         }))
         .into_response(),
         (Err(e), _) | (_, Err(e)) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
@@ -3406,9 +3414,32 @@ pub async fn plan_mode_turn(
                 "agent_id": agent_id,
                 "complete": updated_session.phase == crate::agent::definition::PlanModePhase::Complete,
                 "attachments": updated_session.attachments.len(),
+                "goal_fingerprint": updated_session.goal_fingerprint,
+                "repair_version": updated_session.repair_version,
+                "reused_from_session_id": updated_session.reused_from_session_id,
+                "repair_root_session_id": updated_session.repair_root_session_id,
             }))
             .into_response()
         }
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+/// POST /plan-mode/sessions/:session_id/test — deterministic workflow validation
+pub async fn test_plan_mode_session(
+    State(state): State<AppState>,
+    tenant: AuthenticatedTenant,
+    Path(session_id): Path<String>,
+) -> impl IntoResponse {
+    let session = match state.store.get_plan_mode_session(&tenant.tenant_id, &session_id).await {
+        Ok(Some(s)) => s,
+        Ok(None) => return err(StatusCode::NOT_FOUND, "plan mode session not found"),
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    };
+
+    let manager = build_plan_mode_manager(&state);
+    match manager.test(&session).await {
+        Ok(result) => Json::<PlanModeTestResult>(result).into_response(),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
@@ -3432,15 +3463,23 @@ pub async fn save_plan_mode_session(
     }
 
     let manager = build_plan_mode_manager(&state);
-    match manager.save(session).await {
+    let mut completed_session = session.clone();
+    completed_session.phase = crate::agent::definition::PlanModePhase::Complete;
+    completed_session.updated_at = chrono::Utc::now();
+
+    match manager.save(completed_session.clone()).await {
         Ok((agent, role)) => {
-            // Clean up the session row — it's no longer needed
-            let _ = state.store.delete_plan_mode_session(&tenant.tenant_id, &session_id).await;
+            // Preserve the completed session row so the repaired snapshot can be reused later.
+            let _ = state.store.upsert_plan_mode_session(&completed_session).await;
 
             Json(serde_json::json!({
                 "agent_id": agent.id,
                 "role_id":  role.id,
                 "status":   "deployed",
+                "goal_fingerprint": completed_session.goal_fingerprint,
+                "repair_version": completed_session.repair_version,
+                "reused_from_session_id": completed_session.reused_from_session_id,
+                "repair_root_session_id": completed_session.repair_root_session_id,
             }))
             .into_response()
         }
@@ -3456,6 +3495,7 @@ fn build_plan_mode_manager(state: &AppState) -> crate::agent::PlanModeManager {
         Arc::clone(&state.store),
         Arc::clone(&state.connector_installs),
         Arc::new(crate::tools::default_registry()),
+        state.manager.workspace_root(),
     )
     .with_skill_registry(Arc::clone(&state.skill_registry))
 }
@@ -3464,6 +3504,51 @@ fn plan_mode_attachments_from_body(body: &serde_json::Value) -> Vec<crate::agent
     body.get("attachments")
         .and_then(|value| serde_json::from_value::<Vec<crate::agent::PlanModeAttachmentUpload>>(value.clone()).ok())
         .unwrap_or_default()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RevisePlanModeSessionRequest {
+    pub test_result: PlanModeTestResult,
+}
+
+/// POST /plan-mode/sessions/:session_id/revise — feed a failed/partial test result back into plan mode
+pub async fn revise_plan_mode_session(
+    State(state): State<AppState>,
+    tenant: AuthenticatedTenant,
+    Path(session_id): Path<String>,
+    Json(body): Json<RevisePlanModeSessionRequest>,
+) -> impl IntoResponse {
+    let session = match state.store.get_plan_mode_session(&tenant.tenant_id, &session_id).await {
+        Ok(Some(s)) => s,
+        Ok(None) => return err(StatusCode::NOT_FOUND, "plan mode session not found"),
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    };
+
+    if session.draft_role.is_none() {
+        return err(StatusCode::BAD_REQUEST, "session has no draft role — complete the conversation first");
+    }
+
+    let manager = build_plan_mode_manager(&state);
+    match manager.revise_from_test_result(session, &body.test_result).await {
+        Ok((reply, updated_session)) => {
+            let _ = state.store.upsert_agent_definition(&updated_session.draft_agent).await;
+            let _ = state.store.upsert_plan_mode_session(&updated_session).await;
+
+            Json(serde_json::json!({
+                "reply":    reply,
+                "phase":    serde_json::to_value(&updated_session.phase).unwrap_or_default(),
+                "agent_id": updated_session.draft_agent.id,
+                "complete": updated_session.phase == crate::agent::definition::PlanModePhase::Complete,
+                "attachments": updated_session.attachments.len(),
+                "goal_fingerprint": updated_session.goal_fingerprint,
+                "repair_version": updated_session.repair_version,
+                "reused_from_session_id": updated_session.reused_from_session_id,
+                "repair_root_session_id": updated_session.repair_root_session_id,
+            }))
+            .into_response()
+        }
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
 }
 
 #[cfg(test)]

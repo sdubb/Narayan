@@ -5,7 +5,10 @@ use crate::{
     compliance::sla::{EscalationAction, EscalationRule, SlaPolicy, SlaPriority},
     connectors::github::GitHubConnector,
     policy::rules::{PolicyAction, PolicyCondition, PolicyRule, PolicyRuleSet},
-    segments::registry::{SegmentPlugin, SegmentServices, SharedDeps},
+    segments::{
+        registry::{SegmentPlugin, SegmentServices, SharedDeps},
+        DomainProfile,
+    },
 };
 use std::sync::Arc;
 
@@ -39,6 +42,7 @@ pub fn plugin(deps: &SharedDeps, tenant_id: &str) -> SegmentPlugin {
     SegmentPlugin {
         id: "engineering",
         name: "Engineering Maintenance",
+        domain: DomainProfile::engineering(),
         connectors: vec![Arc::new(GitHubConnector::new())],
         services: SegmentServices {
             policy: Some(deps.policy_engine.clone()),

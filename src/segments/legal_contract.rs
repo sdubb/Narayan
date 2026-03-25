@@ -5,7 +5,10 @@ use crate::{
     compliance::sla::{EscalationAction, EscalationRule, SlaPolicy, SlaPriority},
     connectors::docusign::DocuSignConnector,
     policy::rules::{PolicyAction, PolicyCondition, PolicyRule, PolicyRuleSet},
-    segments::registry::{SegmentPlugin, SegmentServices, SharedDeps},
+    segments::{
+        registry::{SegmentPlugin, SegmentServices, SharedDeps},
+        DomainProfile,
+    },
 };
 use std::sync::Arc;
 
@@ -51,6 +54,7 @@ pub fn plugin(deps: &SharedDeps, tenant_id: &str) -> SegmentPlugin {
     SegmentPlugin {
         id: "legal_contract",
         name: "Legal & Contract Ops",
+        domain: DomainProfile::legal_contract(),
         connectors: vec![Arc::new(DocuSignConnector::new())],
         services: SegmentServices {
             policy: Some(deps.policy_engine.clone()),

@@ -27,8 +27,31 @@ pub struct Worker {
     event_bus: Arc<EventBus>,
 }
 
-fn should_retry_task(task: &Task) -> bool {
-    task.attempt < 3
+fn is_retryable_worker_error(error: &anyhow::Error) -> bool {
+    let mut text = error.to_string().to_ascii_lowercase();
+    for cause in error.chain() {
+        let cause_text = cause.to_string().to_ascii_lowercase();
+        if !text.contains(&cause_text) {
+            text.push(' ');
+            text.push_str(&cause_text);
+        }
+    }
+
+    text.contains("rate limit")
+        || text.contains("too many requests")
+        || text.contains("timeout")
+        || text.contains("timed out")
+        || text.contains("temporarily unavailable")
+        || text.contains("service unavailable")
+        || text.contains("connection reset")
+        || text.contains("broken pipe")
+        || text.contains("503")
+        || text.contains("502")
+        || text.contains("504")
+}
+
+fn should_retry_task(task: &Task, error: &anyhow::Error) -> bool {
+    task.attempt < 3 && is_retryable_worker_error(error)
 }
 
 impl Worker {
@@ -69,7 +92,7 @@ impl Worker {
                     attempt  = task.attempt,
                     "task failed"
                 );
-                if should_retry_task(&task) {
+                if should_retry_task(&task, e) {
                     self.queue.retry(Task { attempt: task.attempt + 1, ..task.clone() }).await?;
                 } else {
                     self.queue.ack(&task).await?;
@@ -96,10 +119,29 @@ impl Worker {
             .and_then(|value| serde_json::from_value(value).ok())
             .unwrap_or_default();
 
-        let outcome = self.agent_loop.run_step(&mut state, &mut plan, &mut history).await?;
+        if let Some(step) = plan.as_ref().and_then(|p| p.next_step(state.current_step as usize)) {
+            state.current_task = Some(format!("step {}: {}", step.index, step.description));
+        }
+        state.mark_running();
+        state.set_execution_checkpoint(&task.id, task.attempt, state.current_step, "running");
+        self.store.upsert_agent(&state).await?;
+
+        let outcome = match self.agent_loop.run_step(&mut state, &mut plan, &mut history).await {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                state.plan = plan;
+                state.metadata["step_history"] = serde_json::to_value(&history).unwrap_or_default();
+                state.metadata["last_worker_error"] = serde_json::json!(error.to_string());
+                state.set_execution_checkpoint(&task.id, task.attempt, state.current_step, "failed");
+                self.store.upsert_agent(&state).await?;
+                return Err(error);
+            }
+        };
 
         state.plan = plan;
         state.metadata["step_history"] = serde_json::to_value(&history).unwrap_or_default();
+        state.clear_execution_checkpoint();
+        state.current_task = None;
         self.store.upsert_agent(&state).await?;
         self.metrics.step_completed_for_tenant(&state.tenant_id);
 
@@ -284,10 +326,17 @@ mod tests {
 
     #[test]
     fn test_retry_allowed_for_first_three_attempts() {
-        assert!(should_retry_task(&sample_task(0)));
-        assert!(should_retry_task(&sample_task(1)));
-        assert!(should_retry_task(&sample_task(2)));
-        assert!(!should_retry_task(&sample_task(3)));
+        let transient = anyhow::anyhow!("temporary timeout");
+        assert!(should_retry_task(&sample_task(0), &transient));
+        assert!(should_retry_task(&sample_task(1), &transient));
+        assert!(should_retry_task(&sample_task(2), &transient));
+        assert!(!should_retry_task(&sample_task(3), &transient));
+    }
+
+    #[test]
+    fn test_retry_blocks_non_transient_errors() {
+        let hard = anyhow::anyhow!("missing credentials");
+        assert!(!should_retry_task(&sample_task(0), &hard));
     }
 
     #[test]

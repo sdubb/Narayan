@@ -19,6 +19,8 @@ const BUILTIN = [
   { type: 'hubspot',     label: 'HubSpot',      auth: 'oauth',  cat: 'crm',        color: 'bg-accent-soft text-accent' },
   { type: 'jira',        label: 'Jira',         auth: 'oauth',  cat: 'pm',         color: 'bg-info-soft text-info' },
   { type: 'notion',      label: 'Notion',       auth: 'oauth',  cat: 'pm',         color: 'bg-tx-1 text-bg-card' },
+  { type: 'linear',      label: 'Linear',       auth: 'apikey', cat: 'pm',         color: 'bg-accent-soft text-accent' },
+  { type: 'monday',      label: 'monday.com',   auth: 'apikey', cat: 'pm',         color: 'bg-info-soft text-info' },
   { type: 'quickbooks',  label: 'QuickBooks',   auth: 'oauth',  cat: 'finance',    color: 'bg-ok-soft text-ok' },
   { type: 'docusign',    label: 'DocuSign',     auth: 'oauth',  cat: 'legal',      color: 'bg-info-soft text-info' },
   { type: 'stripe',      label: 'Stripe',       auth: 'oauth',  cat: 'finance',    color: 'bg-vio-soft text-vio' },

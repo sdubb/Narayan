@@ -5,12 +5,13 @@ import { CheckCircle2, AlertCircle, RotateCcw, ChevronDown, Zap } from 'lucide-r
 import ToolPill from './ToolPill';
 import PolicyCard from './PolicyCard';
 import CitationCard from './CitationCard';
+import JudgementCard from './JudgementCard';
 
 export default function StepCard({ step }) {
   const [collapsed, setCollapsed] = useState(false);
   const {
     index, description, tools = [], policy = [], citations = [],
-    piiEvents = [], slaEvents = [], reviews = [],
+    piiEvents = [], slaEvents = [], reviews = [], judgements = [],
     completed, summary, retrying, retryDelay, retryReason,
   } = step;
 
@@ -80,6 +81,11 @@ export default function StepCard({ step }) {
           {/* Citations */}
           {citations.map((c, i) => (
             <CitationCard key={`cite-${i}`} event={{ ...c, type: 'citation_recorded' }} compact />
+          ))}
+
+          {/* Judgements */}
+          {judgements.map((j, i) => (
+            <JudgementCard key={`judgement-${i}`} event={{ ...j, type: 'judgement_signal' }} compact />
           ))}
 
           {/* Retry info */}

@@ -5,7 +5,10 @@ use crate::{
     compliance::sla::{EscalationAction, EscalationRule, SlaPolicy, SlaPriority},
     connectors::greenhouse::GreenhouseConnector,
     policy::rules::{PolicyAction, PolicyCondition, PolicyRule, PolicyRuleSet},
-    segments::registry::{SegmentPlugin, SegmentServices, SharedDeps},
+    segments::{
+        registry::{SegmentPlugin, SegmentServices, SharedDeps},
+        DomainProfile,
+    },
 };
 use std::sync::Arc;
 
@@ -39,6 +42,7 @@ pub fn plugin(deps: &SharedDeps, tenant_id: &str) -> SegmentPlugin {
     SegmentPlugin {
         id: "hr_people_ops",
         name: "HR & People Ops",
+        domain: DomainProfile::hr_people_ops(),
         connectors: vec![Arc::new(GreenhouseConnector::new())],
         services: SegmentServices {
             policy: Some(deps.policy_engine.clone()),

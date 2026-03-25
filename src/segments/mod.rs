@@ -17,17 +17,23 @@
 //! from all active segments — the most permissive policy wins per tool.
 
 pub mod compliance_ops;
+pub mod customer_success_renewals;
 pub mod customer_support;
 pub mod data_analytics;
+pub mod domain;
 pub mod engineering;
 pub mod finance_accounting;
 pub mod hr_people_ops;
 pub mod it_ops_itsm;
 pub mod legal_contract;
 pub mod marketing_growth;
+pub mod procurement_vendor_ops;
 pub mod research_intelligence;
 pub mod sales_revops;
+pub mod security_ops_grc;
 
+#[allow(unused_imports)]
+pub use domain::{DomainProfile, JudgementTuning};
 #[allow(unused_imports)]
 pub use registry::{AgentServices, SegmentPlugin, SegmentRegistry, SegmentRegistryBuilder, SharedDeps};
 mod registry;

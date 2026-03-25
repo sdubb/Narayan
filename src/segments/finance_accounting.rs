@@ -6,7 +6,10 @@ use crate::{
     compliance::sla::{EscalationAction, EscalationRule, SlaPolicy, SlaPriority},
     connectors::{quickbooks::QuickBooksConnector, stripe::StripeConnector},
     policy::rules::{PolicyAction, PolicyCondition, PolicyRule, PolicyRuleSet},
-    segments::registry::{SegmentPlugin, SegmentServices, SharedDeps},
+    segments::{
+        registry::{SegmentPlugin, SegmentServices, SharedDeps},
+        DomainProfile,
+    },
 };
 use std::sync::Arc;
 
@@ -50,6 +53,7 @@ pub fn plugin(deps: &SharedDeps, tenant_id: &str) -> SegmentPlugin {
     SegmentPlugin {
         id: "finance_accounting",
         name: "Finance & Accounting",
+        domain: DomainProfile::finance_accounting(),
         connectors: vec![Arc::new(QuickBooksConnector::new()), Arc::new(StripeConnector::new())],
         services: SegmentServices {
             policy: Some(deps.policy_engine.clone()),

@@ -172,6 +172,28 @@ impl AgentState {
         self.updated_at = Utc::now();
     }
 
+    /// Persist the current step checkpoint so retries and restarts can resume
+    /// from the same durable step boundary.
+    pub fn set_execution_checkpoint(&mut self, task_id: &str, attempt: u32, step_index: u32, status: &str) {
+        self.metadata["execution_checkpoint"] = serde_json::json!({
+            "task_id": task_id,
+            "attempt": attempt,
+            "step_index": step_index,
+            "status": status,
+            "recorded_at": Utc::now().to_rfc3339(),
+        });
+        self.updated_at = Utc::now();
+    }
+
+    /// Clear the persisted execution checkpoint after the step has been
+    /// durably persisted.
+    pub fn clear_execution_checkpoint(&mut self) {
+        if let Some(metadata) = self.metadata.as_object_mut() {
+            metadata.remove("execution_checkpoint");
+        }
+        self.updated_at = Utc::now();
+    }
+
     /// True if this agent is a sub-agent spawned by delegation.
     pub fn is_child(&self) -> bool {
         self.parent_agent_id.is_some()
@@ -231,5 +253,20 @@ mod tests {
         assert!(!state.is_child());
         state.parent_agent_id = Some("parent-1".into());
         assert!(state.is_child());
+    }
+
+    #[test]
+    fn test_execution_checkpoint_roundtrip() {
+        let mut state = make_state();
+        state.set_execution_checkpoint("task-1", 2, 7, "running");
+
+        let checkpoint = state.metadata.get("execution_checkpoint").cloned().unwrap();
+        assert_eq!(checkpoint["task_id"], "task-1");
+        assert_eq!(checkpoint["attempt"], 2);
+        assert_eq!(checkpoint["step_index"], 7);
+        assert_eq!(checkpoint["status"], "running");
+
+        state.clear_execution_checkpoint();
+        assert!(state.metadata.get("execution_checkpoint").is_none());
     }
 }

@@ -1,12 +1,12 @@
 # Narayan Architecture
 
-_Last updated: March 2026. Reflects the full codebase including plan mode, multi-role agents, connector system, execution guidelines, completion criteria, savings estimation, role chat, and all runtime gap fixes._
+_Last updated: March 2026. Reflects the plan-mode-first architecture, deterministic workflow outlines, test/revise loop, goal-fingerprint repair reuse, multi-role agents, connector system, execution guidelines, completion criteria, savings estimation, role chat, and runtime gap fixes._
 
 ---
 
 ## What Narayan is
 
-Narayan is a B2B AI agent platform. Tenants configure automation agents through a conversational plan mode interface — no code, no JSON — and those agents run on a schedule or in response to external events. Agents read from and write to SaaS connectors (Salesforce, Zendesk, GitHub, Slack, and 17 others), external databases, REST APIs, and MCP servers.
+Narayan is a B2B AI agent platform. Tenants configure automation agents through a conversational plan mode interface — no code, no JSON — and plan mode now also validates and repairs drafts before save. Those agents run on a schedule or in response to external events. Agents read from and write to SaaS connectors (Salesforce, Zendesk, GitHub, Slack, and 17 others), external databases, REST APIs, and MCP servers.
 
 The platform is a Rust backend (Axum, SQLx, Tokio) with a React + Vite frontend. All agent state, role config, run history, and credential data live in PostgreSQL. Vector memory uses pgvector. Workspaces are ephemeral directories on the host filesystem.
 
@@ -70,9 +70,9 @@ AgentRole {
 }
 ```
 
-`role_category` is persisted and treated as first-class runtime policy (planner/executor derive job type from it before falling back to heuristic detection).
+`role_category` is persisted and treated as first-class runtime policy (runtime derives job type from it before falling back to heuristic detection).
 
-`memory_scope` and `execution_limits` are also persisted on each role and injected into planner/executor role-policy context on every run.
+`memory_scope` and `execution_limits` are also persisted on each role and injected into runtime role-policy context on every run.
 
 ### TriggerDef
 ```
@@ -101,7 +101,9 @@ ExecutionGuidelines {
 }
 ```
 
-**GuidelineRule** — `{ text, tool_scope: Option<String>, phase: Before|After|Always }`. Rendered as numbered list in the planner prompt with scope prefixes like `[BEFORE salesforce.update_record]`.
+`workflow_outline: Vec<WorkflowStep>` is the execution contract. It stores ordered, typed steps - description, tool, args template, success criteria, and condition - and is the source of truth for runtime execution and plan-mode test mode. When present, runtime builds a deterministic `Plan` from it instead of asking the LLM planner to invent one. The `planner` module still exists as the `Plan` translator and fallback path, but workflow-outline roles do not rely on it to invent new steps.
+
+**GuidelineRule** - `{ text, tool_scope: Option<String>, phase: Before|After|Always }`. Rendered as numbered list in role-policy prompts with scope prefixes like `[BEFORE salesforce.update_record]`.
 
 **FailureRule** — `{ text, tool_scope, action: FailureAction }`. `FailureAction` is a tagged enum: `SkipAndLog { log_path }`, `SkipSilently`, `RetryOnce`, `EscalateToHuman { notify_channel }`, `Abort`. The agent loop evaluates matching rules before the LLM evaluator on every step failure.
 
@@ -118,23 +120,39 @@ One run of one AgentRole. Created by the scheduler or via webhook. Fields includ
 
 Plan mode is the one-time conversational setup for an agent role. Users either describe what they want in plain language (free-form path) or select one of 20 pre-built templates (template fast-path). Both paths produce identical `AgentRole` output — the template path just skips the questions it already answers, reducing setup from ~7 turns to 0–3.
 
-### Phase flow — free-form path
+### Phase flow - free-form path
 
-```
-CapturingIntent
-    ↓  (LLM pass 1 — IntentExtractor with compact capability directory)
-    ↓  (code builds targeted detailed capability context from pass-1 categories/candidates)
-    ↓  (LLM pass 2 — IntentExtractor refinement with focused tool/connector detail)
-    ↓  generate_steps() → pending_steps queue in session
-    ↓  [ResolvingConnectors? — one or more clarifying questions if connector or custom-tool scope is unresolved]
-CapturingClarifications    ← one step per turn from the queue
-    ↓  (queue empty)
-    ↓  domain skill execution brief injected
-    ↓  default completion_criteria generated if none set
-Reviewing
-    ↓  user confirms
-Complete → save() → AgentDefinition + AgentRole persisted
-```
+1. CapturingIntent
+   - LLM pass 1: IntentExtractor with a compact capability directory
+   - code builds targeted detail for the inferred categories/candidates
+   - LLM pass 2: IntentExtractor refinement with focused tool/connector detail
+   - generate_steps() fills the pending_steps queue in the session
+2. ResolvingConnectors
+   - one or more clarifying questions if connector or custom-tool scope is unresolved
+3. CapturingClarifications
+   - one step per turn from the queue
+   - domain skill execution brief injected
+   - default completion criteria generated if none set
+4. Reviewing
+   - the user reviews the full draft
+   - deterministic test can run before save
+5. Complete
+   - save() persists AgentDefinition + AgentRole
+   - the completed plan-mode session snapshot is preserved for repair reuse
+
+### Deterministic test and repair loop
+
+Plan mode now has a dedicated validation path:
+- `POST /plan-mode/sessions/:id/test` runs deterministic preflight + sandbox validation.
+- Preflight checks tool existence, connector setup, args, and schema only.
+- Sandbox runs `Plan::from_workflow_outline(role)` only. It never calls the LLM planner.
+- `src/agent/planner.rs` still owns the `Plan` data model and the deterministic `Plan::from_workflow_outline(role)` conversion used by plan mode and runtime validation. The old LLM-generated plan path remains only as a fallback when no workflow outline exists.
+- The result is structured JSON: `status`, `steps`, `criteria_checks`, `summary`, `confidence`.
+- Uploaded documents are saved in the session workspace, extracted into concise attachment context, and reused in the draft prompt instead of being dumped wholesale into the LLM context.
+- If the result is `fail` or `partial`, `POST /plan-mode/sessions/:id/revise` feeds the structured result back into plan mode to repair the draft.
+- Save is a soft gate: users see a warning on non-pass results but can still override.
+- Matching goals reuse the latest repaired snapshot via `goal_fingerprint`, with `repair_version`, `reused_from_session_id`, and `repair_root_session_id` tracking the chain.
+- Fingerprint reuse is heuristic, not absolute. The fingerprint is derived from the normalized goal text plus role category, trigger, connectors, tools, and workflow outline. If the draft changes materially, it gets a new fingerprint/version so unrelated goals do not inherit old repairs.
 
 ### IntentExtractor
 Two-pass LLM extraction with a typed JSON schema.
@@ -152,7 +170,7 @@ Returns intent plus runtime policy hints, including:
 - `candidate_wasm_tools` (exact tenant WASM tool names when deterministic custom logic is needed)
 - `needed_connector_categories`, `candidate_connectors`
 - `missing_capabilities` (`custom_db`, `custom_api`, `connector/<category>`, `tool/<category>`)
-- `workflow_outline` (ordered high-level execution hints persisted into role policy)
+- `workflow_outline` (ordered `WorkflowStep` entries persisted as the execution contract)
 
 #### Two-pass inference example
 
@@ -191,7 +209,7 @@ Code then builds targeted detail for pass 2:
 - tool specs for `data` and `communication` categories
 - connector ops/status for `zendesk`, `notion`, `slack`
 
-Pass 2 output refines exact preferences and keeps the same intent shape. Plan mode persists these as role policy (`role.tools`, connector scope, `ExecutionGuidelines` hints) before runtime planning starts.
+Pass 2 output refines exact preferences and keeps the same intent shape. Plan mode persists these as role policy (`role.tools`, connector scope, `ExecutionGuidelines` hints, and `workflow_outline`) before runtime execution starts.
 
 #### Plan mode vs runtime tool discovery
 
@@ -201,9 +219,10 @@ Plan mode does not execute tools and does not call `request_more_tools`. Its job
   - pass 1 gets compact capability directory (category maps + connector directory + tenant custom connections + enabled tenant WASM names)
   - pass 2 gets targeted detail for inferred categories/candidates only
 - Runtime grounding:
-  - planner/executor prompts include category quick maps
+  - executor prompts include category quick maps
   - when a step needs more depth, runtime can call `request_more_tools` by category
   - selector still enforces hard tool budget and role scope
+  - runtime executes the saved `workflow_outline` when present instead of inventing a new plan
 
 This split keeps plan mode deterministic and lightweight while still letting runtime fetch detailed tool context exactly when needed.
 
@@ -213,11 +232,12 @@ This split keeps plan mode deterministic and lightweight while still letting run
 - `preferred_tool_categories` → `GuidelineRule`: `Prefer these tool categories when relevant: ...`
 - `candidate_wasm_tools` → role tool scope entries: `run_registered_wasm` + `wasm_tool:<name>`
 - `needed_connector_categories` → `GuidelineRule`: `Prefer connectors from these categories when relevant: ...`
-- `workflow_outline` → `ExecutionGuidelines.priorities` as `step: ...` tagged entries
+- `workflow_outline` → `ExecutionGuidelines.workflow_outline` as ordered `WorkflowStep` entries
 
 Before writing fresh hint-derived values, plan mode removes prior entries with those prefixes so re-runs/reconfiguration don't keep stale duplicates.
 
 At runtime:
+- `workflow_outline` drives deterministic execution order.
 - `workflow_hints()` returns only `step:` tagged priorities (so policy rules like "Never auto-send..." are not misinterpreted as workflow order)
 - `preferred_*_categories()` reads all matching prefixed rules (not just first match), then de-duplicates.
 
@@ -321,19 +341,19 @@ StepOutcome {
 
 ### Run step sequence
 ```
-1. Preflight           → credential checks, SLA setup
-2. Plan creation       → LlmPlanner.create_plan() (skipped if plan exists)
+1. Preflight           → credential checks, SLA setup, role-policy checks
+2. Deterministic plan  → Plan::from_workflow_outline(role) when workflow_outline exists
 3. Clarification gate  → ask user if needed
-4. Plan approval gate  → credential-gap detection, ask user
-5. Completion check    → plan.is_complete(current_step)?
-6. Execute step        → LlmExecutor.execute_step()
-7. Write step_outputs  → items_processed + connector_writes → state.metadata
-8. FailureAction check → apply_failure_action_override() before evaluator
-9. Evaluate + Reflect  → LlmEvaluator.evaluate_and_reflect()
-10. Verdict dispatch   → Continue | Retry (backoff) | GoalComplete | Abort
-11. GoalComplete path  → check_completion_criteria() → Complete | PartiallyComplete
-12. Persistence        → write criteria_checks to goal_instance.result
+4. Execute step        → LlmExecutor.execute_step()
+5. Write step_outputs  → items_processed + connector_writes → state.metadata
+6. FailureAction check → apply_failure_action_override() before evaluator
+7. Evaluate + Reflect  → LlmEvaluator.evaluate_and_reflect()
+8. Verdict dispatch    → Continue | Retry (backoff) | GoalComplete | Abort
+9. GoalComplete path   → check_completion_criteria() → Complete | PartiallyComplete
+10. Persistence        → write criteria_checks to goal_instance.result
 ```
+
+The normal runtime path is workflow-outline-first. It does not ask the LLM planner to invent a plan when a role already has `workflow_outline`; the LLM planner is only used as a fallback when the outline is missing or invalid.
 
 Custom tool policy in runtime is strict:
 - `create_workspace_tool` is blocked during run execution.
@@ -430,7 +450,7 @@ Results written to `goal_instance.human_hours_saved` and `human_cost_saved_usd`.
 agent_definitions       — AgentDefinition (JSONB: connectors, constraints)
 agent_roles             — AgentRole (JSONB: trigger, execution_guidelines, output_spec, tools)
 goal_instances          — One run per role trigger (JSONB: result/criteria_checks, DOUBLE: cost_usd, human_hours_saved)
-plan_mode_sessions      — In-progress plan mode conversations (JSONB: pending_steps, intent_cache)
+plan_mode_sessions      — Plan-mode conversation snapshots (JSONB: conversation, attachments, pending_steps, intent_cache, draft_role; columns: attachment_context, session_workspace, goal_fingerprint, repair_version, reused_from_session_id, repair_root_session_id)
 role_chat_sessions      — In-progress role chat conversations (JSONB: conversation, pending_change)
 role_chat_sessions      — same (JSONB: pending_change for typed RoleChange)
 connector_installs      — OAuth tokens + API keys per tenant per connector
@@ -467,6 +487,8 @@ GET    /goal-instances/:id             — full detail with criteria_checks
 GET    /plan-mode/templates            — list all 20 pre-built templates (id, name, description, persona, emoji, required_connectors)
 POST   /plan-mode/sessions             — start (body: agent_name, agent_id?, template_id?)
 POST   /plan-mode/sessions/:id/turn   — send message, get reply
+POST   /plan-mode/sessions/:id/test   — deterministic preflight + sandbox validation
+POST   /plan-mode/sessions/:id/revise  — feed a failed/partial test result back into plan mode
 POST   /plan-mode/sessions/:id/save   — save AgentDefinition + AgentRole
 ```
 
@@ -535,7 +557,7 @@ src/
 
 ## Key design decisions
 
-**Plan mode is sequential, not a free-form chat.** The `ClarificationStep` pipeline means each turn has exactly one question, one answer, one field written. There is no blob parsing or regex. Ambiguous answers stay in the queue for re-asking.
+**Plan mode is sequential, not a free-form chat.** The `ClarificationStep` pipeline means each turn has exactly one question, one answer, one field written. There is no blob parsing or regex. Ambiguous answers stay in the queue for re-asking. The draft also carries a typed `workflow_outline`, a deterministic test pass, and a repair loop before save.
 
 **Templates are static data, not database records.** All 20 `RoleTemplate` structs live in `agent/templates.rs` as a `static` array. No migration, no admin API, no versioning complexity. Each template carries `build_role` and `intent` as function pointers — the pre-configured role is constructed at request time, not stored. Templates can only be changed by deploying new code, which is the right constraint: templates represent product decisions, not user data.
 
@@ -543,7 +565,9 @@ src/
 
 **`save()` resolves name hints to real IDs.** `DependsOnRole` stores `"name:Lead Enrichment & Drafts"` during the conversation, resolved to the actual UUID at write time. Keeps the conversational step simple while ensuring the DB always has a valid reference.
 
-**ExecutionGuidelines is a typed contract.** The planner receives a numbered, phase-prefixed prompt (`RULES: 1. [BEFORE salesforce.update] Read first…`). The evaluator receives `DONE WHEN ALL OF: [ ] …`. Both are derived from the same typed struct — no prompt engineering divergence.
+**ExecutionGuidelines is a typed contract.** The planner receives a numbered, phase-prefixed prompt (`RULES: 1. [BEFORE salesforce.update] Read first…`). The evaluator receives `DONE WHEN ALL OF: [ ] …`. Both are derived from the same typed struct — no prompt engineering divergence. `workflow_outline` is the execution contract, not a soft hint.
+
+**Repair is session-local and versioned.** `goal_fingerprint`, `repair_version`, `reused_from_session_id`, and `repair_root_session_id` track the repair chain for one normalized goal. The same goal can reuse its latest repaired snapshot, while completed sessions remain immutable snapshots on disk and in PostgreSQL.
 
 **FailureAction is checked before the evaluator.** This means role-level failure rules fire deterministically, not depending on LLM judgment. The LLM's `Retry` verdict is additive on top of the `RetryOnce` override — they don't conflict.
 
@@ -565,7 +589,7 @@ src/
 
 ## Segment system
 
-Domain-specific capability bundles in `src/segments/`. Each segment registers connectors, tools, and services appropriate to a job category. The planner and executor have access only to the tools registered for the tenant's segment. Current segments: `customer_support`, `sales_revops`, `finance_accounting`, `devops`, `hr_people_ops`, `legal_contract`, `research_analyst`, `software_engineer`, `marketing`, `general`.
+Domain-specific capability bundles in `src/segments/`. Each segment registers connectors, tools, and services appropriate to a job category. Runtime execution and plan-mode grounding have access only to the tools registered for the tenant's segment. Current segments: `customer_support`, `sales_revops`, `finance_accounting`, `devops`, `hr_people_ops`, `legal_contract`, `research_analyst`, `software_engineer`, `marketing`, `general`.
 
 ---
 
@@ -573,7 +597,7 @@ Domain-specific capability bundles in `src/segments/`. Each segment registers co
 
 `SkillRegistry` holds `Skill { name, description, steps, aliases, version }`. `Plan::from_skill()` builds a deterministic plan from a skill without an LLM call. Skills evolve via `skill_evolution/evolution.rs` — successful step outputs are extracted and used to improve existing skill steps.
 
-The marketplace (`skill_marketplace/`) allows skills to be uploaded, discovered, and installed by name. Skills in `curated_skills()` ship with the platform and include the plan-mode domain skills (`planmode:customer_support` etc.).
+The marketplace (`skill_marketplace/`) allows skills to be uploaded, discovered, and installed by name. Skills in `curated_skills()` ship with the platform and include the plan-mode domain skills (`planmode:customer_support` etc.) plus internal workflow guidance packs such as the Superpowers-style planning and review skills.
 
 ---
 
@@ -688,6 +712,8 @@ DONE WHEN ALL OF:
 2. [ ] Output files written to workspace/drafts/
 3. [ ] workspace/errors.txt written
 ```
+
+Before saving, you can click Run test. The draft runs deterministic preflight + sandbox validation from the saved workflow_outline. If it fails, the Revise plan action feeds the structured result back into plan mode and reopens the draft; if it passes, you save.
 
 You say _"yes"_ → saved. Plan mode reopens for Role 2 (Slack Notification). Now with the updated pipeline, 3 turns instead of 2:
 
@@ -1231,14 +1257,16 @@ Narayan started as a basic agent loop with a plan/execute/evaluate cycle. Over m
 
 **Session 14:** 20 pre-built templates in `agent/templates.rs` — static `RoleTemplate` structs with `build_role` fn pointers. Template fast-path in `start_plan_mode_session` skips `IntentExtractor` entirely, enters `CapturingClarifications` with 0-3 questions.
 
-**Session 15:** Role-policy grounding pass — persisted `role_category`, defaulted persona/memory scope/execution limits by category, two-pass intent capability grounding, execution-hint hygiene (`step:` workflow priorities + stale-hint cleanup), safer connector clarification matching, and bounded per-category tool expansion in selector/runtime prompts.
+**Session 15:** Role-policy grounding pass — persisted `role_category`, defaulted persona/memory scope/execution_limits by category, two-pass intent capability grounding, execution-hint hygiene (`step:` workflow priorities + stale-hint cleanup), safer connector clarification matching, and bounded per-category tool expansion in selector/runtime prompts.
+
+**Session 16:** Plan mode core + deterministic test mode + repair reuse — `workflow_outline` became the execution contract, plan test now runs preflight + sandbox without the LLM planner, and goal fingerprinting plus session-local repair snapshots keep the latest good draft reusable for the same normalized goal.
 
 ---
 
 ## The three things that make this different from other agent platforms
 
 **1. ExecutionGuidelines is a contract, not a prompt.**
-Every other platform puts guidelines in a free-text system prompt field. Here, guidelines are typed structs — `GuidelineRule { text, tool_scope, phase }`, `FailureRule { text, tool_scope, action: FailureAction }`, `CompletionCriterion { description, check: CompletionCheck }`. This means:
+Every other platform puts guidelines in a free-text system prompt field. Here, guidelines are typed structs — `GuidelineRule { text, tool_scope, phase }`, `FailureRule { text, tool_scope, action: FailureAction }`, `CompletionCriterion { description, check: CompletionCheck }`, and `workflow_outline: Vec<WorkflowStep>`. This means:
 - The planner prompt is generated deterministically from the struct, not written by hand
 - The evaluator sees `DONE WHEN ALL OF:` with checkboxes, not a paragraph
 - Completion is checked mechanically (file exists? connector wrote?) not by LLM judgment
@@ -1249,7 +1277,7 @@ Every other platform puts guidelines in a free-text system prompt field. Here, g
 `apply_failure_action_override()` in `loop.rs` checks the role's `failure_handling` rules against every step failure *before* asking the LLM whether to retry or abort. `RetryOnce` fires deterministically on the first failure regardless of what the LLM thinks. `SkipAndLog` writes to `workspace/errors.txt` and sets `state.metadata["errors_logged"] = true` so the `ErrorsLogged` completion criterion passes. This is why the two are connected — if `SkipAndLog` didn't set that flag, `check_completion_criteria` would incorrectly mark the run as `PartiallyComplete` even when it succeeded.
 
 **3. Plan mode is a typed pipeline, not a conversation.**
-`generate_steps()` returns a queue of `ClarificationStep` objects. Each step has a `StepField` enum variant that maps directly to one field on the draft role. `parse_and_apply()` is a match statement — no regex, no LLM parsing. The queue is serialised as JSON in `session.pending_steps` and persisted across HTTP requests. The result is that plan mode is deterministic and testable — every question has exactly one answer that writes exactly one field.
+`generate_steps()` returns a queue of `ClarificationStep` objects. Each step has a `StepField` enum variant that maps directly to one field on the draft role. `parse_and_apply()` is a match statement — no regex, no LLM parsing. The queue is serialised as JSON in `session.pending_steps` and persisted across HTTP requests. The result is that plan mode is deterministic and testable — every question has exactly one answer that writes exactly one field. It also has a deterministic test/revise loop and goal-fingerprint reuse for repeated goals.
 
 ---
 
@@ -1261,17 +1289,20 @@ agent/definition.rs          ← THE source of truth
     ExecutionGuidelines       ← rules + failure_handling + priorities + completion_criteria
     TriggerDef                ← trigger_type + cron + workforce_event_filter + input_mapping + depends_on_role_id
     GoalInstanceStatus        ← Pending → Running → Completed | PartiallyComplete | Failed | Cancelled
-    PlanModeSession           ← phase + intent_cache + pending_steps + draft_role
+    PlanModeSession           ← phase + conversation + attachments + attachment_context + session_workspace + intent_cache + pending_steps + draft_role + goal_fingerprint + repair_version
 
 agent/plan_mode.rs            ← plan mode conversation manager
     PlanModeManager::turn()   ← dispatches to handle_intent / handle_clarifications / handle_review
+    test()                    ← deterministic preflight + sandbox validation
+    revise_from_test_result() ← session-local repair loop using structured test output
     handle_intent()           ← calls IntentExtractor pass 1 + pass 2 refinement, ConnectorResolver, build_step_queue_and_ask
     build_capability_directory() / build_detailed_capability_context() ← staged grounding input for plan mode inference
     apply_execution_hints()   ← stores preferred categories + workflow_outline into ExecutionGuidelines (with stale-hint cleanup)
+    compute_plan_mode_goal_fingerprint() ← goal-normalized repair key
     apply_role_policy_defaults() ← category-derived persona/memory_scope/execution_limits defaults
     handle_connector_clarification() ← exact connector-name token matching with explicit disambiguation
     build_step_queue_and_ask()← loads existing_roles from DB, calls generate_steps()
-    save()                    ← resolves "name:Role Name" hints to UUIDs, calls sync_subscriptions_for_role
+    save()                    ← resolves "name:Role Name" hints to UUIDs, preserves completed snapshot, calls sync_subscriptions_for_role
     build_review_summary()    ← shows trigger description, connectors, services, active_services_for_category()
 
 agent/plan_mode_steps.rs      ← the step pipeline
@@ -1284,8 +1315,9 @@ agent/templates.rs            ← 20 pre-built templates
     RoleTemplate              ← static struct with build_role fn pointer + intent fn pointer
     find_template(id)         ← used by start_plan_mode_session template fast-path
 
-agent/planner.rs              ← LLM planner
+agent/planner.rs              ← deterministic plan construction helpers + planner prompt utilities
     load_role_context()       ← injects role policy context (category, limits, memory scope, tool/category hints)
+    Plan::from_workflow_outline() ← builds runtime plan from the saved workflow_outline
 
 agent/executor.rs             ← LLM executor
     load_role_execution_policy() ← injects same role policy into step execution prompting
@@ -1307,7 +1339,7 @@ agent/evaluator.rs            ← step evaluation + completion criteria check
     LlmEvaluator              ← fast-path for unambiguous success, LLM call for ambiguous
 
 agent/loop.rs                 ← the step state machine — most complex file in the codebase
-    run_step()                ← 12-phase sequence (preflight → plan → execute → evaluate → criteria check)
+    run_step()                ← workflow-outline-first sequence (preflight → execute → evaluate → criteria check)
     apply_failure_action_override()← FailureAction dispatch BEFORE evaluator
     EvalVerdict               ← Continue | Retry | Abort | GoalComplete → dispatched in match
 
@@ -1322,9 +1354,12 @@ agent/role_chat.rs            ← conversational role editing
 storage/postgres.rs           ← every DB operation
     update_goal_instance_result()← writes criteria_checks to goal_instance.result JSONB
     update_goal_instance_savings()← writes hours/cost after savings estimation
+    plan_mode_sessions rows    ← preserve completed snapshots and repair chain metadata
 
 api/routes.rs                 ← all HTTP handlers
     start_plan_mode_session() ← template fast-path + free-form path
+    test_plan_mode_session()   ← deterministic preflight + sandbox validation
+    revise_plan_mode_session() ← feed structured test output back into plan mode
     get_goal_instance_detail()← GET /goal-instances/:id — full criteria_checks for RunDetailDrawer
     list_plan_mode_templates()← GET /plan-mode/templates — 20 template metadata
 
@@ -1363,7 +1398,7 @@ sync_subscriptions_for_role() → no WorkforceEventSubscription (schedule trigge
 Scheduler fires GoalInstance
 Worker pops task → AgentLoop.run_step()
     1. Preflight: check Gmail + QuickBooks credentials installed
-    2. LlmPlanner.create_plan() → steps: [fetch_email, pdf_read, match_po, post_quickbooks, write_log]
+    2. Build deterministic plan from workflow_outline → steps: [fetch_email, pdf_read, match_po, post_quickbooks, write_log]
     3. Execute step 1: gmail.get_message() → ToolResult { success: true, output: {...}, processed: 1 }
     4. loop.rs writes step_outputs: { step: 1, processed: 1, connectors: [] } to state.metadata
     5. FailureAction check: result.success = true → no override
@@ -1445,8 +1480,9 @@ All 8 are test infrastructure issues from the `StepResult` field additions and `
 ## State of the codebase as of this session
 
 - **Templates:** All 20 templates are defined and wired through template fast-path.
-- **Plan mode:** Includes two-pass intent extraction, connector resolution, clarification pipeline, and workforce-event setup steps.
-- **Role policy:** `role_category`, `memory_scope`, and `execution_limits` are persisted and used by planner/executor runtime prompts.
+- **Plan mode:** Includes two-pass intent extraction, connector resolution, clarification pipeline, deterministic test/revise flow, and workforce-event setup steps.
+- **Role policy:** `role_category`, `memory_scope`, and `execution_limits` are persisted and used by runtime prompts. `workflow_outline` is the execution contract for both runtime and test mode.
+- **Repair reuse:** `goal_fingerprint`, `repair_version`, `reused_from_session_id`, and `repair_root_session_id` keep same-goal drafts reusable without mutating older snapshots.
 - **Completion criteria:** Mechanical checks produce typed `criteria_checks` persisted to DB and shown in run detail UI.
 - **Failure handling:** `SkipAndLog` writes the log file and sets metadata for `ErrorsLogged` checks.
 - **Savings:** Estimation remains quality-gated and pro-rated for partial runs.

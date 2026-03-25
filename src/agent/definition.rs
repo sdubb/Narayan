@@ -406,6 +406,8 @@ pub struct WorkflowStep {
     #[serde(default)]
     pub args_template: Option<serde_json::Value>,
     #[serde(default)]
+    pub success_criteria: String,
+    #[serde(default)]
     pub condition: Option<crate::agent::planner::StepCondition>,
 }
 
@@ -527,6 +529,37 @@ impl ExecutionGuidelines {
                 .map(|(i, c)| format!("{}. [ ] {}", i + 1, c.description))
                 .collect();
             parts.push(format!("DONE WHEN ALL OF:\n{}", items.join("\n")));
+        }
+
+        if !self.workflow_outline.is_empty() {
+            let items: Vec<String> = self
+                .workflow_outline
+                .iter()
+                .take(Self::MAX_WORKFLOW)
+                .enumerate()
+                .map(|(i, step)| {
+                    let tool = step.tool.as_deref().unwrap_or("no tool");
+                    let criteria = if step.success_criteria.trim().is_empty() {
+                        format!("step {} complete", i + 1)
+                    } else {
+                        step.success_criteria.clone()
+                    };
+                    let args = step
+                        .args_template
+                        .as_ref()
+                        .map(|value| serde_json::to_string(value).unwrap_or_default())
+                        .unwrap_or_else(|| "{}".into());
+                    format!(
+                        "{}. {}\n   tool: {}\n   args: {}\n   success: {}",
+                        i + 1,
+                        step.description,
+                        tool,
+                        args,
+                        criteria
+                    )
+                })
+                .collect();
+            parts.push(format!("WORKFLOW OUTLINE:\n{}", items.join("\n")));
         }
 
         parts.join("\n\n")
@@ -1052,6 +1085,23 @@ pub struct PlanModeSession {
     #[serde(default)]
     pub session_workspace: Option<String>,
 
+    /// Stable fingerprint for the normalized goal/workflow shape.
+    /// Used to find and reuse the latest repaired draft snapshot for the same goal.
+    #[serde(default)]
+    pub goal_fingerprint: Option<String>,
+
+    /// Monotonically increasing repair snapshot version for the same goal fingerprint.
+    #[serde(default = "default_plan_mode_repair_version")]
+    pub repair_version: u32,
+
+    /// Session id of the prior snapshot this draft reused, if any.
+    #[serde(default)]
+    pub reused_from_session_id: Option<String>,
+
+    /// Root session id for the repair chain. The first snapshot in a chain points to itself.
+    #[serde(default)]
+    pub repair_root_session_id: Option<String>,
+
     /// Which step of the plan mode flow we're on.
     pub phase: PlanModePhase,
 
@@ -1073,6 +1123,10 @@ pub struct PlanModeSession {
 pub struct PlanModeMessage {
     pub role: String, // "user" | "assistant"
     pub content: String,
+}
+
+fn default_plan_mode_repair_version() -> u32 {
+    1
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1112,6 +1166,69 @@ pub struct PlanModeAttachment {
     #[serde(default)]
     pub extracted_preview: String,
     pub uploaded_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanModeTestStatus {
+    Pass,
+    Fail,
+    Partial,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanModeTestConfidence {
+    High,
+    Partial,
+    Low,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanModeTestCheck {
+    pub label: String,
+    pub success: bool,
+    #[serde(default)]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanModeTestStepResult {
+    pub step: usize,
+    pub description: String,
+    #[serde(default)]
+    pub tool: Option<String>,
+    pub success: bool,
+    pub output: serde_json::Value,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub blocked: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanModePreflightResult {
+    pub status: PlanModeTestStatus,
+    pub checks: Vec<PlanModeTestCheck>,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanModeSandboxResult {
+    pub status: PlanModeTestStatus,
+    pub steps: Vec<PlanModeTestStepResult>,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanModeTestResult {
+    pub status: PlanModeTestStatus,
+    pub confidence: PlanModeTestConfidence,
+    pub preflight: PlanModePreflightResult,
+    pub sandbox: PlanModeSandboxResult,
+    pub steps: Vec<PlanModeTestStepResult>,
+    pub criteria_checks: Vec<PlanModeTestCheck>,
+    pub summary: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -21,7 +21,7 @@ const KNOWN_CONNECTORS = new Set([
   // Dev tools
   'github',
   // Project management
-  'jira', 'notion', 'asana',
+  'jira', 'notion', 'asana', 'linear', 'monday',
   // Communication
   'slack', 'gmail', 'outlook',
   // Finance
@@ -41,6 +41,7 @@ const CONNECTOR_LABELS = {
   zendesk:    'Zendesk',    intercom:   'Intercom',    freshdesk: 'Freshdesk',
   github:     'GitHub',
   jira:       'Jira',       notion:     'Notion',      asana:     'Asana',
+  linear:     'Linear',     monday:     'monday.com',
   slack:      'Slack',      gmail:      'Gmail',        outlook:   'Outlook',
   quickbooks: 'QuickBooks', stripe:     'Stripe',
   servicenow: 'ServiceNow', pagerduty:  'PagerDuty',
@@ -405,6 +406,11 @@ export default function PlanApprovalCard({ agentId, plan, replanning, onDone, on
               {jobType.replace(/_/g, ' ')}
             </span>
           )}
+          {rejectionCount > 0 && (
+            <span className="badge bg-warn-soft text-warn border border-warn/20 text-[10px]">
+              Revised {rejectionCount}x
+            </span>
+          )}
         </div>
         <span className="text-xs text-tx-4">
           {hasGaps ? 'Action required' : 'Awaiting review'}
@@ -413,6 +419,17 @@ export default function PlanApprovalCard({ agentId, plan, replanning, onDone, on
 
       <div className="px-4 py-4 space-y-4">
         {rationale && <p className="text-xs text-tx-2 leading-relaxed">{rationale}</p>}
+
+        <div className="rounded-lg border border-border/60 bg-bg px-3 py-2 space-y-1">
+          <p className="text-[11px] font-medium text-tx-1">Governance</p>
+          <p className="text-[11px] text-tx-3 leading-relaxed">
+            Approval freezes the current workflow outline, the worker checkpoints each step, and connector writes
+            carry stable idempotency keys when the runtime can derive them.
+          </p>
+          <p className="text-[11px] text-tx-4 leading-relaxed">
+            If you revise the plan later, Narayan creates a new version instead of mutating the saved one in place.
+          </p>
+        </div>
 
         {steps.length > 0 && (
           <div className="space-y-2">

@@ -203,6 +203,10 @@ impl Provider for OpenAiProvider {
             "messages": messages.iter().map(|m| serde_json::json!({ "role": m.role, "content": m.content })).collect::<Vec<_>>(),
         });
 
+        if self.model.contains("gpt-oss") {
+            payload["include_reasoning"] = serde_json::json!(false);
+        }
+
         if !oai_tools.is_empty() {
             payload["tools"] = serde_json::json!(oai_tools);
         }
@@ -220,9 +224,21 @@ impl Provider for OpenAiProvider {
             .bearer_auth(&self.api_key)
             .json(&payload)
             .send()
-            .await?
-            .json::<serde_json::Value>()
             .await?;
+
+        let status = resp.status();
+        let resp_text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!(
+                "provider request failed: status={} base_url={} model={} body={}",
+                status,
+                self.base_url,
+                self.model,
+                truncate_for_log(&resp_text, 2000)
+            );
+        }
+
+        let resp: serde_json::Value = serde_json::from_str(&resp_text)?;
 
         tracing::info!(
             "provider response payload provider={} model={} base_url={} response={}",

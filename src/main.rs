@@ -37,7 +37,7 @@ mod webhooks;
 mod worker;
 mod workspace;
 
-use agent::{AgentLoop, AgentManager, LlmClarifier, LlmEvaluator, LlmExecutor, LlmPlanner, LlmPreflight, LlmReflector};
+use agent::{AgentLoop, AgentManager, LlmClarifier, LlmEvaluator, LlmExecutor, LlmPreflight, LlmReflector};
 use api::{routes::AppState, server::serve};
 use audit::AuditLog;
 use billing::{paypal::PayPalProvider, stripe::StripeProvider, BillingStore};
@@ -170,12 +170,16 @@ async fn main() -> Result<()> {
         .add(segments::research_intelligence::plugin(&shared_deps, tenant_id))
         .add(segments::data_analytics::plugin(&shared_deps, tenant_id))
         .add(segments::marketing_growth::plugin(&shared_deps, tenant_id))
+        .add(segments::procurement_vendor_ops::plugin(&shared_deps, tenant_id))
+        .add(segments::security_ops_grc::plugin(&shared_deps, tenant_id))
+        .add(segments::customer_success_renewals::plugin(&shared_deps, tenant_id))
         .build();
 
     let agent_services = Arc::new(segment_registry.agent_services());
 
     tracing::info!(
-        segments = 11,
+        segments = segment_registry.domain_profiles().len(),
+        domains = segment_registry.domain_profiles().len(),
         connectors = segment_registry.connector_registry.list().len(),
         "segment plugins loaded"
     );
@@ -388,7 +392,6 @@ async fn main() -> Result<()> {
     let knowledge_graph: Arc<Mutex<KnowledgeGraph>> = Arc::new(Mutex::new(KnowledgeGraph::new()));
 
     // ── Agent runtime ──────────────────────────────────────────────────────
-    let planner = Arc::new(LlmPlanner::new(gateway.clone()).with_store(store.clone()));
     let executor = Arc::new(
         LlmExecutor::new(gateway.clone(), tool_registry.clone(), agent_services.clone())
             .with_tenant_store(tenant_store.clone())
@@ -396,13 +399,12 @@ async fn main() -> Result<()> {
             .with_store(store.clone()),
     );
     let evaluator = Arc::new(LlmEvaluator::new(gateway.clone()));
-    let reflector = Arc::new(LlmReflector::new(gateway.clone(), planner.clone()));
+    let reflector = Arc::new(LlmReflector::new(gateway.clone()));
     let preflight = Arc::new(LlmPreflight::new(gateway.clone()));
     let clarifier = Arc::new(LlmClarifier::new(gateway.clone()));
 
     let agent_loop = Arc::new(
         AgentLoop::new(
-            planner,
             executor,
             evaluator,
             reflector,

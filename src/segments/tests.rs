@@ -12,13 +12,13 @@ mod tests {
     use std::sync::Arc;
 
     use crate::{
-        compliance::{CitationTracker, EvidencePackager, PiiRedactor, ReviewQueue, SlaTracker},
+        compliance::{CitationTracker, EvidencePackager, PiiRedactor, ReviewQueue},
         policy::PolicyEngine,
         segments::{
-            compliance_ops, customer_support, data_analytics, engineering, finance_accounting, hr_people_ops,
-            it_ops_itsm, legal_contract, marketing_growth,
+            compliance_ops, customer_success_renewals, customer_support, data_analytics, engineering,
+            finance_accounting, hr_people_ops, it_ops_itsm, legal_contract, marketing_growth, procurement_vendor_ops,
             registry::{SegmentPlugin, SegmentRegistry, SharedDeps},
-            research_intelligence, sales_revops,
+            research_intelligence, sales_revops, security_ops_grc,
         },
     };
 
@@ -53,6 +53,9 @@ mod tests {
             research_intelligence::plugin(deps, "t1"),
             data_analytics::plugin(deps, "t1"),
             marketing_growth::plugin(deps, "t1"),
+            procurement_vendor_ops::plugin(deps, "t1"),
+            security_ops_grc::plugin(deps, "t1"),
+            customer_success_renewals::plugin(deps, "t1"),
         ]
     }
 
@@ -62,7 +65,7 @@ mod tests {
     async fn test_all_plugins_construct_without_panic() {
         let deps = fake_deps();
         let plugins = all_plugins(&deps);
-        assert_eq!(plugins.len(), 11, "expected 11 segment plugins");
+        assert_eq!(plugins.len(), 14, "expected 14 segment plugins");
     }
 
     #[tokio::test]
@@ -81,6 +84,45 @@ mod tests {
         for plugin in all_plugins(&deps) {
             assert!(!plugin.name.is_empty(), "plugin '{}' has empty name", plugin.id);
         }
+    }
+
+    #[tokio::test]
+    async fn test_all_plugins_have_canonical_domain_profiles() {
+        let deps = fake_deps();
+        for plugin in all_plugins(&deps) {
+            assert!(!plugin.domain.id.is_empty(), "plugin '{}' has empty domain id", plugin.id);
+            assert!(!plugin.domain.label.is_empty(), "plugin '{}' has empty domain label", plugin.id);
+            assert!(!plugin.domain.summary.is_empty(), "plugin '{}' has empty domain summary", plugin.id);
+            assert!(
+                !plugin.domain.primary_connectors.is_empty() || plugin.domain.id == "general",
+                "plugin '{}' should either expose primary connectors or be the general fallback",
+                plugin.id
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_new_domain_segments_have_expected_connectors() {
+        let deps = fake_deps();
+
+        let procurement = procurement_vendor_ops::plugin(&deps, "t1");
+        let procurement_connectors: Vec<&str> =
+            procurement.connectors.iter().map(|conn| conn.connector_type()).collect();
+        assert!(procurement_connectors.contains(&"docusign"));
+        assert!(procurement_connectors.contains(&"quickbooks"));
+        assert!(procurement_connectors.contains(&"stripe"));
+
+        let security = security_ops_grc::plugin(&deps, "t1");
+        let security_connectors: Vec<&str> = security.connectors.iter().map(|conn| conn.connector_type()).collect();
+        assert!(security_connectors.contains(&"servicenow"));
+        assert!(security_connectors.contains(&"pagerduty"));
+        assert!(security_connectors.contains(&"github"));
+
+        let cs = customer_success_renewals::plugin(&deps, "t1");
+        let cs_connectors: Vec<&str> = cs.connectors.iter().map(|conn| conn.connector_type()).collect();
+        assert!(cs_connectors.contains(&"salesforce"));
+        assert!(cs_connectors.contains(&"zendesk"));
+        assert!(cs_connectors.contains(&"intercom"));
     }
 
     // ── SLA policy sanity ─────────────────────────────────────────────────
@@ -315,6 +357,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_segment_registry_collects_domain_profiles() {
+        let deps = fake_deps();
+        let registry = SegmentRegistry::builder()
+            .add(finance_accounting::plugin(&deps, "t1"))
+            .add(legal_contract::plugin(&deps, "t1"))
+            .add(it_ops_itsm::plugin(&deps, "t1"))
+            .build();
+
+        let ids: Vec<&str> = registry.domain_profiles().iter().map(|profile| profile.id).collect();
+        assert!(ids.contains(&"finance_accounting"));
+        assert!(ids.contains(&"legal_contract"));
+        assert!(ids.contains(&"it_ops_itsm"));
+        assert_eq!(registry.domain_profile("finance_accounting").unwrap().label, "Finance & Accounting");
+    }
+
+    #[tokio::test]
     async fn test_segment_registry_with_no_sla_policies_has_none_tracker() {
         let deps = fake_deps();
         // research_intelligence and marketing_growth have no SLA policies
@@ -351,6 +409,21 @@ mod tests {
         // Union: evidence is on because compliance_ops has it, even though engineering doesn't
         assert!(svc.evidence.is_some(), "union of services must include evidence from compliance_ops");
         assert!(svc.policy.is_some(), "policy must be on (both segments activate it)");
+    }
+
+    #[tokio::test]
+    async fn test_new_domain_segments_activate_audit_services() {
+        let deps = fake_deps();
+        for plugin in [
+            procurement_vendor_ops::plugin(&deps, "t1"),
+            security_ops_grc::plugin(&deps, "t1"),
+            customer_success_renewals::plugin(&deps, "t1"),
+        ] {
+            assert!(plugin.services.policy.is_some(), "segment '{}' must activate policy", plugin.id);
+            assert!(plugin.services.reviews.is_some(), "segment '{}' must activate reviews", plugin.id);
+            assert!(plugin.services.evidence.is_some(), "segment '{}' must activate evidence packaging", plugin.id);
+            assert!(plugin.services.pii.is_some(), "segment '{}' must activate pii redaction", plugin.id);
+        }
     }
 
     // ── Connector inbound goal generation ────────────────────────────────

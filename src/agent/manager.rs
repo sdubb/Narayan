@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use std::path::PathBuf;
 
 use crate::{
     agent::prompts::JobType,
@@ -61,6 +62,10 @@ impl AgentManager {
     /// Expose the LLM gateway for plan mode and other components that need it.
     pub fn gateway(&self) -> Arc<dyn LlmGateway> {
         Arc::clone(&self.gateway)
+    }
+
+    pub fn workspace_root(&self) -> PathBuf {
+        PathBuf::from(self.workspace_manager.local_root())
     }
 
     /// Create a new goal and root agent, scoped to `tenant_id`.

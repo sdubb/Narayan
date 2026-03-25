@@ -6,7 +6,10 @@ use crate::{
     compliance::sla::{EscalationAction, EscalationRule, SlaPolicy, SlaPriority},
     connectors::{freshdesk::FreshdeskConnector, intercom::IntercomConnector, zendesk::ZendeskConnector},
     policy::rules::{PolicyAction, PolicyCondition, PolicyRule, PolicyRuleSet},
-    segments::registry::{SegmentPlugin, SegmentServices, SharedDeps},
+    segments::{
+        registry::{SegmentPlugin, SegmentServices, SharedDeps},
+        DomainProfile,
+    },
 };
 use std::sync::Arc;
 
@@ -36,6 +39,7 @@ pub fn plugin(deps: &SharedDeps, tenant_id: &str) -> SegmentPlugin {
     SegmentPlugin {
         id: "customer_support",
         name: "Customer Support",
+        domain: DomainProfile::customer_support(),
         connectors: vec![
             Arc::new(ZendeskConnector::new()),
             Arc::new(IntercomConnector::new()),

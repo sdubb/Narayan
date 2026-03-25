@@ -5,7 +5,10 @@ use crate::{
     compliance::sla::{EscalationAction, EscalationRule, SlaPolicy, SlaPriority},
     connectors::{pagerduty::PagerDutyConnector, servicenow::ServiceNowConnector},
     policy::rules::{PolicyAction, PolicyCondition, PolicyRule, PolicyRuleSet},
-    segments::registry::{SegmentPlugin, SegmentServices, SharedDeps},
+    segments::{
+        registry::{SegmentPlugin, SegmentServices, SharedDeps},
+        DomainProfile,
+    },
 };
 use std::sync::Arc;
 
@@ -39,6 +42,7 @@ pub fn plugin(deps: &SharedDeps, tenant_id: &str) -> SegmentPlugin {
     SegmentPlugin {
         id: "it_ops_itsm",
         name: "IT Ops & ITSM",
+        domain: DomainProfile::it_ops_itsm(),
         connectors: vec![Arc::new(ServiceNowConnector::new()), Arc::new(PagerDutyConnector::new())],
         services: SegmentServices {
             policy: Some(deps.policy_engine.clone()),

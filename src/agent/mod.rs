@@ -22,8 +22,9 @@ pub use definition::{
     ConnectorAuthType, ConnectorSource, EndpointDef, EndpointParam, ExecutionGuidelines, ExecutionLimits,
     FailureAction, FailureRule, GuidelineRule, MemoryScope, OutputDestination, OutputFormat, OutputSpec, ParamLocation,
     PlanModeAttachment, PlanModeAttachmentKind, PlanModeAttachmentUpload, PlanModeMessage, PlanModePhase,
-    PlanModeSession, RoleResponsibility, RoleStatus, RulePhase, TenantConnector, TriggerConfidence, TriggerDef,
-    TriggerType, WorkforceEventPayload, WorkforceEventSubscription,
+    PlanModePreflightResult, PlanModeSandboxResult, PlanModeSession, PlanModeTestCheck, PlanModeTestConfidence,
+    PlanModeTestResult, PlanModeTestStatus, PlanModeTestStepResult, RoleResponsibility, RoleStatus, RulePhase,
+    TenantConnector, TriggerConfidence, TriggerDef, TriggerType, WorkforceEventPayload, WorkforceEventSubscription,
 };
 #[allow(unused_imports)]
 pub use evaluator::LlmEvaluator;
@@ -48,3 +49,5 @@ pub use templates::{all_templates, find_template, RoleTemplate};
 
 #[cfg(test)]
 pub(crate) mod test_helpers;
+#[cfg(test)]
+pub(crate) mod tests;

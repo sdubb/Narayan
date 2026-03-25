@@ -12,7 +12,8 @@ function normalizeEvent(ev) {
 
 function replayToEvents(replay) {
   const steps = Array.isArray(replay?.steps) ? replay.steps : [];
-  return steps.map((step, index) => ({
+  const replayJudgements = Array.isArray(replay?.judgements) ? replay.judgements : [];
+  const stepEvents = steps.map((step, index) => ({
     type: 'replay_step',
     historical: true,
     step_index: step.step_index ?? index,
@@ -21,6 +22,24 @@ function replayToEvents(replay) {
     ts: step.timestamp ? step.timestamp.slice(11, 19) : nowTs(),
     timestamp: step.timestamp,
   }));
+
+  const judgementEvents = replayJudgements.map((judgement, index) => ({
+    type: 'judgement_signal',
+    historical: true,
+    step_index: judgement.step_index ?? index,
+    step_description: judgement.step_description || '',
+    job_type: judgement.job_type || '',
+    profile: judgement.profile || '',
+    score: judgement.score,
+    confidence: judgement.confidence,
+    recommendation: judgement.recommendation,
+    summary: judgement.summary || '',
+    reasons: judgement.reasons || [],
+    ts: judgement.timestamp ? judgement.timestamp.slice(11, 19) : nowTs(),
+    timestamp: judgement.timestamp,
+  }));
+
+  return [...stepEvents, ...judgementEvents];
 }
 
 function isTerminalStatus(status) {
@@ -41,6 +60,7 @@ function nextStatusFromEvent(type) {
     plan_approval_needed:   'plan_approval_needed',
     plan_approved:          'waiting',
     plan_rejected:          'plan_rejected',
+    judgement_signal:       undefined,
   }[type];
 }
 
@@ -52,6 +72,7 @@ function buildGroupedEvents(events) {
       stepCount: 0, rationale: '', jobType: '', steps: [],
       approvalNeeded: false, replanning: false,
       rejectionCount: 0, missingCredentials: [], stepConfidence: [],
+      judgementCount: 0,
     },
     steps: [],
     delegation: { children: [], allComplete: false },
@@ -97,6 +118,9 @@ function buildGroupedEvents(events) {
       grouped.plan.approvalNeeded = false;
       grouped.plan.replanning     = false;
     }
+    if (t === 'judgement_signal') {
+      grouped.plan.judgementCount = (grouped.plan.judgementCount || 0) + 1;
+    }
 
     // Steps
     if (t === 'step_started') {
@@ -115,6 +139,7 @@ function buildGroupedEvents(events) {
         retrying: false,
         retryDelay: 0,
         retryReason: '',
+        judgements: [],
       });
     }
 
@@ -147,6 +172,18 @@ function buildGroupedEvents(events) {
     }
     if (t === 'review_required' && step) {
       step.reviews.push({ review_id: ev.review_id, summary: ev.summary, reason: ev.reason, rule_id: ev.rule_id });
+    }
+    if (t === 'judgement_signal' && step) {
+      step.judgements.push({
+        recommendation: ev.recommendation,
+        score: ev.score,
+        confidence: ev.confidence,
+        summary: ev.summary,
+        reasons: ev.reasons || [],
+        step_index: ev.step_index,
+        step_description: ev.step_description || step.description,
+        timestamp: ev.timestamp,
+      });
     }
     if (t === 'step_completed' && step) {
       step.completed = true;

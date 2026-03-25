@@ -12,6 +12,7 @@ use crate::{
     compliance::{CitationTracker, EvidencePackager, PiiRedactor, ReviewQueue, SlaPolicy, SlaTracker},
     connectors::{Connector, ConnectorRegistry},
     policy::{PolicyEngine, PolicyRuleSet},
+    segments::domain::DomainProfile,
 };
 
 /// Everything a segment plugin needs access to at construction time.
@@ -47,6 +48,8 @@ pub struct SegmentPlugin {
     pub id: &'static str,
     /// Human-readable name shown in admin UI.
     pub name: &'static str,
+    /// Canonical domain profile for prompt, policy, and judgment consumers.
+    pub domain: DomainProfile,
     /// Connectors this segment contributes to the inbound registry.
     pub connectors: Vec<Arc<dyn Connector>>,
     /// Services this segment activates.
@@ -81,8 +84,13 @@ impl SegmentRegistryBuilder {
         let mut merged_services = MergedServices::default();
         let mut all_sla_policies = Vec::new();
         let mut all_policy_rules = Vec::new();
+        let mut domain_profiles = Vec::new();
 
         for plugin in self.plugins {
+            if !domain_profiles.iter().any(|profile: &DomainProfile| profile.id == plugin.domain.id) {
+                domain_profiles.push(plugin.domain);
+            }
+
             // Register connectors
             for conn in plugin.connectors {
                 connector_registry.register(conn);
@@ -119,7 +127,7 @@ impl SegmentRegistryBuilder {
         // Build merged policy ruleset
         let merged_ruleset = PolicyRuleSet { tenant_id: "merged".into(), rules: all_policy_rules };
 
-        SegmentRegistry { connector_registry, merged_services, sla_tracker, merged_ruleset }
+        SegmentRegistry { connector_registry, merged_services, sla_tracker, merged_ruleset, domain_profiles }
     }
 }
 
@@ -134,6 +142,7 @@ pub struct SegmentRegistry {
     pub connector_registry: ConnectorRegistry,
     pub sla_tracker: Option<Arc<SlaTracker>>,
     pub merged_ruleset: PolicyRuleSet,
+    domain_profiles: Vec<DomainProfile>,
     merged_services: MergedServices,
 }
 
@@ -152,6 +161,16 @@ impl SegmentRegistry {
             evidence: self.merged_services.evidence.clone(),
             pii: self.merged_services.pii.clone(),
         }
+    }
+
+    /// Canonical domain profiles contributed by active segment plugins.
+    pub fn domain_profiles(&self) -> &[DomainProfile] {
+        &self.domain_profiles
+    }
+
+    /// Find a domain profile by its canonical id.
+    pub fn domain_profile(&self, id: &str) -> Option<DomainProfile> {
+        self.domain_profiles.iter().copied().find(|profile| profile.id == id)
     }
 }
 

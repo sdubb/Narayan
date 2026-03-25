@@ -249,6 +249,10 @@ fn mcp_url_to_connector(server_url: &str) -> Option<&'static str> {
     if url.contains("linear.app") {
         return Some("linear");
     }
+    // monday.com
+    if url.contains("monday.com") {
+        return Some("monday");
+    }
     // Microsoft — Teams, Outlook, and Graph API share one OAuth install under "microsoft"
     if url.contains("graph.microsoft") || url.contains("microsoftonline") {
         return Some("microsoft");

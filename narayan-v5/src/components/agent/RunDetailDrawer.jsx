@@ -5,6 +5,7 @@ import {
   DollarSign, Zap, ChevronRight, Loader2, Info,
 } from 'lucide-react';
 import { goalInstances as goalInstancesApi } from '../../api';
+import { JudgementCard } from '../cards';
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 function fmt(usd)  { return usd >= 0.001 ? `$${usd.toFixed(4)}` : '<$0.001'; }
@@ -128,6 +129,9 @@ export default function RunDetailDrawer({ instanceId, onClose }) {
   const stepOutputs = Array.isArray(data?.result?.step_outputs)
     ? data.result.step_outputs
     : (data?.result?.step_outputs ? [data.result.step_outputs] : []);
+  const judgementSignals = Array.isArray(data?.result?.judgement_signals)
+    ? data.result.judgement_signals
+    : (data?.result?.judgement_signals ? [data.result.judgement_signals] : []);
 
   const passCount = criteriaChecks.filter(c => c.satisfied).length;
   const totalCriteria = criteriaChecks.length;
@@ -228,8 +232,22 @@ export default function RunDetailDrawer({ instanceId, onClose }) {
               </section>
             )}
 
+            {/* Judgement signals */}
+            {judgementSignals.length > 0 && (
+              <section>
+                <p className="text-[12px] font-semibold text-tx-3 uppercase tracking-wider mb-3">
+                  Judgement signals
+                </p>
+                <div className="space-y-2">
+                  {judgementSignals.map((signal, i) => (
+                    <JudgementCard key={i} event={{ ...signal, type: 'judgement_signal' }} />
+                  ))}
+                </div>
+              </section>
+            )}
+
             {/* No criteria yet */}
-            {criteriaChecks.length === 0 && stepOutputs.length === 0 && (
+            {criteriaChecks.length === 0 && stepOutputs.length === 0 && judgementSignals.length === 0 && (
               <div className="flex flex-col items-center gap-2 py-8 text-center">
                 <Info size={18} className="text-tx-4" />
                 <p className="text-[13px] text-tx-3">No criteria data for this run</p>

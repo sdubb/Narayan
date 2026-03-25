@@ -4,7 +4,19 @@ import clsx from 'clsx';
 import { Activity, Loader2, Network, Layers, Zap, Wrench, RotateCcw, Bell, Cpu, StopCircle } from 'lucide-react';
 import { useAgentTimeline } from '../../hooks/useAgentTimeline';
 import { PhaseBar } from '../layout';
-import { PlanCard, StepCard, ClarificationCard, ReviewCard, GoalCompleteCard, GoalFailedCard, ConnectorTriggerCard, PolicyCard, CitationCard, PlanApprovalCard } from '../cards';
+import {
+  PlanCard,
+  StepCard,
+  ClarificationCard,
+  ReviewCard,
+  GoalCompleteCard,
+  GoalFailedCard,
+  ConnectorTriggerCard,
+  PolicyCard,
+  CitationCard,
+  JudgementCard,
+  PlanApprovalCard,
+} from '../cards';
 import CostCounter from './CostCounter';
 import ReplayScrubber from './ReplayScrubber';
 import { agents as agentsApi } from '../../api';
@@ -30,8 +42,9 @@ function RunOverview({ events, liveStatus, onCancel, cancelling }) {
     if (ev.type === 'tool_called') acc.tools += 1;
     if (ev.type === 'step_retrying') acc.retries += 1;
     if (ev.type === 'review_required') acc.reviews += 1;
+    if (ev.type === 'judgement_signal') acc.judgements += 1;
     return acc;
-  }, { steps: 0, tools: 0, retries: 0, reviews: 0 });
+  }, { steps: 0, tools: 0, retries: 0, reviews: 0, judgements: 0 });
   const plan = events.find(ev => ev.type === 'plan_created');
   const isTerminalStatus = ['completed', 'failed'].includes(liveStatus);
   return (
@@ -43,6 +56,9 @@ function RunOverview({ events, liveStatus, onCancel, cancelling }) {
       <Badge label={`${stats.tools} tools`} color="gray" icon={Wrench} />
       {stats.retries > 0 && <Badge label={`${stats.retries} retries`} color="amber" icon={RotateCcw} />}
       {stats.reviews > 0 && <Badge label={`${stats.reviews} review`} color="amber" icon={Bell} />}
+      {stats.judgements > 0 && (
+        <Badge label={`${stats.judgements} judgment${stats.judgements === 1 ? '' : 's'}`} color="violet" icon={Cpu} />
+      )}
       {!isTerminalStatus && onCancel && (
         <button
           onClick={onCancel}
@@ -216,6 +232,13 @@ export default function AgentTimeline({ agentId, initialStatus, onStatusChange, 
       {events.filter(e => e.type === 'review_required').map((ev, i) => (
         <div key={`review-${i}`} className="my-3">
           <ReviewCard event={ev} />
+        </div>
+      ))}
+
+      {/* Judgement */}
+      {events.filter(e => e.type === 'judgement_signal').map((ev, i) => (
+        <div key={`judgement-${i}`} className="my-3">
+          <JudgementCard event={ev} />
         </div>
       ))}
 
