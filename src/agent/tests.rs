@@ -69,7 +69,7 @@ impl PlanModeE2EConfig {
         let agent_name = env::var("PLAN_MODE_E2E_AGENT_NAME")
             .unwrap_or_else(|_| format!("Plan Mode E2E Agent {}", uuid::Uuid::new_v4().simple()));
         let intent = env::var("PLAN_MODE_E2E_INTENT").unwrap_or_else(|_| {
-            "Create a manual research assistant that reads uploaded documents, summarizes the main points in chat, highlights action items or risks, and never sends email or writes to external systems."
+            "Create a plan-mode agent that reviews incoming requests, summarizes the key points in chat, highlights risks or action items, and never writes to external systems."
                 .into()
         });
         let max_repair_rounds =
@@ -233,7 +233,9 @@ async fn groq_answer_clarification(
     let assistant_lower = assistant_reply.to_ascii_lowercase();
     let intent_lower = intent.to_ascii_lowercase();
 
-    if assistant_lower.contains("connector") && intent_lower.contains("uploaded documents") {
+    if assistant_lower.contains("connector")
+        && (intent_lower.contains("external systems") || intent_lower.contains("read-only") || intent_lower.contains("writes"))
+    {
         answer = "No external connectors are needed. Keep it local and read-only.".into();
     } else if answer.is_empty() {
         answer = if assistant_lower.contains("trigger") {
@@ -242,8 +244,8 @@ async fn groq_answer_clarification(
             "No external connectors are needed. Keep it local and read-only.".into()
         } else if assistant_lower.contains("output") {
             "Return the result in chat and keep any notes in the workspace.".into()
-        } else if assistant_lower.contains("document") || assistant_lower.contains("file") {
-            "Use uploaded documents as the source and summarize them in chat.".into()
+        } else if assistant_lower.contains("request") || assistant_lower.contains("brief") {
+            "Use the user's request as the source and summarize it in chat.".into()
         } else {
             "Keep the workflow manual, read-only, and focused on a chat summary.".into()
         };

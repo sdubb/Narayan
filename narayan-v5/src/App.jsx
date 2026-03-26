@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import LandingPage from './pages/LandingPage';
 import AuthPage     from './pages/AuthPage';
 import ChatPage     from './pages/ChatPage';
 import SettingsPage from './pages/SettingsPage';
@@ -9,7 +10,7 @@ export default function App() {
 
   useEffect(() => {
     const token = localStorage.getItem('narayan_token');
-    if (!token) { setPage('auth'); return; }
+    if (!token) { setPage('landing'); return; }
     health.check()
       .then(() => setPage('chat'))
       .catch(() => setPage('chat'));
@@ -46,7 +47,7 @@ export default function App() {
   function onNavigate(dest) {
     if (dest === 'logout') {
       localStorage.clear();
-      setPage('auth');
+      setPage('landing');
     } else {
       setPage(dest);
     }
@@ -60,7 +61,8 @@ export default function App() {
     );
   }
 
-  if (page === 'auth')     return <AuthPage onAuth={onAuth} />;
+  if (page === 'landing')  return <LandingPage onEnterApp={() => setPage('auth')} onSignIn={() => setPage('auth')} />;
+  if (page === 'auth')     return <AuthPage onAuth={onAuth} onBack={() => setPage('landing')} />;
   if (page === 'settings') return <SettingsPage onBack={() => setPage('chat')} />;
   return <ChatPage onNavigate={onNavigate} />;
 }

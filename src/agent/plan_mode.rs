@@ -1631,11 +1631,10 @@ Please create and test one in plan mode settings, then reply 'done'."
             let label = format!("step {}: {}", step.index + 1, step.description);
             match step.tool.as_deref() {
                 None => {
-                    has_partial = true;
                     checks.push(PlanModeTestCheck {
                         label,
                         success: true,
-                        detail: Some("no tool specified; conceptual step only".into()),
+                        detail: Some("llmcall; conceptual step only".into()),
                     });
                 }
                 Some(tool_name) => {
@@ -1762,11 +1761,11 @@ Please create and test one in plan mode settings, then reply 'done'."
             return PlanModeTestStepResult {
                 step: step.index,
                 description: label,
-                tool: None,
+                tool: Some(conceptual_step_tool_name().into()),
                 success: true,
                 output: serde_json::json!({
-                    "mode": "no_op",
-                    "reason": "no tool specified for this step",
+                    "mode": "llmcall",
+                    "reason": "conceptual step handled by the model",
                 }),
                 error: None,
                 blocked: false,
@@ -1858,6 +1857,10 @@ Please create and test one in plan mode settings, then reply 'done'."
 }
 
 // ── Free helper functions ───────────────────────────────────────────────────
+
+fn conceptual_step_tool_name() -> &'static str {
+    "llmcall"
+}
 
 fn apply_role_policy_defaults(agent: &mut AgentDefinition, role: &mut AgentRole) {
     if agent.persona.trim().is_empty() {

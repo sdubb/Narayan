@@ -557,3 +557,58 @@ pub async fn uninstall_connector(
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
+
+/// POST /connectors/:type/validate — test that credentials are valid.
+pub async fn validate_connector(
+    State(state): State<AppState>,
+    tenant: AuthenticatedTenant,
+    Path(connector_type): Path<String>,
+) -> impl IntoResponse {
+    // 1. Load installed connector config
+    let config = match state.connector_installs.get(&tenant.tenant_id, &connector_type).await {
+        Ok(Some(cfg)) => cfg,
+        Ok(None) => return err(StatusCode::NOT_FOUND, 
+            format!("Connector '{}' not installed", connector_type)),
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, 
+            format!("Failed to load connector: {}", e)),
+    };
+
+    // 2. Get connector from registry
+    let connector = match state.connector_registry.get(&connector_type) {
+        Some(c) => c,
+        None => return err(StatusCode::NOT_FOUND, 
+            format!("Unknown connector type: {}", connector_type)),
+    };
+
+    // 3. Call validate_config() on the connector implementation
+    match connector.validate_config(&config).await {
+        Ok(()) => {
+            info!(
+                target: "audit",
+                "Connector validation successful: tenant={} type={}",
+                tenant.tenant_id,
+                connector_type
+            );
+
+            (StatusCode::OK, Json(serde_json::json!({
+                "valid": true,
+                "connector": connector_type,
+                "tested_at": chrono::Utc::now().to_rfc3339(),
+            }))).into_response()
+        }
+        Err(e) => {
+            warn!(
+                target: "audit",
+                "Connector validation failed: tenant={} type={} error={}",
+                tenant.tenant_id,
+                connector_type,
+                e
+            );
+
+            err(StatusCode::BAD_REQUEST, format!(
+                "Connector validation failed: {}",
+                e
+            )),
+        }
+    }
+}

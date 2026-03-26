@@ -6,7 +6,7 @@ _Last updated: March 2026. Reflects the plan-mode-first architecture, determinis
 
 ## What Narayan is
 
-Narayan is a B2B AI agent platform. Tenants configure automation agents through a conversational plan mode interface — no code, no JSON — and plan mode now also validates and repairs drafts before save. Those agents run on a schedule or in response to external events. Agents read from and write to SaaS connectors (Salesforce, Zendesk, GitHub, Slack, and 17 others), external databases, REST APIs, and MCP servers.
+Narayan is a B2B AI agent platform. Tenants configure automation agents through a conversational plan mode interface — no code, no JSON — and plan mode now also validates and repairs drafts before save. Those agents can run on a schedule, in response to external events, on demand, or after another role completes. Agents read from and write to SaaS connectors (Salesforce, Zendesk, GitHub, Slack, and 22 built-ins total), external databases, REST APIs, and MCP servers.
 
 The platform is a Rust backend (Axum, SQLx, Tokio) with a React + Vite frontend. All agent state, role config, run history, and credential data live in PostgreSQL. Vector memory uses pgvector. Workspaces are ephemeral directories on the host filesystem.
 
@@ -24,7 +24,7 @@ src/
 ├── cognition/      Cognitive control loop for multi-step reasoning
 ├── compliance/     PII redaction, SLA tracking, citations, evidence packaging
 ├── config.rs       Environment-based configuration
-├── connectors/     20 built-in SaaS connector definitions + OAuth + webhooks
+├── connectors/     22 built-in SaaS connector definitions + OAuth + webhooks
 ├── debug/          Step recorder and replay
 ├── events/         In-process SSE event bus + workforce event dispatch
 ├── gateway/        LLM gateway — routing, cost tracking, rate limiting
@@ -381,7 +381,7 @@ This is the canonical source for completion criteria checking and savings estima
 
 ## Connector system
 
-### Built-in connectors (20)
+### Built-in connectors (22)
 Defined in `tools/connector_tool.rs` as `ALL_CONNECTORS: &[ConnectorDef]`. Each has `name`, `category`, `keywords`, `summary`, `auth_type` (Bearer/OAuth2/ApiKey), and `settings` fields for subdomain/domain config. Grouped into domain segments:
 - `customer_support`: zendesk, intercom, freshdesk
 - `sales_revops`: salesforce, hubspot
@@ -589,7 +589,7 @@ src/
 
 ## Segment system
 
-Domain-specific capability bundles in `src/segments/`. Each segment registers connectors, tools, and services appropriate to a job category. Runtime execution and plan-mode grounding have access only to the tools registered for the tenant's segment. Current segments: `customer_support`, `sales_revops`, `finance_accounting`, `devops`, `hr_people_ops`, `legal_contract`, `research_analyst`, `software_engineer`, `marketing`, `general`.
+Domain-specific capability bundles in `src/segments/`. Each segment registers connectors, tools, and services appropriate to a job category. Runtime execution and plan-mode grounding have access only to the tools registered for the tenant's segment. Current segments: `compliance_ops`, `customer_success_renewals`, `customer_support`, `data_analytics`, `engineering`, `finance_accounting`, `hr_people_ops`, `it_ops_itsm`, `legal_contract`, `marketing_growth`, `procurement_vendor_ops`, `research_intelligence`, `sales_revops`, `security_ops_grc`.
 
 ---
 
@@ -782,11 +782,10 @@ Confidence is high — trigger step skipped. Output destination hint = `"email_d
 
 | Turn | Question | Your answer | Field written |
 |---|---|---|---|
-| 1 | Where should the draft go? | Zendesk ticket reply (draft) | `OutputDestination::Email { connector: "zendesk", draft: true }` |
-| 2 | Response mode: draft for approval or auto-send? | Draft for approval always | `GuidelineRule::always("Draft reply in Zendesk — never send without approval")` |
+| 1 | What is the URL of your help documentation? | docs.acme.com | `GuidelineRule::always("Search docs.acme.com before composing reply")` |
+| 2 | Which Slack channel or email should escalations go to? | #cs-escalations | `FailureRule { EscalateToHuman { notify_channel: "#cs-escalations" } }` |
 | 3 | First-response SLA? | 1 hour | `AgentConstraint: "First response within 1 hour"` |
-| 4 | Escalation: which tickets go to human? | Billing disputes, angry tone, VIP accounts | `FailureRule { EscalateToHuman { notify_channel: "#cs-escalations" } }` |
-| 5 | Knowledge source? | docs.acme.com | `GuidelineRule::always("Search docs.acme.com before composing reply")` |
+| 4 | Draft mode? | Always draft, never auto-send | `GuidelineRule::always("Always save as draft in Zendesk — never publish without human review")` |
 
 CompletionCriteria auto: ticket draft written, reply attached to ticket.
 
@@ -933,7 +932,7 @@ The role chat is the interface for managing your AI employee the same way you'd 
 
 ## Custom connections — global database, REST APIs, MCP servers
 
-Beyond the 20 built-in connectors, tenants register their own connections that are available to any agent they build. These are tenant-global — registered once in Settings, usable in any role.
+Beyond the 22 built-in connectors, tenants register their own connections that are available to any agent they build. These are tenant-global — registered once in Settings, usable in any role.
 
 ### Registering connections
 
@@ -1247,7 +1246,7 @@ Narayan started as a basic agent loop with a plan/execute/evaluate cycle. Over m
 
 **Session 5-6:** `ExecutionGuidelines` typed contract. Before this, guidelines were `Vec<String>`. The switch to typed `GuidelineRule` / `FailureRule` / `CompletionCriterion` was the most important architectural decision in the project — it made the planner prompt, the evaluator prompt, and the completion check all derive from the same source of truth.
 
-**Session 7-8:** Connector system — 20 built-in connectors, `external_db`, `external_api`, MCP. Custom connections injected into plan mode context so the LLM knows what the tenant has available before the first question.
+**Session 7-8:** Connector system — 22 built-in connectors, `external_db`, `external_api`, MCP. Custom connections injected into plan mode context so the LLM knows what the tenant has available before the first question.
 
 **Session 9-10:** Gap fixes — `PartiallyComplete` status, `CriterionResult` typed completion check, `SkipAndLog` actually writing the log file, `items_processed` in `StepResult`, `FailureAction` override before the LLM evaluator, savings quality gate.
 

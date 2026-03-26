@@ -157,6 +157,7 @@ pub fn build_router(
         .route("/connectors", get(oauth::list_connectors))
         .route("/connectors/:type/install", post(oauth::install_connector))
         .route("/connectors/:type/webhook-install", post(oauth::install_webhook_connector))
+        .route("/connectors/:type/validate", post(oauth::validate_connector))
         .route("/connectors/:type", delete(oauth::uninstall_connector))
         // Inbound connector webhooks (kept for users who prefer push over poll)
         .route("/connectors/:type/webhook", post(connector_inbound))

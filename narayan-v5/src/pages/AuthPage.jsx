@@ -5,7 +5,7 @@ import { auth } from '../api';
 const REGISTER_DEFAULTS = { name: '', username: '', email: '', password: '', confirmPassword: '' };
 const LOGIN_DEFAULTS = { identifier: '', password: '' };
 
-export default function AuthPage({ onAuth }) {
+export default function AuthPage({ onAuth, onBack }) {
   const [mode, setMode] = useState('login');
   const [registerForm, setRegisterForm] = useState(REGISTER_DEFAULTS);
   const [loginForm, setLoginForm] = useState(LOGIN_DEFAULTS);
@@ -58,6 +58,12 @@ export default function AuthPage({ onAuth }) {
   return (
     <div className="min-h-screen bg-bg flex items-center justify-center p-6">
       <div className="w-full max-w-sm animate-in">
+        {onBack ? (
+          <button onClick={onBack} className="mb-6 text-sm font-medium text-tx-3 hover:text-tx-1 transition-colors">
+            Back to landing
+          </button>
+        ) : null}
+
         <div className="text-center mb-8">
           <p className="font-serif text-4xl text-tx-1 mb-1">Narayan</p>
           <p className="text-sm text-tx-3">Autonomous AI Employee Platform</p>

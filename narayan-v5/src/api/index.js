@@ -152,6 +152,8 @@ export const connectors = {
   // Install a webhook-only connector (returns webhook_url + webhook_secret)
   installWebhook: (type, settings = {}) =>
     req('POST', `/connectors/${type}/webhook-install`, { settings }),
+  // Validate that a connector's credentials actually work
+  validate: (type) => req('POST', `/connectors/${type}/validate`),
   // OAuth start — redirects browser to provider consent page.
   // Token is appended as ?token= so the backend can validate without Authorization header.
   oauthStartUrl: (provider) => {

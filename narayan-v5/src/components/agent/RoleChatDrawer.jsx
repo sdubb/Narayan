@@ -6,6 +6,7 @@ import {
   AlertCircle, ChevronRight, RotateCcw,
 } from 'lucide-react';
 import { roleChat as roleChatApi, agentDefs as agentDefsApi } from '../../api';
+import { ConnectorSetupModal } from '../connectors/ConnectorSetupModal';
 import FailureRuleEditor from './FailureRuleEditor';
 
 // ── Message bubble ─────────────────────────────────────────────────────────
@@ -123,6 +124,11 @@ export default function RoleChatDrawer({ roleId, agentId, roleName, onClose, onR
   const [error,          setError]          = useState('');
   // Failure rules from the role — loaded with the session greeting
   const [failureRules,   setFailureRules]   = useState([]);
+  
+  const [showConnectorModal, setShowConnectorModal] = useState(false);
+  const [requiredConnectors, setRequiredConnectors] = useState([]);
+  const [pendingChangeAfterConnectors, setPendingChangeAfterConnectors] = useState(null);
+  
   const bottomRef = useRef(null);
   const inputRef  = useRef(null);
 
@@ -186,12 +192,29 @@ export default function RoleChatDrawer({ roleId, agentId, roleName, onClose, onR
   // ── Apply change ───────────────────────────────────────────────────────
   async function applyChange() {
     if (!pendingChange) return;
+    
+    // If change involves connectors, verify first
+    if (pendingChange.change_type === 'update_connectors' && pendingChange.connectors_to_add?.length > 0) {
+      setRequiredConnectors(pendingChange.connectors_to_add);
+      setPendingChangeAfterConnectors(pendingChange);
+      setShowConnectorModal(true);
+      return; // Don't apply yet
+    }
+    
+    // Otherwise apply directly
+    await doApplyChange(pendingChange);
+  }
+
+  // Apply the change after connectors are verified
+  async function doApplyChange(change) {
+    if (!change) return;
     setApplying(true); setError('');
     try {
-      await roleChatApi.apply(roleId, sessionId, pendingChange);
-      const confirmMsg = `✓ Done — ${pendingChange.description}`;
+      await roleChatApi.apply(roleId, sessionId, change);
+      const confirmMsg = `✓ Done — ${change.description}`;
       setMessages(prev => [...prev, { role: 'assistant', content: confirmMsg, isNew: true }]);
       setPendingChange(null);
+      setPendingChangeAfterConnectors(null);
       onRoleChanged?.(); // refresh AgentPage
     } catch (e) {
       setError(e.message || 'Failed to apply change');
@@ -199,6 +222,13 @@ export default function RoleChatDrawer({ roleId, agentId, roleName, onClose, onR
       setApplying(false);
     }
   }
+
+  const handleConnectorsVerified = (verified) => {
+    if (verified && pendingChangeAfterConnectors) {
+      setShowConnectorModal(false);
+      setTimeout(() => doApplyChange(pendingChangeAfterConnectors), 300);
+    }
+  };
 
   function onKeyDown(e) {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(input); }
@@ -380,6 +410,22 @@ export default function RoleChatDrawer({ roleId, agentId, roleName, onClose, onR
           </p>
         </div>
       </motion.div>
+
+      {/* Connector Setup Modal */}
+      <AnimatePresence>
+        {showConnectorModal && (
+          <ConnectorSetupModal
+            requiredConnectors={requiredConnectors}
+            onVerified={handleConnectorsVerified}
+            onClose={() => {
+              setShowConnectorModal(false);
+              setPendingChangeAfterConnectors(null);
+              setError('Connectors not verified. You can add them in Settings later.');
+            }}
+            mode="modal"
+          />
+        )}
+      </AnimatePresence>
     </motion.div>
   );
 }

@@ -6,6 +6,7 @@ import {
   Bot, User, AlertCircle, Search, Zap, Paperclip, FileText, Trash2,
 } from 'lucide-react';
 import { planMode as planModeApi } from '../../api';
+import { ConnectorSetupModal, useConnectorVerification } from '../connectors/ConnectorSetupModal';
 
 // Phase labels shown in the progress strip
 const PHASE_LABELS = {
@@ -448,6 +449,11 @@ export default function PlanModeChat({ agentName = 'New Agent', existingAgentId 
   const [error,      setError]      = useState('');
   const [pendingAttachments, setPendingAttachments] = useState([]);
   const [attachmentsBusy, setAttachmentsBusy] = useState(false);
+  
+  const [showConnectorModal, setShowConnectorModal] = useState(false);
+  const [requiredConnectors, setRequiredConnectors] = useState([]);
+  const [connectorVerified, setConnectorVerified] = useState(false);
+  const connectorVerification = useConnectorVerification(requiredConnectors);
   const bottomRef = useRef(null);
   const inputRef  = useRef(null);
   const fileInputRef = useRef(null);
@@ -627,6 +633,29 @@ export default function PlanModeChat({ agentName = 'New Agent', existingAgentId 
       const proceed = window.confirm(`${label}\n\nSave anyway?`);
       if (!proceed) return;
     }
+    
+    // Extract required connectors from draft
+    if (phase === 'complete') {
+      try {
+        const session = await planModeApi.get(sessionId);
+        const draftConnectors = session?.draft_role?.connectors || [];
+        
+        if (draftConnectors.length > 0) {
+          setRequiredConnectors(draftConnectors);
+          setShowConnectorModal(true);
+          setConnectorVerified(false);
+          return; // Don't save yet
+        }
+      } catch (e) {
+        console.warn('Failed to extract connectors:', e);
+      }
+    }
+    
+    // Skip connector check if already verified or no connectors
+    if (requiredConnectors.length > 0 && !connectorVerified) {
+      return;
+    }
+    
     setSaving(true); setError('');
     try {
       const res = await planModeApi.save(sessionId);
@@ -636,7 +665,7 @@ export default function PlanModeChat({ agentName = 'New Agent', existingAgentId 
     } finally {
       setSaving(false);
     }
-  }, [sessionId, onComplete, testResult]);
+  }, [sessionId, onComplete, testResult, phase, requiredConnectors, connectorVerified]);
 
   // ── Keyboard submit ────────────────────────────────────────────────────
   function onKeyDown(e) {
@@ -647,6 +676,26 @@ export default function PlanModeChat({ agentName = 'New Agent', existingAgentId 
       }
     }
   }
+
+  // Handle connector verification callback
+  const handleConnectorsVerified = (verified) => {
+    if (verified) {
+      setConnectorVerified(true);
+      setShowConnectorModal(false);
+      // Auto-save after verification
+      setTimeout(() => {
+        setSaving(true); setError('');
+        planModeApi.save(sessionId)
+          .then(res => {
+            onComplete?.({ agentId: res.agent_id, roleId: res.role_id });
+          })
+          .catch(e => {
+            setError(e.message || 'Failed to save agent');
+            setSaving(false);
+          });
+      }, 300);
+    }
+  };
 
   // ─────────────────────────────────────────────────────────────────────
   return (
@@ -870,6 +919,21 @@ export default function PlanModeChat({ agentName = 'New Agent', existingAgentId 
           </>
         )}
       </motion.div>
+
+      {/* Connector Setup Modal */}
+      <AnimatePresence>
+        {showConnectorModal && (
+          <ConnectorSetupModal
+            requiredConnectors={requiredConnectors}
+            onVerified={handleConnectorsVerified}
+            onClose={() => {
+              setShowConnectorModal(false);
+              setError('Connectors not verified. You can add them in Settings later.');
+            }}
+            mode="modal"
+          />
+        )}
+      </AnimatePresence>
     </div>
   );
 }
