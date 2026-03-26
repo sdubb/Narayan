@@ -515,6 +515,28 @@ impl AgentLoop {
                 "agent loop reached plan completion"
             );
             state.mark_completed();
+            
+            // Emit RoleCompleted if this agent is executing a specific role
+            if let (Some(agent_def_id), Some(role_id), Some(role_name)) = (
+                state.metadata.get("agent_definition_id").and_then(|v| v.as_str()),
+                state.metadata.get("role_id").and_then(|v| v.as_str()),
+                state.metadata.get("role_name").and_then(|v| v.as_str()),
+            ) {
+                let output_data = state.metadata.get("final_output").cloned().unwrap_or(serde_json::json!({}));
+                self.event_bus.publish(AgentEvent::RoleCompleted {
+                    agent_definition_id: agent_def_id.to_string(),
+                    role_id: role_id.to_string(),
+                    role_name: role_name.to_string(),
+                    output_data,
+                });
+                tracing::info!(
+                    agent_definition_id = %agent_def_id,
+                    role_id = %role_id,
+                    role_name = %role_name,
+                    "RoleCompleted event emitted for workforce event subscriptions"
+                );
+            }
+            
             self.event_bus.publish(AgentEvent::GoalComplete { agent_id: state.id.clone(), summary: summary.clone() });
             self.event_bus.close(&state.id);
             return Ok(StepOutcome::Complete);

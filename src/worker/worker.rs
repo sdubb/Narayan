@@ -176,6 +176,48 @@ impl Worker {
                     let tenant = state.tenant_id.clone();
                     spawn_savings_estimation(store, tenant, goal_instance_id);
                 }
+                
+                // Trigger workforce event dispatcher for role completion
+                if let (Some(role_id), Some(role_name), Some(agent_def_id), Some(goal_instance_id)) = (
+                    state.metadata.get("role_id").and_then(|v| v.as_str()),
+                    state.metadata.get("role_name").and_then(|v| v.as_str()),
+                    state.metadata.get("agent_definition_id").and_then(|v| v.as_str()),
+                    state.metadata.get("goal_instance_id").and_then(|v| v.as_str()),
+                ) {
+                    let payload = crate::agent::definition::WorkforceEventPayload {
+                        tenant_id: state.tenant_id.clone(),
+                        agent_id: agent_def_id.to_string(),
+                        agent_name: state.metadata.get("agent_name").and_then(|v| v.as_str()).unwrap_or("agent").to_string(),
+                        role_id: role_id.to_string(),
+                        role_name: role_name.to_string(),
+                        goal_instance_id: goal_instance_id.to_string(),
+                        status: "completed".to_string(),
+                        output_data: state.metadata.get("final_output").cloned().unwrap_or(serde_json::json!({})),
+                        failure_reason: None,
+                        emitted_at: chrono::Utc::now(),
+                    };
+                    
+                    let store = Arc::clone(&self.store);
+                    tokio::spawn(async move {
+                        match crate::events::workforce::dispatch(&payload, &store).await {
+                            Ok(spawned) => {
+                                tracing::info!(
+                                    role_id = %role_id,
+                                    role_name = %role_name,
+                                    new_goals = spawned,
+                                    "workforce event dispatcher processed role completion"
+                                );
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    role_id = %role_id,
+                                    error = %e,
+                                    "workforce event dispatcher failed"
+                                );
+                            }
+                        }
+                    });
+                }
             }
             StepOutcome::PartiallyComplete { note } => {
                 tracing::warn!(agent_id = %task.agent_id, note = %note, "⚠ goal partially complete");

@@ -224,8 +224,13 @@ pub enum AgentEvent {
         step_count: usize,
     },
 
-    // ── Terminal ───────────────────────────────────────────────────────────
-    GoalComplete {
+    // ── Terminal ───────────────────────────────────────────────────────────    /// Emitted when a role completes (triggers downstream WorkforceEvent subscriptions).
+    RoleCompleted {
+        agent_definition_id: String,
+        role_id: String,
+        role_name: String,
+        output_data: serde_json::Value,
+    },    GoalComplete {
         agent_id: String,
         summary: String,
     },

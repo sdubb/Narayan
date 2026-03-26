@@ -282,6 +282,7 @@ export default function AgentPage({ agentId, onBack }) {
 
   const activeRoles    = roles.filter(r => r.status === 'active');
   const inactiveRoles  = roles.filter(r => r.status !== 'active');
+  const pendingRoles   = roles.filter(r => ['draft', 'testing'].includes(r.status));
 
   return (
     <>
@@ -302,6 +303,11 @@ export default function AgentPage({ agentId, onBack }) {
                 )}>
                   {agent.status || 'draft'}
                 </span>
+                {pendingRoles.length > 0 && (
+                  <span className="px-2 py-0.5 rounded text-[10px] font-semibold border bg-info-soft text-info border-info/20">
+                    {pendingRoles.length} pending
+                  </span>
+                )}
               </div>
               {agent.persona && (
                 <p className="text-xs text-tx-3 leading-relaxed max-w-lg">{agent.persona}</p>
@@ -361,6 +367,23 @@ export default function AgentPage({ agentId, onBack }) {
           ) : (
             <>
               <SavingsCard className="mb-2" />
+              {pendingRoles.length > 0 && (
+                <section>
+                  <p className="section-label mb-3 text-info">Pending review ({pendingRoles.length})</p>
+                  <div className="space-y-3">
+                    {pendingRoles.map(role => (
+                      <RoleCard
+                        key={role.id}
+                        role={role}
+                        agentId={agentId}
+                        onRefresh={load}
+                        onChat={() => setChatRole({ id: role.id, name: role.name })}
+                        onRunClick={id => setSelectedRun(id)}
+                      />
+                    ))}
+                  </div>
+                </section>
+              )}
               {activeRoles.length > 0 && (
                 <section>
                   <p className="section-label mb-3">Active roles</p>
@@ -379,11 +402,11 @@ export default function AgentPage({ agentId, onBack }) {
                 </section>
               )}
 
-              {inactiveRoles.length > 0 && (
+              {inactiveRoles.filter(r => !['draft', 'testing'].includes(r.status)).length > 0 && (
                 <section>
                   <p className="section-label mb-3">Draft / paused roles</p>
                   <div className="space-y-3">
-                    {inactiveRoles.map(role => (
+                    {inactiveRoles.filter(r => !['draft', 'testing'].includes(r.status)).map(role => (
                       <RoleCard
                         key={role.id}
                         role={role}

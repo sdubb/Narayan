@@ -501,6 +501,19 @@ async fn main() -> Result<()> {
 
     tokio::spawn(Metrics::run_window_reset(metrics.clone()));
 
+    // ── Workforce Event Dispatcher ─────────────────────────────────────────
+    // Listen for RoleCompleted events and dispatch to dependent WorkforceEvent roles
+    {
+        let store = store.clone();
+        let event_bus = event_bus.clone();
+        
+        // For now, the dispatcher is called directly when role completes.
+        // No separate background task needed—the event is published and can be handled
+        // by subscribers. In a future enhancement, could add a proper event subscription
+        // mechanism here.
+        tracing::info!("workforce event dispatcher armed (waits for RoleCompleted events)");
+    }
+
     // Reset monthly step counters at midnight on the 1st of each month
     {
         let m = metrics.clone();

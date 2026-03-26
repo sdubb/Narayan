@@ -100,6 +100,24 @@ export const agents = {
       feedback: feedback || '',
       edited_steps: editedSteps || null,
     }),
+  // Parse pending roles from memory_ref
+  getPendingRoles: (agent) => {
+    if (!agent?.memory_ref) return [];
+    const match = agent.memory_ref.match(/\|pending_roles:(\[.*?\])/);
+    if (!match) return [];
+    try {
+      return JSON.parse(match[1]);
+    } catch {
+      return [];
+    }
+  },
+  // Check if agent has more roles to configure
+  hasMoreRolesToConfigure: (agent) => {
+    return agents.getPendingRoles(agent).length > 0;
+  },
+  // Resume plan mode for next role
+  resumePlanModeForNextRole: (agentId) =>
+    req('POST', `/agents/${agentId}/plan-mode/resume`, {}),
 };
 
 // ── Workspace ─────────────────────────────────────────────────────────────

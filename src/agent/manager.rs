@@ -68,6 +68,104 @@ impl AgentManager {
         PathBuf::from(self.workspace_manager.local_root())
     }
 
+    /// Start plan mode for the next pending role in an existing multi-role agent.
+    /// Parses pending_roles from draft_agent.memory_ref and returns a session
+    /// with the next role pre-filled and skipping intent extraction.
+    pub async fn start_plan_mode_for_next_role(
+        &self,
+        agent_id: &str,
+        tenant_id: &str,
+    ) -> Result<crate::agent::definition::PlanModeSession> {
+        // Load existing agent definition
+        let agent = self
+            .store
+            .get_agent_definition(tenant_id, agent_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Agent definition not found: {}", agent_id))?;
+
+        // Parse pending_roles from memory_ref
+        let pending_roles = Self::extract_pending_roles(&agent.memory_ref)?;
+        if pending_roles.is_empty() {
+            anyhow::bail!("No pending roles found in agent: {}", agent_id);
+        }
+
+        // Extract the first pending role
+        let next_role_resp = pending_roles.first().cloned().ok_or_else(|| {
+            anyhow::anyhow!("Pending roles array is empty")
+        })?;
+
+        // Create new session with the next role pre-filled
+        let mut session = crate::agent::definition::PlanModeSession {
+            id: new_id(),
+            tenant_id: tenant_id.to_string(),
+            draft_agent: agent.clone(),
+            draft_role: Some(crate::agent::definition::AgentRole {
+                id: new_id(),
+                agent_id: agent.id.clone(),
+                tenant_id: tenant_id.to_string(),
+                version: 1,
+                status: crate::agent::definition::RoleStatus::Draft,
+                name: next_role_resp
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("untitled role")
+                    .to_string(),
+                trigger: Default::default(),
+                purpose: String::new(),
+                role_category: crate::agent::definition::RoleCategory::General,
+                execution_guidelines: Default::default(),
+                connectors: agent.connectors.clone(),
+                tools: vec![],
+                output_spec: Default::default(),
+                memory_scope: Default::default(),
+                execution_limits: Default::default(),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            }),
+            conversation: vec![],
+            attachments: vec![],
+            attachment_context: String::new(),
+            session_workspace: None,
+            goal_fingerprint: None,
+            repair_version: 1,
+            reused_from_session_id: None,
+            repair_root_session_id: None,
+            phase: crate::agent::definition::PlanModePhase::CapturingClarifications,
+            intent_cache: None,
+            pending_steps: vec![],
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+
+        // Load existing roles for the agent to populate cross-role context
+        let existing_roles = self.store.list_roles_for_agent(tenant_id, agent_id).await.unwrap_or_default();
+        tracing::info!(
+            agent_id = %agent_id,
+            next_role_name = %session.draft_role.as_ref().map(|r| r.name.clone()).unwrap_or_default(),
+            existing_role_count = existing_roles.len(),
+            "resuming plan mode for next role in multi-role agent"
+        );
+
+        Ok(session)
+    }
+
+    /// Parse pending_roles from memory_ref format: "agent:xxx|pending_roles:[...]"
+    fn extract_pending_roles(memory_ref: &str) -> Result<Vec<serde_json::Value>> {
+        if let Some(pos) = memory_ref.find("|pending_roles:") {
+            let json_str = &memory_ref[pos + 15..]; // skip "|pending_roles:"
+            let cleaned = json_str.trim_end_matches('`');
+            match serde_json::from_str::<Vec<serde_json::Value>>(cleaned) {
+                Ok(roles) => Ok(roles),
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to parse pending_roles JSON");
+                    Ok(vec![])
+                }
+            }
+        } else {
+            Ok(vec![])
+        }
+    }
+
     /// Create a new goal and root agent, scoped to `tenant_id`.
     /// Automatically starts SLA tracking if an SlaTracker is active for this segment.
     /// If `conversation_id` is provided, the agent is linked to that conversation.

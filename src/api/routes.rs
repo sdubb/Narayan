@@ -1357,6 +1357,31 @@ pub async fn cancel_agent(
     }
 }
 
+/// POST /agents/:id/plan-mode/resume — resume plan mode for next role in multi-role agent
+pub async fn resume_plan_mode_for_next_role(
+    State(state): State<AppState>,
+    tenant: AuthenticatedTenant,
+    Path(agent_id): Path<String>,
+) -> impl IntoResponse {
+    match state.manager.start_plan_mode_for_next_role(&agent_id, &tenant.tenant_id).await {
+        Ok(session) => {
+            // Persist the session to the store
+            match state.store.upsert_plan_mode_session(&session).await {
+                Ok(_) => Json(serde_json::json!({
+                    "session_id": session.id,
+                    "phase": format!("{:?}", session.phase),
+                    "draft_role": session.draft_role.as_ref().map(|r| serde_json::json!({
+                        "name": r.name,
+                        "id": r.id
+                    }))
+                })).into_response(),
+                Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to persist session: {}", e)),
+            }
+        }
+        Err(e) => err(StatusCode::BAD_REQUEST, e.to_string()),
+    }
+}
+
 // ── Clarification endpoint ─────────────────────────────────────────────────
 
 /// POST /agents/:id/clarify — submit answers to clarification questions.
