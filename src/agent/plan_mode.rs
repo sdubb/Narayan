@@ -808,6 +808,8 @@ impl PlanModeManager {
         &self,
         session: &mut PlanModeSession,
         uploads: Vec<crate::agent::definition::PlanModeAttachmentUpload>,
+        file_cap_bytes: Option<u64>,
+        workspace_cap_bytes: Option<u64>,
     ) -> Result<Vec<crate::agent::definition::PlanModeAttachment>> {
         let root = self.ensure_session_workspace(session).await?;
         if uploads.is_empty() {
@@ -816,6 +818,7 @@ impl PlanModeManager {
 
         let files_root = root.join("files");
         tokio::fs::create_dir_all(&files_root).await?;
+        let mut current_workspace_bytes = directory_size_bytes(&files_root)?;
 
         let mut created = Vec::new();
         let mut snippets = Vec::new();
@@ -825,9 +828,33 @@ impl PlanModeManager {
                 .decode(upload.content_base64.trim())
                 .map_err(|e| anyhow::anyhow!("failed to decode attachment '{}': {}", upload.name, e))?;
 
+            let size_bytes = decoded.len() as u64;
+            if let Some(limit) = file_cap_bytes {
+                if size_bytes > limit {
+                    return Err(anyhow::anyhow!(
+                        "attachment '{}' is too large ({} bytes, max {} bytes)",
+                        upload.name,
+                        size_bytes,
+                        limit
+                    ));
+                }
+            }
+            if let Some(limit) = workspace_cap_bytes {
+                let projected = current_workspace_bytes.saturating_add(size_bytes);
+                if projected > limit {
+                    return Err(anyhow::anyhow!(
+                        "workspace storage cap reached ({} bytes used, {} byte file would exceed max {})",
+                        current_workspace_bytes,
+                        size_bytes,
+                        limit
+                    ));
+                }
+            }
+
             let name = sanitise_attachment_name(&upload.name);
             let path = unique_session_attachment_path(&files_root, &name).await?;
             tokio::fs::write(&path, &decoded).await?;
+            current_workspace_bytes = current_workspace_bytes.saturating_add(size_bytes);
 
             let kind = infer_plan_mode_attachment_kind(&path, upload.mime_type.as_deref());
             let preview = self
@@ -2330,6 +2357,19 @@ async fn unique_session_attachment_path(root: &Path, file_name: &str) -> Result<
     }
 
     unreachable!("attachment path generation should always terminate")
+}
+
+fn directory_size_bytes(root: &Path) -> Result<u64> {
+    if !root.exists() {
+        return Ok(0);
+    }
+    let mut total = 0u64;
+    for entry in walkdir::WalkDir::new(root).into_iter().filter_map(Result::ok) {
+        if entry.file_type().is_file() {
+            total = total.saturating_add(entry.metadata().map(|m| m.len()).unwrap_or(0));
+        }
+    }
+    Ok(total)
 }
 
 fn infer_plan_mode_attachment_kind(

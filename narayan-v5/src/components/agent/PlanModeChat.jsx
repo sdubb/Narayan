@@ -449,6 +449,7 @@ export default function PlanModeChat({ agentName = 'New Agent', existingAgentId 
   const [error,      setError]      = useState('');
   const [pendingAttachments, setPendingAttachments] = useState([]);
   const [attachmentsBusy, setAttachmentsBusy] = useState(false);
+  const [activeAgentId, setActiveAgentId] = useState(existingAgentId);
   
   const [showConnectorModal, setShowConnectorModal] = useState(false);
   const [requiredConnectors, setRequiredConnectors] = useState([]);
@@ -479,12 +480,13 @@ export default function PlanModeChat({ agentName = 'New Agent', existingAgentId 
   }, []);
 
   // ── Start session (from template or scratch) ────────────────────────────
-  const startSession = useCallback(async (template = null) => {
+  const startSession = useCallback(async (template = null, agentIdOverride = null) => {
     setLoading(true);
     setError('');
     try {
-      const res = await planModeApi.start(agentName, existingAgentId, template?.id || null);
+      const res = await planModeApi.start(agentName, agentIdOverride ?? activeAgentId, template?.id || null);
       setSessionId(res.session_id);
+      setActiveAgentId(res.agent_id || agentIdOverride || activeAgentId);
       setMessages([{ role: 'assistant', content: res.message || 'What should this agent do?', isNew: true }]);
       setPhase(res.phase || 'capturing_intent');
       setTestResult(null);
@@ -495,7 +497,7 @@ export default function PlanModeChat({ agentName = 'New Agent', existingAgentId 
     } finally {
       setLoading(false);
     }
-  }, [agentName, existingAgentId]);
+  }, [agentName, activeAgentId]);
 
   const handleAttachmentPick = useCallback(async (event) => {
     const files = Array.from(event.target.files || []);
@@ -625,6 +627,21 @@ export default function PlanModeChat({ agentName = 'New Agent', existingAgentId 
     }
   }, [sessionId, revising, testResult, phase]);
 
+  const continueOrComplete = useCallback(async (res) => {
+    if (res?.has_more_roles) {
+      setRequiredConnectors([]);
+      setConnectorVerified(false);
+      setShowConnectorModal(false);
+      setTestResult(null);
+      setComplete(false);
+      setActiveAgentId(res.agent_id);
+      await startSession(null, res.agent_id);
+      return;
+    }
+
+    onComplete?.({ agentId: res.agent_id, roleId: res.role_id });
+  }, [startSession, onComplete]);
+
   const handleSave = useCallback(async () => {
     if (!sessionId) return;
     const status = testResult?.status;
@@ -659,13 +676,13 @@ export default function PlanModeChat({ agentName = 'New Agent', existingAgentId 
     setSaving(true); setError('');
     try {
       const res = await planModeApi.save(sessionId);
-      onComplete?.({ agentId: res.agent_id, roleId: res.role_id });
+      await continueOrComplete(res);
     } catch (e) {
       setError(e.message || 'Failed to save agent');
     } finally {
       setSaving(false);
     }
-  }, [sessionId, onComplete, testResult, phase, requiredConnectors, connectorVerified]);
+  }, [sessionId, testResult, phase, requiredConnectors, connectorVerified, continueOrComplete]);
 
   // ── Keyboard submit ────────────────────────────────────────────────────
   function onKeyDown(e) {
@@ -686,13 +703,11 @@ export default function PlanModeChat({ agentName = 'New Agent', existingAgentId 
       setTimeout(() => {
         setSaving(true); setError('');
         planModeApi.save(sessionId)
-          .then(res => {
-            onComplete?.({ agentId: res.agent_id, roleId: res.role_id });
-          })
+          .then(res => continueOrComplete(res))
           .catch(e => {
             setError(e.message || 'Failed to save agent');
-            setSaving(false);
-          });
+          })
+          .finally(() => setSaving(false));
       }, 300);
     }
   };

@@ -61,6 +61,28 @@ impl BillingPlan {
         }
     }
 
+    /// Soft workspace cap per active agent workspace.
+    pub fn workspace_cap_bytes(&self) -> Option<u64> {
+        match self {
+            BillingPlan::Free => Some(50 * 1024 * 1024),
+            BillingPlan::Go => Some(500 * 1024 * 1024),
+            BillingPlan::Pro => Some(2 * 1024 * 1024 * 1024),
+            BillingPlan::Enterprise => None,
+            BillingPlan::Credits => None,
+        }
+    }
+
+    /// Per-file cap for uploads and generated workspace artifacts.
+    pub fn workspace_file_cap_bytes(&self) -> Option<u64> {
+        match self {
+            BillingPlan::Free => Some(10 * 1024 * 1024),
+            BillingPlan::Go => Some(25 * 1024 * 1024),
+            BillingPlan::Pro => Some(50 * 1024 * 1024),
+            BillingPlan::Enterprise => None,
+            BillingPlan::Credits => None,
+        }
+    }
+
     /// Max Narayan API requests per second.
     pub fn api_requests_per_sec(&self) -> f64 {
         match self {

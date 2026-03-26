@@ -1,6 +1,6 @@
 # Narayan Architecture
 
-_Last updated: March 2026. Reflects the plan-mode-first architecture, deterministic workflow outlines, test/revise loop, goal-fingerprint repair reuse, multi-role agents, connector system, execution guidelines, completion criteria, savings estimation, role chat, and runtime gap fixes._
+_Last updated: March 2026. Reflects the plan-mode-first architecture, deterministic workflow outlines, test/revise loop, goal-fingerprint repair reuse, multi-role agents, connector system, execution guidelines, completion criteria, savings estimation, role chat, runtime gap fixes, workspace quotas, and artifact export flows._
 
 ---
 
@@ -9,6 +9,8 @@ _Last updated: March 2026. Reflects the plan-mode-first architecture, determinis
 Narayan is a B2B AI agent platform. Tenants configure automation agents through a conversational plan mode interface — no code, no JSON — and plan mode now also validates and repairs drafts before save. Those agents can run on a schedule, in response to external events, on demand, or after another role completes. Agents read from and write to SaaS connectors (Salesforce, Zendesk, GitHub, Slack, and 22 built-ins total), external databases, REST APIs, and MCP servers.
 
 The platform is a Rust backend (Axum, SQLx, Tokio) with a React + Vite frontend. All agent state, role config, run history, and credential data live in PostgreSQL. Vector memory uses pgvector. Workspaces are ephemeral directories on the host filesystem.
+
+Workspace storage is quota-aware at the tenant plan layer. Free, paid, and enterprise plans share the same workspace model, but the soft cap and per-file cap differ by tier. The UI exposes individual artifact downloads, a compressed workspace bundle export, and a summary PDF export from the agent control center.
 
 ---
 
@@ -113,6 +115,24 @@ ExecutionGuidelines {
 One run of one AgentRole. Created by the scheduler or via webhook. Fields include status (`Pending → Running → Completed | PartiallyComplete | Failed | Cancelled`), `result` (JSONB — carries `criteria_checks`, `step_outputs`, processed item counts), `cost_usd`, `human_hours_saved`, `human_cost_saved_usd`.
 
 `PartiallyComplete` is a first-class status: set when all plan steps ran but one or more `CompletionCriterion` checks failed. The `result.criteria_checks` array carries per-criterion `{ description, satisfied, check_type, detail }` for the run browser UI.
+
+### Workspace quotas and artifact exports
+
+Workspace storage is enforced as a plan policy rather than a per-user hard limit:
+
+- Free: `50 MB` workspace cap, `10 MB` per file
+- Go: `500 MB` workspace cap, `25 MB` per file
+- Pro: `2 GB` workspace cap, `50 MB` per file
+- Enterprise: no fixed cap, but fair-use monitoring still applies
+
+Plan mode rejects uploads that would exceed the current plan's file or workspace cap before writing them into the session workspace.
+
+The agent control center exposes two download paths:
+
+- individual workspace artifacts, downloaded directly from the workspace tree
+- a compressed `tar.zst` bundle for the whole workspace files directory
+
+There is also a summary PDF export for the full agent snapshot, so users can keep a compact offline copy of the agent's identity, roles, recent runs, and blockers.
 
 ---
 

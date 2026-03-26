@@ -1,8 +1,8 @@
-use std::sync::Arc;
+use std::{io::{BufWriter, Cursor}, sync::Arc};
 
 use axum::{
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{header, HeaderValue, StatusCode},
     response::IntoResponse,
     Json,
 };
@@ -11,9 +11,10 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
 use sqlx::Row;
+use printpdf::*;
 
 use crate::{
-    agent::AgentManager,
+    agent::{AgentChatManager, AgentManager},
     agent::PlanModeTestResult,
     auth::{hash_password, issue_token, verify_password},
     gateway::{cost::AgentUsage, CostTracker},
@@ -2129,6 +2130,134 @@ pub async fn get_agent_definition(
     }
 }
 
+#[derive(Debug, Deserialize)]
+pub struct AgentChatBody {
+    pub message: String,
+    #[serde(default)]
+    pub conversation: Vec<crate::agent::AgentChatMessage>,
+}
+
+/// POST /agent-definitions/:id/chat — centralized agent chat for one agent
+pub async fn agent_chat(
+    State(state): State<AppState>,
+    tenant: AuthenticatedTenant,
+    Path(agent_id): Path<String>,
+    Json(body): Json<AgentChatBody>,
+) -> impl IntoResponse {
+    let manager = build_agent_chat_manager(&state);
+    match manager
+        .respond(&tenant.tenant_id, &agent_id, &body.message, &body.conversation)
+        .await
+    {
+        Ok(reply) => Json(serde_json::json!({
+            "agent_id": agent_id,
+            "reply": reply,
+        }))
+        .into_response(),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+/// GET /agent-definitions/:id/summary.pdf â€” export a compact agent summary as PDF.
+pub async fn export_agent_summary_pdf(
+    State(state): State<AppState>,
+    tenant: AuthenticatedTenant,
+    Path(agent_id): Path<String>,
+) -> impl IntoResponse {
+    let agent = match state.store.get_agent_definition(&tenant.tenant_id, &agent_id).await {
+        Ok(Some(agent)) => agent,
+        Ok(None) => return err(StatusCode::NOT_FOUND, "agent definition not found"),
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    };
+
+    let roles = state.store.list_roles_for_agent(&tenant.tenant_id, &agent_id).await.unwrap_or_default();
+    let runs = state.store.list_goal_instances_for_agent(&tenant.tenant_id, &agent_id, 8).await.unwrap_or_default();
+    let others = state.store.list_agent_definitions(&tenant.tenant_id).await.unwrap_or_default();
+    let role_lookup: std::collections::HashMap<String, String> =
+        roles.iter().map(|role| (role.id.clone(), role.name.clone())).collect();
+
+    let mut sections = vec![
+        ("Agent overview".to_string(), format!(
+            "Name: {}\nStatus: {}\nPersona: {}\nConnectors: {}\nConstraints: {}\nPending roles: {}",
+            agent.name,
+            format!("{:?}", agent.status).to_lowercase(),
+            maybe_or_dash(&agent.persona),
+            list_or_none(&agent.connectors),
+            list_or_none(&agent.constraints),
+            pending_roles_len(&agent.memory_ref),
+        )),
+    ];
+
+    if !roles.is_empty() {
+        sections.push(("Roles".to_string(), roles.iter().take(8).map(|role| {
+            format!(
+                "- {} [{}] trigger={} connectors={}",
+                role.name,
+                format!("{:?}", role.status).to_lowercase(),
+                trigger_summary(&role.trigger),
+                if role.connectors.is_empty() { "none".into() } else { role.connectors.join(", ") }
+            )
+        }).collect::<Vec<_>>().join("\n")));
+    }
+
+    if !runs.is_empty() {
+        sections.push(("Recent runs".to_string(), runs.iter().take(8).map(|gi| {
+            let role_name = role_lookup.get(&gi.role_id).cloned().unwrap_or_else(|| gi.role_id.clone());
+            let state = match gi.status {
+                crate::state::GoalInstanceStatus::Completed => "completed",
+                crate::state::GoalInstanceStatus::PartiallyComplete => "partial",
+                crate::state::GoalInstanceStatus::Failed => "failed",
+                crate::state::GoalInstanceStatus::Cancelled => "cancelled",
+                crate::state::GoalInstanceStatus::Running => "running",
+                crate::state::GoalInstanceStatus::Pending => "pending",
+            };
+            let mut line = format!("- {} [{}] role={} cost=${:.4}", gi.id, state, role_name, gi.cost_usd);
+            if let Some(reason) = &gi.failure_reason {
+                line.push_str(&format!(" note={}", reason));
+            }
+            line
+        }).collect::<Vec<_>>().join("\n")));
+    }
+
+    let mut peer_lines = Vec::new();
+    for other in others.iter().filter(|other| other.id != agent_id).take(8) {
+        let role_count = state
+            .store
+            .list_roles_for_agent(&tenant.tenant_id, &other.id)
+            .await
+            .map(|roles| roles.len())
+            .unwrap_or(0);
+        peer_lines.push(format!(
+            "- {} [{}] roles={}",
+            other.name,
+            format!("{:?}", other.status).to_lowercase(),
+            role_count
+        ));
+    }
+    if !peer_lines.is_empty() {
+        sections.push(("Other agents".to_string(), peer_lines.join("\n")));
+    }
+
+    match build_pdf_bytes(&format!("{} summary", agent.name), &sections) {
+        Ok(bytes) => {
+            let filename = format!("{}-summary.pdf", sanitise_file_name(&agent.name));
+            let disposition = format!("attachment; filename=\"{}\"", filename);
+            (
+                [
+                    (header::CONTENT_TYPE, HeaderValue::from_static("application/pdf")),
+                    (
+                        header::CONTENT_DISPOSITION,
+                        HeaderValue::from_str(&disposition).unwrap_or_else(|_| HeaderValue::from_static("attachment")),
+                    ),
+                ],
+                bytes,
+            )
+                .into_response()
+        }
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
 /// PUT /agent-definitions/:id — update an existing agent definition
 pub async fn update_agent_definition(
     State(state): State<AppState>,
@@ -3184,11 +3313,26 @@ pub async fn start_plan_mode_session(
     let manager = build_plan_mode_manager(&state);
     let mut session = manager.new_session(&tenant.tenant_id, &agent_name);
 
-    // If an existing agent_id is provided, load its definition instead of creating a new draft
+    // If an existing agent_id is provided, either resume the next pending role
+    // or load its definition for a fresh role configuration.
     if let Some(existing_id) = body["agent_id"].as_str() {
         match state.store.get_agent_definition(&tenant.tenant_id, existing_id).await {
             Ok(Some(existing)) => {
-                session.draft_agent = existing;
+                let has_pending_roles = crate::agent::manager::AgentManager::split_pending_roles(&existing.memory_ref)
+                    .map(|(pending_roles, _)| !pending_roles.is_empty())
+                    .unwrap_or(false);
+                if has_pending_roles {
+                    match state.manager.start_plan_mode_for_next_role(existing_id, &tenant.tenant_id).await {
+                        Ok(resumed) => {
+                            session = resumed;
+                        }
+                        Err(_) => {
+                            session.draft_agent = existing;
+                        }
+                    }
+                } else {
+                    session.draft_agent = existing;
+                }
             }
             _ => {}
         }
@@ -3198,7 +3342,13 @@ pub async fn start_plan_mode_session(
     // If a template_id is provided, skip CapturingIntent entirely.
     // Pre-populate intent_cache, draft_role, and pending_steps from the template.
     // Plan mode enters CapturingClarifications with only the personalisation questions.
-    let first_message = if let Some(template_id) = body["template_id"].as_str() {
+    let first_message = if session.draft_role.is_some() && !session.pending_steps.is_empty() {
+        session
+            .pending_steps
+            .first()
+            .and_then(|s| s["question"].as_str().map(String::from))
+            .unwrap_or_else(|| "Let's configure the next role. What should it do?".into())
+    } else if let Some(template_id) = body["template_id"].as_str() {
         if let Some(tmpl) = find_template(template_id) {
             // Build the pre-configured role
             let mut role = (tmpl.build_role)(&session.draft_agent.id, &session.tenant_id);
@@ -3276,7 +3426,15 @@ pub async fn start_plan_mode_session(
 
     let uploads = plan_mode_attachments_from_body(&body);
     if !uploads.is_empty() {
-        if let Err(e) = manager.ingest_attachments(&mut session, uploads).await {
+        if let Err(e) = manager
+            .ingest_attachments(
+                &mut session,
+                uploads,
+                tenant.plan.workspace_file_cap_bytes(),
+                tenant.plan.workspace_cap_bytes(),
+            )
+            .await
+        {
             return err(StatusCode::BAD_REQUEST, e.to_string());
         }
     }
@@ -3420,7 +3578,15 @@ pub async fn plan_mode_turn(
     let mut session = session;
     let uploads = plan_mode_attachments_from_body(&body);
     if !uploads.is_empty() {
-        if let Err(e) = manager.ingest_attachments(&mut session, uploads).await {
+        if let Err(e) = manager
+            .ingest_attachments(
+                &mut session,
+                uploads,
+                tenant.plan.workspace_file_cap_bytes(),
+                tenant.plan.workspace_cap_bytes(),
+            )
+            .await
+        {
             return err(StatusCode::BAD_REQUEST, e.to_string());
         }
         let _ = state.store.upsert_agent_definition(&session.draft_agent).await;
@@ -3501,6 +3667,9 @@ pub async fn save_plan_mode_session(
                 "agent_id": agent.id,
                 "role_id":  role.id,
                 "status":   "deployed",
+                "has_more_roles": crate::agent::manager::AgentManager::split_pending_roles(&agent.memory_ref)
+                    .map(|(pending_roles, _)| !pending_roles.is_empty())
+                    .unwrap_or(false),
                 "goal_fingerprint": completed_session.goal_fingerprint,
                 "repair_version": completed_session.repair_version,
                 "reused_from_session_id": completed_session.reused_from_session_id,
@@ -3523,6 +3692,191 @@ fn build_plan_mode_manager(state: &AppState) -> crate::agent::PlanModeManager {
         state.manager.workspace_root(),
     )
     .with_skill_registry(Arc::clone(&state.skill_registry))
+}
+
+fn build_agent_chat_manager(state: &AppState) -> crate::agent::AgentChatManager {
+    crate::agent::AgentChatManager::new(state.manager.gateway(), Arc::clone(&state.store))
+}
+
+/// GET /agents/:id/workspace/files/*path/download â€” download a workspace file without preview limits.
+pub async fn download_workspace_file(
+    State(state): State<AppState>,
+    tenant: AuthenticatedTenant,
+    Path((agent_id, file_path)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let agent = match state.store.get_agent(&tenant.tenant_id, &agent_id).await {
+        Ok(Some(a)) => a,
+        Ok(None) => return err(StatusCode::NOT_FOUND, "agent not found"),
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    };
+
+    if file_path.contains("..") {
+        return err(StatusCode::BAD_REQUEST, "invalid path");
+    }
+
+    let base = std::path::PathBuf::from(&agent.workspace_path).join("files");
+    let full_path = base.join(&file_path);
+    if !full_path.starts_with(&base) {
+        return err(StatusCode::BAD_REQUEST, "invalid path");
+    }
+
+    match tokio::fs::read(&full_path).await {
+        Ok(content) => {
+            let ct = match full_path.extension().and_then(|e| e.to_str()) {
+                Some("md" | "txt" | "log") => "text/plain; charset=utf-8",
+                Some("json") => "application/json",
+                Some("csv") => "text/csv",
+                Some("html") => "text/html",
+                Some("png") => "image/png",
+                Some("jpg" | "jpeg") => "image/jpeg",
+                Some("pdf") => "application/pdf",
+                Some("doc") => "application/msword",
+                Some("docx") => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                Some("xls") => "application/vnd.ms-excel",
+                Some("xlsx") => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                _ => "application/octet-stream",
+            };
+            let filename = std::path::Path::new(&file_path)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("download");
+            let disposition = format!("attachment; filename=\"{}\"", filename);
+            (
+                [
+                    (header::CONTENT_TYPE, HeaderValue::from_static(ct)),
+                    (
+                        header::CONTENT_DISPOSITION,
+                        HeaderValue::from_str(&disposition).unwrap_or_else(|_| HeaderValue::from_static("attachment")),
+                    ),
+                ],
+                content,
+            )
+                .into_response()
+        }
+        Err(_) => err(StatusCode::NOT_FOUND, "file not found"),
+    }
+}
+
+fn build_workspace_bundle_bytes(base: &std::path::Path) -> anyhow::Result<Vec<u8>> {
+    let cursor = Cursor::new(Vec::new());
+    let mut tar_builder = tar::Builder::new(cursor);
+
+    for entry in walkdir::WalkDir::new(base).into_iter().filter_map(Result::ok) {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let rel = match entry.path().strip_prefix(base) {
+            Ok(path) => path,
+            Err(_) => continue,
+        };
+        tar_builder.append_path_with_name(entry.path(), rel)?;
+    }
+
+    tar_builder.finish()?;
+    let cursor = tar_builder.into_inner()?;
+    let tar_bytes = cursor.into_inner();
+    let compressed = zstd::stream::encode_all(Cursor::new(tar_bytes), 9)?;
+    Ok(compressed)
+}
+
+/// GET /agents/:id/workspace/files.tar.zst — download a compressed bundle of the workspace files directory.
+pub async fn download_workspace_bundle(
+    State(state): State<AppState>,
+    tenant: AuthenticatedTenant,
+    Path(agent_id): Path<String>,
+) -> impl IntoResponse {
+    let agent = match state.store.get_agent(&tenant.tenant_id, &agent_id).await {
+        Ok(Some(a)) => a,
+        Ok(None) => return err(StatusCode::NOT_FOUND, "agent not found"),
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    };
+
+    let base = std::path::PathBuf::from(&agent.workspace_path).join("files");
+    if !base.exists() {
+        return err(StatusCode::NOT_FOUND, "workspace files not found");
+    }
+
+    let bundle = match build_workspace_bundle_bytes(&base) {
+        Ok(bytes) => bytes,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    };
+
+    let filename = format!("{}-workspace-files.tar.zst", sanitise_file_name(&agent.name));
+    let disposition = format!("attachment; filename=\"{}\"", filename);
+
+    (
+        [
+            (header::CONTENT_TYPE, HeaderValue::from_static("application/octet-stream")),
+            (
+                header::CONTENT_DISPOSITION,
+                HeaderValue::from_str(&disposition).unwrap_or_else(|_| HeaderValue::from_static("attachment")),
+            ),
+        ],
+        bundle,
+    )
+        .into_response()
+}
+
+fn pending_roles_len(memory_ref: &str) -> usize {
+    crate::agent::manager::AgentManager::split_pending_roles(memory_ref)
+        .map(|(pending_roles, _)| pending_roles.len())
+        .unwrap_or(0)
+}
+
+fn sanitise_file_name(name: &str) -> String {
+    let mut out = String::new();
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+            out.push(ch);
+        } else if !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    let trimmed = out.trim_matches('-').to_string();
+    if trimmed.is_empty() { "agent".into() } else { trimmed }
+}
+
+fn build_pdf_bytes(title: &str, sections: &[(String, String)]) -> anyhow::Result<Vec<u8>> {
+    let (doc, page1, layer1) = PdfDocument::new(title, Mm(210.0), Mm(297.0), "Layer 1");
+    let font = doc.add_builtin_font(BuiltinFont::Helvetica)?;
+    let font_bold = doc.add_builtin_font(BuiltinFont::HelveticaBold)?;
+    let layer = doc.get_page(page1).get_layer(layer1);
+
+    let margin = 18.0_f32;
+    let page_h = 297.0_f32;
+    let usable_w = 210.0_f32 - 2.0 * margin;
+    let mut y = page_h - margin;
+
+    layer.use_text(title, 18.0, Mm(margin), Mm(y), &font_bold);
+    y -= 10.0;
+
+    let write_wrapped = |layer: &PdfLayerReference, text: &str, x: f32, y: &mut f32, fs: f32, bold: bool| {
+        let selected_font = if bold { &font_bold } else { &font };
+        let chars_per_line = ((usable_w / (fs * 0.5 * 0.35278)).floor() as usize).max(1);
+        for line in text.split('\n') {
+            for chunk in line.as_bytes().chunks(chars_per_line) {
+                if *y < 24.0 {
+                    return;
+                }
+                let chunk = std::str::from_utf8(chunk).unwrap_or("");
+                layer.use_text(chunk, fs, Mm(x), Mm(*y), selected_font);
+                *y -= fs * 0.35278 + 1.0;
+            }
+        }
+        *y -= 3.0;
+    };
+
+    for (heading, body) in sections {
+        if y < 34.0 {
+            break;
+        }
+        write_wrapped(&layer, heading, margin, &mut y, 13.0, true);
+        write_wrapped(&layer, body, margin, &mut y, 10.0, false);
+    }
+
+    let mut buf = BufWriter::new(Vec::new());
+    doc.save(&mut buf)?;
+    Ok(buf.into_inner()?)
 }
 
 fn plan_mode_attachments_from_body(body: &serde_json::Value) -> Vec<crate::agent::PlanModeAttachmentUpload> {

@@ -78,6 +78,8 @@ pub fn build_router(
         .route("/agents/:id/workspace/files", get(list_workspace_files))
         .route("/agents/:id/workspace/tree", get(list_workspace_files))
         .route("/agents/:id/workspace/files/*path", get(read_workspace_file))
+        .route("/agents/:id/workspace/files/*path/download", get(download_workspace_file))
+        .route("/agents/:id/workspace/files.tar.zst", get(download_workspace_bundle))
         .route("/agents/:id/children", get(list_agent_children))
         .route("/agents/:id/approve-plan", post(approve_plan))
         .route("/agents/:id/pause", post(pause_agent))
@@ -93,6 +95,8 @@ pub fn build_router(
         .route("/agent-definitions/:id", get(get_agent_definition))
         .route("/agent-definitions/:id", put(update_agent_definition))
         .route("/agent-definitions/:id", delete(delete_agent_definition))
+        .route("/agent-definitions/:id/chat", post(agent_chat))
+        .route("/agent-definitions/:id/summary.pdf", get(export_agent_summary_pdf))
         // Roles
         .route("/agent-definitions/:id/roles", get(list_agent_roles))
         .route("/agent-definitions/:id/roles", post(create_agent_role))

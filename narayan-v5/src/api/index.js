@@ -52,6 +52,37 @@ async function req(method, path, body, isPublic = false) {
   return ct.includes('application/json') ? res.json() : res.text();
 }
 
+async function reqBlob(method, path, body, isPublic = false) {
+  const headers = {};
+  let token = null;
+  if (!isPublic) {
+    token = getToken();
+    if (!token) {
+      emitUnauthenticated(null);
+      throw new Error('Not authenticated');
+    }
+    headers['Authorization'] = `Bearer ${token}`;
+  }
+
+  const res = await fetch(`${BASE}${path}`, {
+    method,
+    headers,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+
+  if (res.status === 401 && !isPublic) {
+    throw new Error('Session expired. Please sign in again.');
+  }
+
+  if (!res.ok) {
+    const err = await res.text().catch(() => 'Unknown error');
+    if (res.status === 402) throw new Error(`PAYMENT_REQUIRED:${err}`);
+    throw new Error(err || `HTTP ${res.status}`);
+  }
+
+  return res.blob();
+}
+
 // ── Auth ───────────────────────────────────────────────────────────────────
 export const auth = {
   register: (name, username, email, password) =>
@@ -125,6 +156,8 @@ export const workspace = {
   files: (agentId) => req('GET', `/agents/${agentId}/workspace/files`),
   tree:  (agentId) => req('GET', `/agents/${agentId}/workspace/tree`),
   file:  (agentId, path) => req('GET', `/agents/${agentId}/workspace/files/${encodeURIComponent(path)}`),
+  download: (agentId, path) => reqBlob('GET', `/agents/${agentId}/workspace/files/${encodeURIComponent(path)}/download`),
+  bundle: (agentId) => reqBlob('GET', `/agents/${agentId}/workspace/files.tar.zst`),
 };
 
 // ── Conversations ─────────────────────────────────────────────────────────
@@ -284,6 +317,10 @@ export const agentDefs = {
     req('GET', `/agent-definitions/${agentId}/goal-instances?limit=${limit}`),
   listRoleInstances: (agentId, roleId, limit = 50) =>
     req('GET', `/agent-definitions/${agentId}/roles/${roleId}/goal-instances?limit=${limit}`),
+  chat: (agentId, message, conversation = []) =>
+    req('POST', `/agent-definitions/${agentId}/chat`, { message, conversation }),
+  exportSummaryPdf: (agentId) =>
+    reqBlob('GET', `/agent-definitions/${agentId}/summary.pdf`),
   // Custom connectors
   listConnectors:   () => req('GET', '/tenant-connectors'),
   deleteConnector:  (name) => req('DELETE', `/tenant-connectors/${name}`),

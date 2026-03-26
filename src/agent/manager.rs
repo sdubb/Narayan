@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use crate::{
     agent::prompts::JobType,
+    agent::plan_mode_steps::generate_steps,
     compliance::sla::SlaPriority,
     gateway::LlmGateway,
     segments::AgentServices,
@@ -77,14 +78,14 @@ impl AgentManager {
         tenant_id: &str,
     ) -> Result<crate::agent::definition::PlanModeSession> {
         // Load existing agent definition
-        let agent = self
+        let mut agent = self
             .store
             .get_agent_definition(tenant_id, agent_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("Agent definition not found: {}", agent_id))?;
 
         // Parse pending_roles from memory_ref
-        let pending_roles = Self::extract_pending_roles(&agent.memory_ref)?;
+        let (mut pending_roles, base_memory_ref) = Self::split_pending_roles(&agent.memory_ref)?;
         if pending_roles.is_empty() {
             anyhow::bail!("No pending roles found in agent: {}", agent_id);
         }
@@ -93,6 +94,46 @@ impl AgentManager {
         let next_role_resp = pending_roles.first().cloned().ok_or_else(|| {
             anyhow::anyhow!("Pending roles array is empty")
         })?;
+        pending_roles.remove(0);
+        agent.memory_ref = Self::build_memory_ref(&base_memory_ref, &pending_roles);
+        self.store.upsert_agent_definition(&agent).await?;
+
+        let existing_roles = self.store.list_roles_for_agent(tenant_id, agent_id).await.unwrap_or_default();
+        let existing_role_names: Vec<String> = existing_roles.iter().map(|role| role.name.clone()).collect();
+
+        let actions: Vec<String> = next_role_resp["actions"]
+            .as_array()
+            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        let trigger_hint = next_role_resp["trigger_hint"].as_str().unwrap_or("manual");
+        let synthetic_intent = serde_json::json!({
+            "category": "general",
+            "data_sources": [],
+            "write_targets": [],
+            "actions": actions,
+            "preferred_tool_categories": [],
+            "preferred_tools": [],
+            "candidate_wasm_tools": [],
+            "needed_connector_categories": [],
+            "candidate_connectors": [],
+            "missing_capabilities": [],
+            "workflow_outline": [],
+            "uses_external_db": null,
+            "uses_external_api": null,
+            "trigger_hint": trigger_hint,
+            "trigger_cron": null,
+            "trigger_source": null,
+            "trigger_event": null,
+            "trigger_confidence": "medium",
+            "trigger_confirmation": null,
+            "output_hint": "workspace",
+            "output_destination_hint": null,
+            "output_questions": [],
+            "responsibilities": [next_role_resp.clone()],
+            "multi_role_suggested": false,
+            "multi_role_reason": null,
+            "clarifying_questions": [],
+        });
 
         // Create new session with the next role pre-filled
         let mut session = crate::agent::definition::PlanModeSession {
@@ -111,7 +152,7 @@ impl AgentManager {
                     .unwrap_or("untitled role")
                     .to_string(),
                 trigger: Default::default(),
-                purpose: String::new(),
+                purpose: actions.join(", "),
                 role_category: crate::agent::definition::RoleCategory::General,
                 execution_guidelines: Default::default(),
                 connectors: agent.connectors.clone(),
@@ -131,14 +172,15 @@ impl AgentManager {
             reused_from_session_id: None,
             repair_root_session_id: None,
             phase: crate::agent::definition::PlanModePhase::CapturingClarifications,
-            intent_cache: None,
-            pending_steps: vec![],
+            intent_cache: Some(synthetic_intent.clone()),
+            pending_steps: generate_steps(&synthetic_intent, "general", &[], &existing_role_names)
+                .into_iter()
+                .filter_map(|step| serde_json::to_value(step).ok())
+                .collect(),
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
 
-        // Load existing roles for the agent to populate cross-role context
-        let existing_roles = self.store.list_roles_for_agent(tenant_id, agent_id).await.unwrap_or_default();
         tracing::info!(
             agent_id = %agent_id,
             next_role_name = %session.draft_role.as_ref().map(|r| r.name.clone()).unwrap_or_default(),
@@ -150,19 +192,28 @@ impl AgentManager {
     }
 
     /// Parse pending_roles from memory_ref format: "agent:xxx|pending_roles:[...]"
-    fn extract_pending_roles(memory_ref: &str) -> Result<Vec<serde_json::Value>> {
+    pub(crate) fn split_pending_roles(memory_ref: &str) -> Result<(Vec<serde_json::Value>, String)> {
         if let Some(pos) = memory_ref.find("|pending_roles:") {
+            let base = memory_ref[..pos].to_string();
             let json_str = &memory_ref[pos + 15..]; // skip "|pending_roles:"
             let cleaned = json_str.trim_end_matches('`');
             match serde_json::from_str::<Vec<serde_json::Value>>(cleaned) {
-                Ok(roles) => Ok(roles),
+                Ok(roles) => Ok((roles, base)),
                 Err(e) => {
                     tracing::warn!(error = %e, "failed to parse pending_roles JSON");
-                    Ok(vec![])
+                    Ok((vec![], base))
                 }
             }
         } else {
-            Ok(vec![])
+            Ok((vec![], memory_ref.to_string()))
+        }
+    }
+
+    pub(crate) fn build_memory_ref(base: &str, pending_roles: &[serde_json::Value]) -> String {
+        if pending_roles.is_empty() {
+            base.to_string()
+        } else {
+            format!("{}|pending_roles:{}", base, serde_json::to_string(pending_roles).unwrap_or_default())
         }
     }
 
@@ -277,5 +328,18 @@ mod tests {
         for jt in &types {
             let _ = sla_priority_for_job(jt); // must not panic
         }
+    }
+
+    #[test]
+    fn test_split_and_build_pending_roles_roundtrip() {
+        let memory_ref = r#"agent:abcd1234|pending_roles:[{"name":"First"},{"name":"Second"}]"#;
+        let (pending_roles, base) = AgentManager::split_pending_roles(memory_ref).expect("should parse");
+
+        assert_eq!(base, "agent:abcd1234");
+        assert_eq!(pending_roles.len(), 2);
+        assert_eq!(pending_roles[0]["name"], "First");
+
+        let rebuilt = AgentManager::build_memory_ref(&base, &pending_roles[1..]);
+        assert_eq!(rebuilt, r#"agent:abcd1234|pending_roles:[{"name":"Second"}]"#);
     }
 }

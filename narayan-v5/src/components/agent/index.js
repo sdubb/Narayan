@@ -4,6 +4,7 @@ export { default as SwarmCanvas } from './SwarmCanvas';
 export { default as ReplayScrubber } from './ReplayScrubber';
 export { default as CostCounter } from './CostCounter';
 export { default as AgentHoverCard } from './AgentHoverCard';
+export { default as AgentChatDrawer } from './AgentChatDrawer';
 export { default as PlanModeChat } from './PlanModeChat';
 export { default as RoleChatDrawer } from './RoleChatDrawer';
 export { default as RunDetailDrawer } from './RunDetailDrawer';

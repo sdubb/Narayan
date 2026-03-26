@@ -6,8 +6,10 @@ import {
   Zap, AlertCircle, CheckCircle2, XCircle, RotateCcw,
   Webhook, Calendar, Hand, GitBranch, Cpu, DollarSign,
   MessageSquare,
-} from 'lucide-react';import { agentDefs as agentDefsApi } from '../api';
+} from 'lucide-react';
+import { agentDefs as agentDefsApi } from '../api';
 import PlanModeChat from '../components/agent/PlanModeChat';
+import AgentChatDrawer from '../components/agent/AgentChatDrawer';
 import RoleChatDrawer from '../components/agent/RoleChatDrawer';
 import RunDetailDrawer from '../components/agent/RunDetailDrawer';
 import SavingsCard from '../components/cards/SavingsCard';
@@ -235,6 +237,7 @@ export default function AgentPage({ agentId, onBack }) {
   const [loading,     setLoading]    = useState(true);
   const [error,       setError]      = useState('');
   const [showAddRole, setShowAddRole] = useState(false);
+  const [showAgentChat, setShowAgentChat] = useState(false);
   const [chatRole,    setChatRole]   = useState(null); // { id, name } | null
   const [selectedRun, setSelectedRun] = useState(null); // goal_instance id | null
 
@@ -332,6 +335,13 @@ export default function AgentPage({ agentId, onBack }) {
             >
               <Plus size={14} />
               Add role
+            </button>
+            <button
+              onClick={() => setShowAgentChat(true)}
+              className="btn-secondary shrink-0 flex items-center gap-2"
+            >
+              <MessageSquare size={14} />
+              Agent chat
             </button>
           </div>
 
@@ -433,6 +443,19 @@ export default function AgentPage({ agentId, onBack }) {
           onCancel={() => setShowAddRole(false)}
         />
       )}
+
+      {/* ── Agent chat drawer ─────────────────────────────────── */}
+      <AnimatePresence>
+        {showAgentChat && (
+          <AgentChatDrawer
+            agentId={agentId}
+            agentName={agent.name}
+            agent={agent}
+            roles={roles}
+            onClose={() => setShowAgentChat(false)}
+          />
+        )}
+      </AnimatePresence>
 
       {/* ── Role chat drawer ─────────────────────────────────── */}
       <AnimatePresence>

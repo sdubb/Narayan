@@ -1,4 +1,5 @@
 pub mod clarifier;
+pub mod agent_chat;
 pub mod definition;
 pub mod evaluator;
 pub mod executor;
@@ -16,6 +17,8 @@ pub mod templates;
 
 #[allow(unused_imports)]
 pub use clarifier::{ClarificationAnswers, LlmClarifier};
+#[allow(unused_imports)]
+pub use agent_chat::{AgentChatManager, AgentChatMessage, AgentChatRequest};
 #[allow(unused_imports)]
 pub use definition::{
     infer_failure_action, AgentDefinition, AgentDefinitionStatus, AgentRole, CompletionCheck, CompletionCriterion,

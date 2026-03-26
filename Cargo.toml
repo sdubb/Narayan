@@ -77,6 +77,7 @@ hmac             = "0.12"
 urlencoding      = "2"
 croner           = "2"
 chrono-tz        = "0.10"
+zstd             = "0.13"          # tar.zst exports / compression
 
 [dev-dependencies]
 tokio-test = "0.4"

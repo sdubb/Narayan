@@ -56,6 +56,27 @@ impl TenantPlan {
         }
     }
 
+    /// Soft workspace cap per active agent workspace.
+    /// `None` means unlimited, but enterprise deployments should still monitor usage.
+    pub fn workspace_cap_bytes(&self) -> Option<u64> {
+        match self {
+            TenantPlan::Free => Some(50 * 1024 * 1024),
+            TenantPlan::Go => Some(500 * 1024 * 1024),
+            TenantPlan::Pro => Some(2 * 1024 * 1024 * 1024),
+            TenantPlan::Enterprise => None,
+        }
+    }
+
+    /// Per-file cap for uploads and generated workspace artifacts.
+    pub fn workspace_file_cap_bytes(&self) -> Option<u64> {
+        match self {
+            TenantPlan::Free => Some(10 * 1024 * 1024),
+            TenantPlan::Go => Some(25 * 1024 * 1024),
+            TenantPlan::Pro => Some(50 * 1024 * 1024),
+            TenantPlan::Enterprise => None,
+        }
+    }
+
     /// Max Narayan API req/s (not LLM req/s — tenant controls that via their own key).
     pub fn requests_per_sec(&self) -> f64 {
         match self {

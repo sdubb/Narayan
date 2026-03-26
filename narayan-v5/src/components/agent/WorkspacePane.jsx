@@ -22,11 +22,12 @@ function formatSize(bytes) {
 
 function FileNode({ file, depth = 0, onSelect, selectedPath, newFiles }) {
   const [open, setOpen] = useState(true);
-  const Icon = file.isDir ? FolderOpen : fileIcon(file.name);
+  const isDir = Boolean(file.isDir ?? file.is_dir);
+  const Icon = isDir ? FolderOpen : fileIcon(file.name);
   const isNew = newFiles.has(file.path);
   const isSelected = file.path === selectedPath;
 
-  if (file.isDir) {
+  if (isDir) {
     return (
       <div>
         <button onClick={() => setOpen(o => !o)}
@@ -111,6 +112,21 @@ export default function WorkspacePane({ agentId, agentStatus }) {
     finally { setLoadingContent(false); }
   }
 
+  async function downloadSelectedFile() {
+    if (!agentId || !selectedPath) return;
+    try {
+      const blob = await workspaceApi.download(agentId, selectedPath);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = selectedPath.split('/').pop() || 'workspace-file';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch {}
+  }
+
   function toggleCollapse() {
     const next = !collapsed;
     setCollapsed(next);
@@ -156,7 +172,7 @@ export default function WorkspacePane({ agentId, agentStatus }) {
           >
             <div className="flex items-center justify-between px-3 py-2 border-b border-border/60">
               <span className="text-[11px] font-mono text-tx-3 truncate flex-1">{selectedPath}</span>
-              <button className="p-1 text-tx-4 hover:text-tx-2 transition-colors" title="Download">
+              <button onClick={downloadSelectedFile} className="p-1 text-tx-4 hover:text-tx-2 transition-colors" title="Download">
                 <Download size={12} />
               </button>
             </div>
