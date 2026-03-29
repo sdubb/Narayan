@@ -16,9 +16,8 @@ use croner::Cron;
 
 use crate::{
     agent::{AgentManager, AgentRole},
-    state::{GoalInstance, TriggerSource},
+    state::TriggerSource,
     storage::PostgresStore,
-    util::new_id,
 };
 
 /// Batch size per tick — how many due roles to claim at once.
@@ -76,24 +75,18 @@ impl ScheduleTicker {
         // Compute next fire time
         let next_run_at = compute_next_run(cron_str, now, role.trigger.timezone.as_deref())?;
 
-        // Create the agent via AgentManager
-        let purpose = format!("[scheduled] {}", role.purpose);
-        let (_goal, agent_state) = self.manager.create_goal(role.tenant_id.clone(), purpose, None).await?;
-
-        // Create GoalInstance linking back to this role
-        let gi = GoalInstance::new(
-            new_id(),
-            role.tenant_id.clone(),
-            role.agent_id.clone(),
-            role.id.clone(),
-            role.version,
-            serde_json::json!({ "scheduled_at": now.to_rfc3339() }),
-            TriggerSource::Schedule { cron: cron_str.to_string(), scheduled_at: now },
-            false,
-        );
-        let mut gi = gi;
-        gi.agent_state_id = Some(agent_state.id.clone());
-        self.store.upsert_goal_instance(&gi).await?;
+        // Create the run via AgentManager
+        let (_gi, agent_state) = self
+            .manager
+            .create_role_run(
+                role.tenant_id.clone(),
+                role,
+                serde_json::json!({ "scheduled_at": now.to_rfc3339() }),
+                TriggerSource::Schedule { cron: cron_str.to_string(), scheduled_at: now },
+                None, // conversation_id
+                None, // triggered_by_gi_id
+            )
+            .await?;
 
         // Set the real next_run_at
         self.store.update_role_next_run_at(&role.id, next_run_at).await?;
@@ -167,3 +160,5 @@ mod tests {
         assert!(compute_next_run("not a cron", now, None).is_err());
     }
 }
+
+

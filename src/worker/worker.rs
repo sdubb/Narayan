@@ -18,6 +18,7 @@ use crate::{
 
 pub struct Worker {
     id: usize,
+    name: String,
     store: Arc<PostgresStore>,
     queue: Arc<dyn Queue>,
     agent_loop: Arc<AgentLoop>,
@@ -57,6 +58,7 @@ fn should_retry_task(task: &Task, error: &anyhow::Error) -> bool {
 impl Worker {
     pub fn new(
         id: usize,
+        name: String,
         store: Arc<PostgresStore>,
         queue: Arc<dyn Queue>,
         agent_loop: Arc<AgentLoop>,
@@ -65,19 +67,22 @@ impl Worker {
         services: Arc<AgentServices>,
         event_bus: Arc<EventBus>,
     ) -> Self {
-        Self { id, store, queue, agent_loop, metrics, workspace_manager, services, event_bus }
+        Self { id, name, store, queue, agent_loop, metrics, workspace_manager, services, event_bus }
     }
 
-    pub async fn process_next(&self) -> Result<bool> {
-        let task = match self.queue.dequeue().await? {
-            Some(t) => t,
-            None => return Ok(false),
+    pub async fn process_next(&self, cancel_token: tokio_util::sync::CancellationToken) -> Result<bool> {
+        let task = tokio::select! {
+            _ = cancel_token.cancelled() => return Ok(false),
+            res = self.queue.dequeue() => match res? {
+                Some(t) => t,
+                None => return Ok(false),
+            }
         };
 
         tracing::debug!(worker = self.id, agent_id = %task.agent_id, "dequeued");
         self.metrics.agent_started();
 
-        let result = self.run_task(&task).await;
+        let result = self.run_task(&task, cancel_token).await;
         self.metrics.agent_finished();
 
         match result {
@@ -104,7 +109,7 @@ impl Worker {
         Ok(true)
     }
 
-    async fn run_task(&self, task: &Task) -> Result<()> {
+    async fn run_task(&self, task: &Task, cancel_token: tokio_util::sync::CancellationToken) -> Result<()> {
         let mut state = self
             .store
             .get_agent_internal(&task.agent_id)
@@ -124,11 +129,52 @@ impl Worker {
         }
         state.mark_running();
         state.set_execution_checkpoint(&task.id, task.attempt, state.current_step, "running");
+        
+        // --- Distributed Execution: Take Ownership & Start Heartbeat ---
+        let lease_duration = 30; // seconds
+        state.claimed_by = Some(self.name.clone());
+        state.lease_expires_at = Some(chrono::Utc::now() + chrono::Duration::seconds(lease_duration));
         self.store.upsert_agent(&state).await?;
 
-        let outcome = match self.agent_loop.run_step(&mut state, &mut plan, &mut history).await {
-            Ok(outcome) => outcome,
+        // Hierarchical cancellation: if global cancel_token is triggered, task_cancel_token follows.
+        // We can also trigger task_cancel_token independently on lease loss.
+        let task_cancel_token = cancel_token.child_token();
+        let heartbeat_token = task_cancel_token.clone();
+        let store = Arc::clone(&self.store);
+        let agent_id = state.id.clone();
+        let worker_name = self.name.clone();
+
+        let heartbeat_handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(10));
+            loop {
+                tokio::select! {
+                    _ = heartbeat_token.cancelled() => break,
+                    _ = interval.tick() => {
+                        match store.renew_lease(&agent_id, &worker_name, lease_duration).await {
+                            Ok(true) => {},
+                            Ok(false) => {
+                                tracing::error!(agent_id = %agent_id, "lease lost — another node has claimed this agent or it was deleted. aborting.");
+                                heartbeat_token.cancel();
+                                break;
+                            }
+                            Err(e) => {
+                                tracing::warn!(agent_id = %agent_id, error = %e, "heartbeat DB error — will retry next tick");
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        let outcome = match self.agent_loop.run_step(&mut state, &mut plan, &mut history, task_cancel_token.clone()).await {
+            Ok(outcome) => {
+                task_cancel_token.cancel();
+                let _ = heartbeat_handle.await;
+                outcome
+            }
             Err(error) => {
+                task_cancel_token.cancel();
+                let _ = heartbeat_handle.await;
                 state.plan = plan;
                 state.metadata["step_history"] = serde_json::to_value(&history).unwrap_or_default();
                 state.metadata["last_worker_error"] = serde_json::json!(error.to_string());
@@ -142,6 +188,10 @@ impl Worker {
         state.metadata["step_history"] = serde_json::to_value(&history).unwrap_or_default();
         state.clear_execution_checkpoint();
         state.current_task = None;
+        
+        // Release ownership
+        state.claimed_by = None;
+        state.lease_expires_at = None;
         self.store.upsert_agent(&state).await?;
         self.metrics.step_completed_for_tenant(&state.tenant_id);
 
@@ -178,19 +228,21 @@ impl Worker {
                 }
                 
                 // Trigger workforce event dispatcher for role completion
-                if let (Some(role_id), Some(role_name), Some(agent_def_id), Some(goal_instance_id)) = (
-                    state.metadata.get("role_id").and_then(|v| v.as_str()),
-                    state.metadata.get("role_name").and_then(|v| v.as_str()),
-                    state.metadata.get("agent_definition_id").and_then(|v| v.as_str()),
-                    state.metadata.get("goal_instance_id").and_then(|v| v.as_str()),
-                ) {
+                let role_id = state.metadata.get("role_id").and_then(|v| v.as_str()).map(str::to_string);
+                let role_name = state.metadata.get("role_name").and_then(|v| v.as_str()).map(str::to_string);
+                let agent_def_id = state.metadata.get("agent_definition_id").and_then(|v| v.as_str()).map(str::to_string);
+                let goal_instance_id = state.metadata.get("goal_instance_id").and_then(|v| v.as_str()).map(str::to_string);
+
+                if let (Some(role_id), Some(role_name), Some(agent_def_id), Some(goal_instance_id)) =
+                    (role_id, role_name, agent_def_id, goal_instance_id)
+                {
                     let payload = crate::agent::definition::WorkforceEventPayload {
                         tenant_id: state.tenant_id.clone(),
-                        agent_id: agent_def_id.to_string(),
+                        agent_id: agent_def_id.clone(),
                         agent_name: state.metadata.get("agent_name").and_then(|v| v.as_str()).unwrap_or("agent").to_string(),
-                        role_id: role_id.to_string(),
-                        role_name: role_name.to_string(),
-                        goal_instance_id: goal_instance_id.to_string(),
+                        role_id: role_id.clone(),
+                        role_name: role_name.clone(),
+                        goal_instance_id: goal_instance_id.clone(),
                         status: "completed".to_string(),
                         output_data: state.metadata.get("final_output").cloned().unwrap_or(serde_json::json!({})),
                         failure_reason: None,

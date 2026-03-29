@@ -9,11 +9,13 @@
     font-size: 15px;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
+    scroll-behavior: smooth;
   }
 
   body {
     @apply bg-bg text-tx-1 font-sans;
     font-feature-settings: 'kern' 1, 'liga' 1;
+    text-rendering: optimizeLegibility;
   }
 
   ::selection {
@@ -27,6 +29,10 @@
 
   *:focus-visible {
     @apply outline-2 outline-offset-2 outline-accent;
+  }
+
+  #root {
+    min-height: 100vh;
   }
 }
 

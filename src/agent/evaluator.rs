@@ -56,6 +56,7 @@ pub trait Evaluator: Send + Sync {
         step: &PlannedStep,
         result: &StepResult,
         retry_count: u32,
+        max_retries: u32,
     ) -> Result<EvalVerdict>;
 
     /// Combined evaluate + reflect in one LLM call.
@@ -67,6 +68,7 @@ pub trait Evaluator: Send + Sync {
         step: &PlannedStep,
         result: &StepResult,
         retry_count: u32,
+        max_retries: u32,
     ) -> Result<EvalReflection>;
 }
 
@@ -89,8 +91,9 @@ impl Evaluator for LlmEvaluator {
         step: &PlannedStep,
         result: &StepResult,
         retry_count: u32,
+        max_retries: u32,
     ) -> Result<EvalVerdict> {
-        Ok(self.evaluate_and_reflect(state, plan, step, result, retry_count).await?.verdict)
+        Ok(self.evaluate_and_reflect(state, plan, step, result, retry_count, max_retries).await?.verdict)
     }
 
     async fn evaluate_and_reflect(
@@ -100,6 +103,7 @@ impl Evaluator for LlmEvaluator {
         step: &PlannedStep,
         result: &StepResult,
         retry_count: u32,
+        max_retries: u32,
     ) -> Result<EvalReflection> {
         // ── Fast-path: final step succeeded — no LLM call needed ─────────────
         if plan.is_complete(state.current_step as usize + 1) && result.success {
@@ -165,11 +169,12 @@ impl Evaluator for LlmEvaluator {
         }
 
         // ── Fast-path: retry budget exhausted ────────────────────────────────
-        if retry_count >= 3 {
+        if retry_count >= max_retries {
             tracing::warn!(
                 agent_id    = %state.id,
                 step        = step.index,
                 retry_count,
+                max_retries,
                 "max retries reached — aborting step"
             );
             return Ok(EvalReflection {
@@ -515,7 +520,7 @@ mod tests {
         let ev = LlmEvaluator::new(Arc::new(MockGateway::from_contents(vec![])));
         let state = make_state();
         let plan = make_plan_steps(1);
-        let r = ev.evaluate_and_reflect(&state, &plan, &plan.steps[0], &ok_result(), 0).await.unwrap();
+        let r = ev.evaluate_and_reflect(&state, &plan, &plan.steps[0], &ok_result(), 0, 2).await.unwrap();
         assert_eq!(r.verdict, EvalVerdict::GoalComplete);
         assert_eq!(r.summary, "goal complete");
     }
@@ -525,7 +530,7 @@ mod tests {
         let ev = LlmEvaluator::new(Arc::new(MockGateway::from_contents(vec![])));
         let state = make_state();
         let plan = make_plan_steps(3); // more steps remain
-        let r = ev.evaluate_and_reflect(&state, &plan, &plan.steps[0], &ok_result(), 0).await.unwrap();
+        let r = ev.evaluate_and_reflect(&state, &plan, &plan.steps[0], &ok_result(), 0, 2).await.unwrap();
         assert_eq!(r.verdict, EvalVerdict::Continue);
     }
 
@@ -534,7 +539,7 @@ mod tests {
         let ev = LlmEvaluator::new(Arc::new(MockGateway::from_contents(vec![])));
         let state = make_state();
         let plan = make_plan_steps(2);
-        let r = ev.evaluate_and_reflect(&state, &plan, &plan.steps[0], &fail_result(), 3).await.unwrap();
+        let r = ev.evaluate_and_reflect(&state, &plan, &plan.steps[0], &fail_result(), 3, 3).await.unwrap();
         assert_eq!(r.verdict, EvalVerdict::Abort);
     }
 
@@ -545,7 +550,7 @@ mod tests {
         ])));
         let state = make_state();
         let plan = make_plan_steps(3);
-        let r = ev.evaluate_and_reflect(&state, &plan, &plan.steps[0], &fail_result(), 1).await.unwrap();
+        let r = ev.evaluate_and_reflect(&state, &plan, &plan.steps[0], &fail_result(), 1, 2).await.unwrap();
         assert_eq!(r.verdict, EvalVerdict::Retry);
         assert_eq!(r.summary, "transient network error");
     }
@@ -557,7 +562,7 @@ mod tests {
         ])));
         let state = make_state();
         let plan = make_plan_steps(3);
-        let r = ev.evaluate_and_reflect(&state, &plan, &plan.steps[0], &ok_result(), 0).await.unwrap();
+        let r = ev.evaluate_and_reflect(&state, &plan, &plan.steps[0], &ok_result(), 0, 2).await.unwrap();
         // Note: fast-path returns early for unambiguous success, so we need a
         // result that passes through to the LLM. Use a result that looks ambiguous.
         // This test validates JSON parsing of revise=true regardless.

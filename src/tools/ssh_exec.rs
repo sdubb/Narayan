@@ -4,18 +4,22 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use russh::{client, keys::key};
+use russh::{client, keys::PublicKey};
+use russh::client::AuthResult;
 
 use crate::tools::{ParameterSchema, Tool, ToolResult};
 
 pub struct SshExecTool;
 
 struct NoVerify;
-#[async_trait]
 impl client::Handler for NoVerify {
     type Error = anyhow::Error;
-    async fn check_server_key(&mut self, _: &key::PublicKey) -> Result<bool, Self::Error> {
-        Ok(true) // Production: verify against known_hosts
+    #[allow(refining_impl_trait)]
+    fn check_server_key(
+        &mut self,
+        _key: &PublicKey,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = core::result::Result<bool, Self::Error>> + Send>> {
+        Box::pin(async { Ok(true) })
     }
 }
 
@@ -80,20 +84,25 @@ impl Tool for SshExecTool {
                 .map_err(|e| anyhow::anyhow!("SSH connect to '{}': {}", addr, e))?;
 
         // Authenticate
-        let authed = if let Some(ref pem) = key_pem {
-            let keypair =
+        let auth_res = if let Some(ref pem) = key_pem {
+            let private_key =
                 russh::keys::decode_secret_key(pem, None).map_err(|e| anyhow::anyhow!("parse private key: {}", e))?;
+            // Wrap PrivateKey in Arc and use PrivateKeyWithHashAlg with SHA256
+            let keypair = russh::keys::PrivateKeyWithHashAlg::new(
+                Arc::new(private_key), 
+                Some(russh::keys::HashAlg::Sha256)
+            );
             session
-                .authenticate_publickey(username, Arc::new(keypair))
+                .authenticate_publickey(username, keypair)
                 .await
                 .map_err(|e| anyhow::anyhow!("pubkey auth: {}", e))?
         } else if let Some(ref pass) = password {
             session.authenticate_password(username, pass).await.map_err(|e| anyhow::anyhow!("password auth: {}", e))?
         } else {
-            false
+            return Ok(ToolResult::err("SSH authentication failed — check credentials"));
         };
 
-        if !authed {
+        if !matches!(auth_res, AuthResult::Success) {
             return Ok(ToolResult::err("SSH authentication failed — check credentials"));
         }
 
@@ -146,3 +155,5 @@ impl Tool for SshExecTool {
         }
     }
 }
+
+

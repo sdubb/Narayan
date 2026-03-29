@@ -952,7 +952,7 @@ impl Default for OutputSpec {
 // ── MemoryScope ────────────────────────────────────────────────────────────
 
 /// Controls what memory this role can read and write.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryScope {
     /// Shared across all agents for this tenant.
@@ -960,6 +960,7 @@ pub enum MemoryScope {
     Global,
     /// Shared across all roles of this agent.
     /// Default — most roles should use this.
+    #[default]
     Agent,
     /// Isolated to this role only.
     /// Use for roles that produce noisy, role-specific intermediate data
@@ -973,11 +974,11 @@ pub enum MemoryScope {
 /// Prevents runaway agents and controls cost.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExecutionLimits {
-    /// Maximum number of planner steps. Default 15.
+    /// Maximum number of planner steps. Default 40.
     pub max_steps: u32,
-    /// Maximum retry attempts per step. Default 2.
+    /// Maximum retry attempts per step. Default 3.
     pub max_retries: u32,
-    /// Wall-clock timeout per goal instance in seconds. Default 600 (10 min).
+    /// Wall-clock timeout per goal instance in seconds. Default 1,800 (30 min).
     pub timeout_secs: u64,
     /// Maximum LLM cost per goal instance in USD.
     /// None = no limit (use with caution on research-heavy roles).
@@ -986,7 +987,7 @@ pub struct ExecutionLimits {
 
 impl Default for ExecutionLimits {
     fn default() -> Self {
-        Self { max_steps: 15, max_retries: 2, timeout_secs: 600, max_cost_usd: None }
+        Self { max_steps: 40, max_retries: 3, timeout_secs: 1_800, max_cost_usd: None }
     }
 }
 
@@ -1030,25 +1031,25 @@ impl RoleCategory {
     pub fn default_execution_limits(&self) -> ExecutionLimits {
         match self {
             Self::SoftwareEngineer => {
-                ExecutionLimits { max_steps: 18, max_retries: 2, timeout_secs: 1_200, max_cost_usd: Some(3.0) }
+                ExecutionLimits { max_steps: 80, max_retries: 3, timeout_secs: 7_200, max_cost_usd: Some(10.0) }
             }
             Self::ResearchAnalyst | Self::DataExtraction => {
-                ExecutionLimits { max_steps: 18, max_retries: 2, timeout_secs: 1_200, max_cost_usd: Some(2.5) }
+                ExecutionLimits { max_steps: 96, max_retries: 3, timeout_secs: 7_200, max_cost_usd: Some(10.0) }
             }
             Self::DevOps | Self::ITOpsITSM => {
-                ExecutionLimits { max_steps: 16, max_retries: 2, timeout_secs: 900, max_cost_usd: Some(2.0) }
+                ExecutionLimits { max_steps: 64, max_retries: 3, timeout_secs: 5_400, max_cost_usd: Some(8.0) }
             }
             Self::FinanceAccounting | Self::LegalContract => {
-                ExecutionLimits { max_steps: 14, max_retries: 2, timeout_secs: 900, max_cost_usd: Some(2.0) }
+                ExecutionLimits { max_steps: 48, max_retries: 3, timeout_secs: 5_400, max_cost_usd: Some(6.0) }
             }
             Self::SalesRevOps | Self::HRPeopleOps | Self::Marketing => {
-                ExecutionLimits { max_steps: 12, max_retries: 2, timeout_secs: 900, max_cost_usd: Some(1.5) }
+                ExecutionLimits { max_steps: 40, max_retries: 3, timeout_secs: 3_600, max_cost_usd: Some(5.0) }
             }
             Self::CustomerSupport => {
-                ExecutionLimits { max_steps: 12, max_retries: 2, timeout_secs: 600, max_cost_usd: Some(1.0) }
+                ExecutionLimits { max_steps: 32, max_retries: 3, timeout_secs: 3_600, max_cost_usd: Some(4.0) }
             }
             Self::General => {
-                ExecutionLimits { max_steps: 12, max_retries: 2, timeout_secs: 600, max_cost_usd: Some(1.0) }
+                ExecutionLimits { max_steps: 48, max_retries: 3, timeout_secs: 3_600, max_cost_usd: Some(4.0) }
             }
         }
     }
@@ -1622,9 +1623,9 @@ mod tests {
     #[test]
     fn test_execution_limits_defaults() {
         let l = ExecutionLimits::default();
-        assert_eq!(l.max_steps, 15);
-        assert_eq!(l.max_retries, 2);
-        assert_eq!(l.timeout_secs, 600);
+        assert_eq!(l.max_steps, 40);
+        assert_eq!(l.max_retries, 3);
+        assert_eq!(l.timeout_secs, 1_800);
         assert!(l.max_cost_usd.is_none());
     }
 
@@ -1634,7 +1635,7 @@ mod tests {
         assert_eq!(category, RoleCategory::FinanceAccounting);
         assert_eq!(category.as_str(), "finance_accounting");
         assert_eq!(category.default_memory_scope(), MemoryScope::Role);
-        assert_eq!(category.default_execution_limits().max_steps, 14);
+        assert_eq!(category.default_execution_limits().max_steps, 48);
         assert!(!category.default_persona().is_empty());
     }
 

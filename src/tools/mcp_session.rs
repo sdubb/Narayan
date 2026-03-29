@@ -273,6 +273,19 @@ fn mcp_url_to_connector(server_url: &str) -> Option<&'static str> {
     if url.contains("freshdesk.com") || url.contains("freshdesk.mcp") {
         return Some("freshdesk");
     }
+    // Twilio
+    if url.contains("twilio.com") || url.contains("twilio.mcp") {
+        return Some("twilio");
+    }
+    // Airtable
+    if url.contains("airtable.com") || url.contains("airtable.mcp") {
+        return Some("airtable");
+    }
+    // Mailchimp
+    if url.contains("mailchimp.com") || url.contains("mailchimp.mcp") {
+        return Some("mailchimp");
+    }
+    // Note: Teams is mapped under "microsoft", Shopify is already mapped.
     None
 }
 

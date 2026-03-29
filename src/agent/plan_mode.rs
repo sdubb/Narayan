@@ -597,6 +597,137 @@ impl PlanModeManager {
         steps.first().map(|s| s.question.clone()).unwrap_or_else(|| "Any constraints or rules for this agent?".into())
     }
 
+    fn build_clarification_refinement_context(&self, session: &PlanModeSession) -> String {
+        let mut parts = Vec::new();
+
+        let history: Vec<&PlanModeMessage> = session.conversation.iter().rev().take(8).collect();
+        if !history.is_empty() {
+            parts.push("PLAN MODE CONVERSATION (most recent last):".into());
+            for message in history.into_iter().rev() {
+                parts.push(format!("{}: {}", message.role, message.content));
+            }
+        }
+
+        if let Some(role) = session.draft_role.as_ref() {
+            parts.push("CURRENT DRAFT SNAPSHOT:".into());
+            parts.push(format!("category: {}", role.role_category.as_str()));
+            parts.push(format!(
+                "connectors: {}",
+                if role.connectors.is_empty() { "none".into() } else { role.connectors.join(", ") }
+            ));
+            parts.push(format!(
+                "tools: {}",
+                if role.tools.is_empty() { "none".into() } else { role.tools.join(", ") }
+            ));
+            parts.push(format!("trigger: {}", crate::agent::agent_chat::trigger_summary(&role.trigger)));
+            parts.push(format!(
+                "constraints: {}",
+                if session.draft_agent.constraints.is_empty() { "none".into() } else { session.draft_agent.constraints.join("; ") }
+            ));
+        }
+
+        if !session.pending_steps.is_empty() {
+            let step_summaries: Vec<String> = session
+                .pending_steps
+                .iter()
+                .filter_map(|value| serde_json::from_value::<crate::agent::plan_mode_steps::ClarificationStep>(value.clone()).ok())
+                .map(|step| format!("{} -> {}", step.id, step.question))
+                .collect();
+            if !step_summaries.is_empty() {
+                parts.push("UNANSWERED CLARIFICATIONS:".into());
+                parts.extend(step_summaries.into_iter().take(6));
+            }
+        }
+
+        parts.join("\n")
+    }
+
+    async fn refine_plan_after_clarifications(&self, session: &mut PlanModeSession) -> Result<Option<String>> {
+        let Some(initial_intent) = session.intent_cache.clone() else {
+            return Ok(None);
+        };
+        let description = session
+            .conversation
+            .iter()
+            .find(|message| message.role == "user")
+            .map(|message| message.content.clone())
+            .or_else(|| session.draft_role.as_ref().map(|role| role.purpose.clone()))
+            .unwrap_or_default();
+
+        let detail_context = self.build_clarification_refinement_context(session);
+        let store = self.store.as_ref();
+        let Some(role) = session.draft_role.as_mut() else {
+            return Ok(None);
+        };
+
+        let refined = self
+            .extractor
+            .refine(&session.id, &session.tenant_id, &description, &initial_intent, &detail_context)
+            .await?;
+        session.intent_cache = Some(refined.clone());
+
+        let installed: Vec<String> = self
+            .installs
+            .list_for_tenant(&session.tenant_id)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|c| c.connector_type)
+            .collect();
+        let tenant_connectors: Vec<TenantConnector> =
+            store.list_tenant_connectors(&session.tenant_id).await.unwrap_or_default();
+        let tenant_wasm_tools: Vec<TenantWasmTool> =
+            store.list_tenant_wasm_tools(&session.tenant_id).await.unwrap_or_default();
+
+        let previous_category = role.role_category.clone();
+        let previous_limits = role.execution_limits.clone();
+        let previous_memory_scope = role.memory_scope.clone();
+        role.role_category = RoleCategory::from_slug(refined["category"].as_str().unwrap_or("general"));
+        if previous_memory_scope == previous_category.default_memory_scope() {
+            role.memory_scope = role.role_category.default_memory_scope();
+        }
+        if previous_limits == previous_category.default_execution_limits() {
+            role.execution_limits = role.role_category.default_execution_limits();
+        }
+        apply_role_policy_defaults(&mut session.draft_agent, role);
+
+        let (resolved_connectors, tool_overrides, clarifying_q) =
+            ConnectorResolver::resolve(&refined, &installed, &tenant_connectors).await;
+        session.draft_agent.connectors = resolved_connectors.clone();
+        role.connectors = resolved_connectors;
+
+        let mut inferred_tools = inferred_preferred_tools(&self.tools, &refined);
+        for tool_override in &tool_overrides {
+            if !inferred_tools.contains(tool_override) {
+                inferred_tools.push(tool_override.clone());
+            }
+        }
+        let enabled_wasm_names = enabled_wasm_tool_names(&tenant_wasm_tools);
+        let inferred_wasm_candidates = inferred_wasm_tool_candidates(&refined, &enabled_wasm_names);
+        if !inferred_wasm_candidates.is_empty() {
+            apply_wasm_tool_scope(role, &inferred_wasm_candidates);
+        }
+        if !inferred_tools.is_empty() {
+            for tool_name in inferred_tools {
+                if !role.tools.iter().any(|tool| tool == &tool_name) {
+                    role.tools.push(tool_name);
+                }
+            }
+            role.tools.sort();
+            role.tools.dedup();
+        }
+
+        role.execution_guidelines.workflow_outline.clear();
+        apply_execution_hints(role, &refined);
+        materialize_workflow_outline(role, &refined);
+        let (trigger, confidence) = intent_to_trigger(&refined);
+        role.trigger = trigger;
+        role.trigger.confidence = confidence;
+        session.goal_fingerprint = Some(compute_plan_mode_goal_fingerprint(&description, &refined, role));
+
+        Ok(clarifying_q)
+    }
+
     /// Look up the domain plan-mode skill for the given intent category.
     async fn domain_skill_text(&self, category: &str) -> Option<String> {
         let reg = self.skill_registry.as_ref()?.read().await;
@@ -987,8 +1118,10 @@ impl PlanModeManager {
             }
         }
 
-        let tenant_connectors = self.store.list_tenant_connectors(&session.tenant_id).await.unwrap_or_default();
-        let tenant_wasm_tools = self.store.list_tenant_wasm_tools(&session.tenant_id).await.unwrap_or_default();
+        let tenant_connectors: Vec<TenantConnector> =
+            self.store.list_tenant_connectors(&session.tenant_id).await.unwrap_or_default();
+        let tenant_wasm_tools: Vec<TenantWasmTool> =
+            self.store.list_tenant_wasm_tools(&session.tenant_id).await.unwrap_or_default();
 
         let capability_directory =
             build_capability_directory(&self.tools, &installed, &tenant_connectors, &tenant_wasm_tools);
@@ -1197,7 +1330,8 @@ Reply with one exact name: {}",
 
         if let Some(role) = session.draft_role.as_mut() {
             if !pending_custom_tool_categories.is_empty() {
-                let tenant_wasm_tools = self.store.list_tenant_wasm_tools(&session.tenant_id).await.unwrap_or_default();
+                let tenant_wasm_tools: Vec<TenantWasmTool> =
+                    self.store.list_tenant_wasm_tools(&session.tenant_id).await.unwrap_or_default();
                 let enabled_wasm_tools = enabled_wasm_tool_names(&tenant_wasm_tools);
 
                 if enabled_wasm_tools.is_empty() {
@@ -1362,6 +1496,11 @@ Please create and test one in plan mode settings, then reply 'done'."
             }
 
             // No more steps — inject domain skill execution brief then go to constraints
+            if let Some(question) = self.refine_plan_after_clarifications(session).await? {
+                session.phase = PlanModePhase::ResolvingConnectors;
+                return Ok(format!("OK {}\n\n{}", summary, question));
+            }
+
             let category = session.intent_cache.as_ref().and_then(|i| i["category"].as_str()).unwrap_or("general");
 
             if let Some(skill_text) = self.domain_skill_text(category).await {

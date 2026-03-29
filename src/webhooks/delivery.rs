@@ -170,11 +170,13 @@ fn event_type_name(event: &AgentEvent) -> String {
         AgentEvent::GoalComplete { .. } => "goal_complete",
         AgentEvent::GoalFailed { .. } => "goal_failed",
         AgentEvent::LlmCostUpdate { .. } => "llm_cost_update",
+        AgentEvent::ExecutionLimitWarning { .. } => "execution_limit_warning",
         AgentEvent::PlanApproved { .. } => "plan_approved",
         AgentEvent::PlanRejected { .. } => "plan_rejected",
         AgentEvent::PlanEdited { .. } => "plan_edited",
         AgentEvent::PlanApprovalNeeded { .. } => "plan_approval_needed",
         AgentEvent::JudgementSignal { .. } => "judgement_signal",
+        AgentEvent::RoleCompleted { .. } => "role_completed",
     }
     .to_string()
 }

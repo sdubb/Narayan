@@ -85,7 +85,9 @@ impl Scheduler for DbPollingScheduler {
             ticker.tick().await;
 
             // ── 1. Claim and enqueue due agents ────────────────────────────
-            match self.store.claim_due_agents(self.batch_size as i64).await {
+            // Scheduler claims with a temporary "scheduler" ID and a 60s lease.
+            // When a worker picks it up, it will take definitive ownership.
+            match self.store.claim_due_agents("scheduler", 60, self.batch_size as i64).await {
                 Ok(agents) if !agents.is_empty() => {
                     tracing::debug!(count = agents.len(), "scheduler claimed agents");
                     for agent in agents {

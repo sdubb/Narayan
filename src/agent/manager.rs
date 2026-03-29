@@ -4,12 +4,13 @@ use anyhow::Result;
 use std::path::PathBuf;
 
 use crate::{
-    agent::prompts::JobType,
+    agent::definition::AgentRole,
     agent::plan_mode_steps::generate_steps,
+    agent::prompts::JobType,
     compliance::sla::SlaPriority,
     gateway::LlmGateway,
     segments::AgentServices,
-    state::{AgentState, GoalState},
+    state::{AgentState, GoalInstance, GoalInstanceStatus, GoalState, TriggerSource},
     storage::PostgresStore,
     util::new_id,
     workspace::manager::WorkspaceManager,
@@ -136,7 +137,7 @@ impl AgentManager {
         });
 
         // Create new session with the next role pre-filled
-        let mut session = crate::agent::definition::PlanModeSession {
+        let session = crate::agent::definition::PlanModeSession {
             id: new_id(),
             tenant_id: tenant_id.to_string(),
             draft_agent: agent.clone(),
@@ -228,6 +229,7 @@ impl AgentManager {
     ) -> Result<(GoalState, AgentState)> {
         let goal_id = new_id();
         let agent_id = new_id();
+        let gi_id = new_id();
 
         let handle = self.workspace_manager.create(&tenant_id, &agent_id).await?;
         let workspace_path = handle.local_path_str();
@@ -241,9 +243,35 @@ impl AgentManager {
         );
 
         let (goal, mut agent_state) =
-            build_goal_and_agent(goal_id, agent_id, tenant_id.clone(), description.clone(), workspace_path);
+            build_goal_and_agent(goal_id, agent_id.clone(), tenant_id.clone(), description.clone(), workspace_path);
 
         agent_state.conversation_id = conversation_id;
+        agent_state.metadata["goal_instance_id"] = serde_json::json!(gi_id);
+
+        let gi = GoalInstance {
+            id: gi_id,
+            tenant_id: tenant_id.clone(),
+            agent_id: agent_id.clone(),
+            role_id: "legacy-flat".to_string(),
+            role_version: 1,
+            input_data: serde_json::json!({ "description": description }),
+            status: GoalInstanceStatus::Pending,
+            result: None,
+            failure_reason: None,
+            trigger_source: TriggerSource::Manual { created_by: "system".to_string() },
+            is_test: false,
+            cost_usd: 0.0,
+            human_hours_saved: 0.0,
+            human_cost_saved_usd: 0.0,
+            agent_state_id: Some(agent_id.clone()),
+            triggered_by_goal_instance_id: None,
+            current_step: 0,
+            total_steps: 0,
+            last_message: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            completed_at: None,
+        };
 
         // ── SLA start — stamp deadline on agent state at creation time ────────
         if let Some(ref sla) = self.services.sla {
@@ -264,9 +292,82 @@ impl AgentManager {
 
         self.store.upsert_agent(&agent_state).await?;
         self.store.upsert_goal(&goal).await?;
+        self.store.upsert_goal_instance(&gi).await?;
 
-        tracing::info!(goal_id = %goal.id, agent_id = %agent_state.id, "goal created");
+        tracing::info!(goal_id = %goal.id, agent_id = %agent_state.id, gi_id = %gi.id, "goal created with unified instance tracking");
         Ok((goal, agent_state))
+    }
+
+    /// Unified method to trigger a role-based run.
+    /// Creates both a GoalInstance and an AgentState, links them, and persists them.
+    pub async fn create_role_run(
+        &self,
+        tenant_id: String,
+        role: &AgentRole,
+        input_data: serde_json::Value,
+        trigger_source: TriggerSource,
+        conversation_id: Option<String>,
+        triggered_by_gi_id: Option<String>,
+    ) -> Result<(GoalInstance, AgentState)> {
+        let agent_id = new_id();
+        let gi_id = new_id();
+
+        let handle = self.workspace_manager.create(&tenant_id, &agent_id).await?;
+        let workspace_path = handle.local_path_str();
+
+        let mut agent_state = AgentState::new(
+            agent_id.clone(),
+            tenant_id.clone(),
+            role.purpose.clone(),
+            workspace_path,
+        );
+        agent_state.conversation_id = conversation_id;
+        
+        // Inject role metadata for AgentLoop and Planner
+        agent_state.metadata["role_id"] = serde_json::json!(role.id);
+        agent_state.metadata["role_name"] = serde_json::json!(role.name);
+        agent_state.metadata["agent_definition_id"] = serde_json::json!(role.agent_id);
+        agent_state.metadata["input_data"] = input_data.clone();
+        agent_state.metadata["goal_instance_id"] = serde_json::json!(gi_id);
+
+        let gi = GoalInstance {
+            id: gi_id,
+            tenant_id: tenant_id.clone(),
+            agent_id: agent_id.clone(),
+            role_id: role.id.clone(),
+            role_version: role.version,
+            input_data,
+            status: GoalInstanceStatus::Pending,
+            result: None,
+            failure_reason: None,
+            trigger_source,
+            is_test: false,
+            cost_usd: 0.0,
+            human_hours_saved: 0.0,
+            human_cost_saved_usd: 0.0,
+            agent_state_id: Some(agent_id.clone()),
+            triggered_by_goal_instance_id: triggered_by_gi_id,
+            current_step: 0,
+            total_steps: 0,
+            last_message: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            completed_at: None,
+        };
+
+        // Persist both
+        self.store.upsert_agent(&agent_state).await?;
+        self.store.upsert_goal_instance(&gi).await?;
+
+        tracing::info!(
+            tenant_id = %tenant_id,
+            role_id = %role.id,
+            agent_id = %agent_id,
+            gi_id = %gi.id,
+            "role run created and persisted"
+        );
+
+        Ok((gi, agent_state))
     }
 }
 

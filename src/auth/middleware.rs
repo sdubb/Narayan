@@ -16,8 +16,6 @@ pub struct AuthState {
 }
 
 // ── Axum extractor — use in handlers as `Extension<AuthenticatedTenant>` ──
-
-#[axum::async_trait]
 impl<S> FromRequestParts<S> for AuthenticatedTenant
 where
     S: Send + Sync,

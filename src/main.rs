@@ -419,7 +419,8 @@ async fn main() -> Result<()> {
             agent_services.clone(),
         )
         .with_store(Arc::clone(&store))
-        .with_limits(50, 300),
+        .with_cost_tracker(cost_tracker.clone())
+        .with_limits(100, 3_600),
     );
 
     // AgentManager uses WorkspaceManager to create workspaces
@@ -456,6 +457,7 @@ async fn main() -> Result<()> {
     // ── Worker pool ────────────────────────────────────────────────────────
     let pool = Arc::new(WorkerPool::new(
         cfg.worker.pool_size,
+        cfg.worker.node_name.clone(),
         store.clone(),
         queue.clone(),
         agent_loop,
@@ -504,8 +506,8 @@ async fn main() -> Result<()> {
     // ── Workforce Event Dispatcher ─────────────────────────────────────────
     // Listen for RoleCompleted events and dispatch to dependent WorkforceEvent roles
     {
-        let store = store.clone();
-        let event_bus = event_bus.clone();
+        let _store = store.clone();
+        let _event_bus = event_bus.clone();
         
         // For now, the dispatcher is called directly when role completes.
         // No separate background task needed—the event is published and can be handled
@@ -530,6 +532,10 @@ async fn main() -> Result<()> {
         });
     }
 
+    // ── Shutdown orchestration ──────────────────────────────────────────
+    let cancel_token = tokio_util::sync::CancellationToken::new();
+    let shutdown_token = cancel_token.clone();
+
     tracing::info!(
         workers = cfg.worker.pool_size,
         port = cfg.server.port,
@@ -539,8 +545,14 @@ async fn main() -> Result<()> {
     );
 
     tokio::select! {
+        _ = tokio::signal::ctrl_c()  => {
+            tracing::info!("shutdown signal received — draining workers");
+            shutdown_token.cancel();
+            // Wait a moment for workers to ack/requeue
+            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+        },
         r = scheduler.run()          => tracing::error!("scheduler exited: {:?}", r),
-        r = pool.run()               => tracing::error!("worker pool exited: {:?}", r),
+        r = pool.run(cancel_token)   => tracing::error!("worker pool exited: {:?}", r),
         _ = connector_poller.run()   => tracing::error!("connector poller exited"),
         _ = schedule_ticker.run()    => tracing::error!("schedule ticker exited"),
         r = serve(

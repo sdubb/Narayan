@@ -127,7 +127,12 @@ Rules:
         let mut other_agents = Vec::new();
         for other in agents.iter().filter(|other| other.id != agent_id).take(8) {
             let role_count = self.store.list_roles_for_agent(tenant_id, &other.id).await.map(|roles| roles.len()).unwrap_or(0);
-            other_agents.push(format!("- {} [{}] roles={}", other.name, other.status, role_count));
+            other_agents.push(format!(
+                "- {} [{}] roles={}",
+                other.name,
+                status_label(&other.status),
+                role_count
+            ));
         }
 
         let other_agents = if other_agents.is_empty() {
@@ -167,7 +172,7 @@ Other agents in this tenant
     }
 }
 
-fn list_or_none(items: &[String]) -> String {
+pub(crate) fn list_or_none(items: &[String]) -> String {
     if items.is_empty() {
         "none".into()
     } else {
@@ -175,7 +180,7 @@ fn list_or_none(items: &[String]) -> String {
     }
 }
 
-fn maybe_or_dash(value: &str) -> String {
+pub(crate) fn maybe_or_dash(value: &str) -> String {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         "-".into()
@@ -188,7 +193,7 @@ fn status_label<T: std::fmt::Debug>(value: &T) -> String {
     format!("{:?}", value).to_lowercase()
 }
 
-fn trigger_summary(trigger: &crate::agent::definition::TriggerDef) -> String {
+pub(crate) fn trigger_summary(trigger: &crate::agent::definition::TriggerDef) -> String {
     use crate::agent::definition::TriggerType;
 
     match trigger.trigger_type {

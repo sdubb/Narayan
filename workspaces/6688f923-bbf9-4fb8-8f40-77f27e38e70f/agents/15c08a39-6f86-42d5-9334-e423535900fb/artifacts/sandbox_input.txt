@@ -1,0 +1,1 @@
+Sandbox fixture input. This file exists so read-only steps can be exercised safely.

@@ -580,10 +580,33 @@ pub async fn validate_connector(
             format!("Unknown connector type: {}", connector_type)),
     };
 
+    let credentials = if let Some(token) = state.connector_installs.decrypt_token(&config) {
+        serde_json::json!({
+            "access_token": token,
+            "api_key": token,
+            "token": token,
+        })
+    } else if let Some(secret) = state.connector_installs.decrypt_webhook_secret(&config) {
+        serde_json::json!({
+            "webhook_secret": secret,
+        })
+    } else {
+        serde_json::json!({})
+    };
+
+    let connector_config = crate::connectors::ConnectorConfig {
+        id: config.id.clone(),
+        tenant_id: config.tenant_id.clone(),
+        connector_type: config.connector_type.clone(),
+        credentials,
+        settings: config.settings.clone(),
+        enabled: config.enabled,
+    };
+
     // 3. Call validate_config() on the connector implementation
-    match connector.validate_config(&config).await {
+    match connector.validate_config(&connector_config).await {
         Ok(()) => {
-            info!(
+            tracing::info!(
                 target: "audit",
                 "Connector validation successful: tenant={} type={}",
                 tenant.tenant_id,
@@ -597,7 +620,7 @@ pub async fn validate_connector(
             }))).into_response()
         }
         Err(e) => {
-            warn!(
+            tracing::warn!(
                 target: "audit",
                 "Connector validation failed: tenant={} type={} error={}",
                 tenant.tenant_id,
@@ -605,10 +628,7 @@ pub async fn validate_connector(
                 e
             );
 
-            err(StatusCode::BAD_REQUEST, format!(
-                "Connector validation failed: {}",
-                e
-            )),
+            err(StatusCode::BAD_REQUEST, format!("Connector validation failed: {}", e))
         }
     }
 }

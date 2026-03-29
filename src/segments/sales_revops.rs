@@ -3,7 +3,11 @@
 
 use crate::{
     compliance::sla::{EscalationAction, EscalationRule, SlaPolicy, SlaPriority},
-    connectors::salesforce::SalesforceConnector,
+    connectors::{
+        salesforce::SalesforceConnector,
+        shipstation::ShipStationConnector,
+        shopify::ShopifyConnector,
+    },
     policy::rules::{PolicyAction, PolicyCondition, PolicyRule, PolicyRuleSet},
     segments::{
         registry::{SegmentPlugin, SegmentServices, SharedDeps},
@@ -41,7 +45,11 @@ pub fn plugin(deps: &SharedDeps, tenant_id: &str) -> SegmentPlugin {
         id: "sales_revops",
         name: "Sales & RevOps",
         domain: DomainProfile::sales_revops(),
-        connectors: vec![Arc::new(SalesforceConnector::new())],
+        connectors: vec![
+            Arc::new(SalesforceConnector::new()),
+            Arc::new(ShopifyConnector::new()),
+            Arc::new(ShipStationConnector::new()),
+        ],
         services: SegmentServices {
             policy: Some(deps.policy_engine.clone()),
             citations: Some(deps.citation_tracker.clone()),

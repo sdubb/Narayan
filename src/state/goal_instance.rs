@@ -102,6 +102,18 @@ pub struct GoalInstance {
     /// originating GoalInstance. Used for tracing chains.
     pub triggered_by_goal_instance_id: Option<String>,
 
+    /// Current progress (0-indexed).
+    #[serde(default)]
+    pub current_step: u32,
+
+    /// Total planned steps.
+    #[serde(default)]
+    pub total_steps: u32,
+
+    /// Current activity/last message from the agent.
+    #[serde(default)]
+    pub last_message: Option<String>,
+
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
@@ -152,6 +164,9 @@ impl GoalInstance {
             human_cost_saved_usd: 0.0,
             agent_state_id: None,
             triggered_by_goal_instance_id: None,
+            current_step: 0,
+            total_steps: 0,
+            last_message: None,
             created_at: now,
             updated_at: now,
             completed_at: None,

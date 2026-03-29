@@ -52,8 +52,8 @@ impl Tool for DockerTool {
 
         match action {
             "ps" => {
-                use bollard::container::ListContainersOptions;
-                let opts = ListContainersOptions::<String> { all: true, ..Default::default() };
+                use bollard::query_parameters::ListContainersOptions;
+                let opts = ListContainersOptions { all: true, ..Default::default() };
                 let containers =
                     docker.list_containers(Some(opts)).await.map_err(|e| anyhow::anyhow!("list_containers: {}", e))?;
                 let list: Vec<serde_json::Value> = containers
@@ -76,8 +76,8 @@ impl Tool for DockerTool {
                     Some(i) => i,
                     None => return Ok(ToolResult::err("'image' required")),
                 };
-                use bollard::image::CreateImageOptions;
-                let opts = CreateImageOptions { from_image: image, ..Default::default() };
+                use bollard::query_parameters::CreateImageOptions;
+                let opts = CreateImageOptions { from_image: Some(image.to_string()), ..Default::default() };
                 let mut stream = docker.create_image(Some(opts), None, None);
                 let mut last_status = String::new();
                 while let Some(item) = stream.next().await {
@@ -104,8 +104,8 @@ impl Tool for DockerTool {
                     .unwrap_or_default();
 
                 use bollard::{
-                    container::{Config, CreateContainerOptions, StartContainerOptions},
                     models::{HostConfig, PortBinding},
+                    query_parameters::{CreateContainerOptions, StartContainerOptions},
                 };
 
                 let port_bindings: HashMap<String, Option<Vec<PortBinding>>> = args["ports"]
@@ -128,7 +128,7 @@ impl Tool for DockerTool {
                     .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
                     .unwrap_or_default();
 
-                let config = Config {
+                let config = bollard::models::ContainerCreateBody {
                     image: Some(image.to_string()),
                     cmd: cmd_arg.map(|c| c.iter().map(|s| s.to_string()).collect()),
                     env: Some(env),
@@ -141,12 +141,12 @@ impl Tool for DockerTool {
                 };
 
                 let container = docker
-                    .create_container(None::<CreateContainerOptions<&str>>, config)
+                    .create_container(None::<CreateContainerOptions>, config)
                     .await
                     .map_err(|e| anyhow::anyhow!("create_container: {}", e))?;
 
                 docker
-                    .start_container(&container.id, None::<StartContainerOptions<String>>)
+                    .start_container(&container.id, None::<StartContainerOptions>)
                     .await
                     .map_err(|e| anyhow::anyhow!("start_container: {}", e))?;
 
@@ -198,9 +198,9 @@ impl Tool for DockerTool {
                     None => return Ok(ToolResult::err("'container_id' required")),
                 };
                 let tail = args["tail"].as_u64().unwrap_or(100);
-                use bollard::container::LogsOptions;
+                use bollard::query_parameters::LogsOptions;
                 let opts =
-                    LogsOptions::<String> { stdout: true, stderr: true, tail: tail.to_string(), ..Default::default() };
+                    LogsOptions { stdout: true, stderr: true, tail: tail.to_string(), ..Default::default() };
                 let mut log = String::new();
                 let mut stream = docker.logs(cid, Some(opts));
                 while let Some(Ok(line)) = stream.next().await {
@@ -225,7 +225,7 @@ impl Tool for DockerTool {
                     Some(c) => c,
                     None => return Ok(ToolResult::err("'container_id' required")),
                 };
-                use bollard::container::RemoveContainerOptions;
+                use bollard::query_parameters::RemoveContainerOptions;
                 docker
                     .remove_container(cid, Some(RemoveContainerOptions { force: true, ..Default::default() }))
                     .await

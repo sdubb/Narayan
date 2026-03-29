@@ -64,6 +64,12 @@ pub struct AgentState {
     /// Agent fails gracefully after 3 rejections.
     #[serde(default)]
     pub plan_rejection_count: u32,
+    /// ID of the worker node that has claimed this agent.
+    #[serde(default)]
+    pub claimed_by: Option<String>,
+    /// When the current heartbeat lease expires.
+    #[serde(default)]
+    pub lease_expires_at: Option<DateTime<Utc>>,
 }
 
 impl AgentState {
@@ -89,6 +95,8 @@ impl AgentState {
             pending_children: Vec::new(),
             conversation_id: None,
             plan_rejection_count: 0,
+            claimed_by: None,
+            lease_expires_at: None,
         }
     }
 

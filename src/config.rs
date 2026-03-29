@@ -39,6 +39,7 @@ pub struct SchedulerConfig {
 #[derive(Debug, Deserialize, Clone)]
 pub struct WorkerConfig {
     pub pool_size: usize,
+    pub node_name: String,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -85,6 +86,7 @@ impl AppConfig {
             .set_default("scheduler.max_batch_size", 256i64)?
             // Worker
             .set_default("worker.pool_size", 32i64)?
+            .set_default("worker.node_name", "narayan-node")?
             // Gateway
             .set_default("gateway.cache_ttl_secs", 300i64)?
             .set_default("gateway.cache_max_entries", 10_000i64)?

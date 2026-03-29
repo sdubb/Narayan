@@ -1,11 +1,22 @@
 # Narayan
 
-Narayan is a B2B autonomous agent platform for building, validating, and running AI workers that operate across connectors, tools, workspaces, and domain-specific policies.
+Narayan is a B2B autonomous agent platform for running AI workers on top of your existing systems. Deploy agents as an intelligence layer over your backend, databases, APIs, and SaaS tools.
 
 It is designed to do two things well:
 
 1. Help a user configure an agent conversationally in plan mode.
-2. Run that agent deterministically and safely in production.
+2. Run that agent deterministically and safely in production — monitoring, detecting, and acting on your data.
+
+## What Narayan Does
+
+**Don't replace your backend. Make it smarter.**
+
+- **Bring Your Own Backend** — Connect any API, database, or REST endpoint. Agents fetch data and trigger actions on your systems.
+- **Webhook Ingestion** — Real-time events from Zendesk, Salesforce, GitHub, ServiceNow, and 17+ more platforms trigger agents instantly.
+- **Monitoring Agents** — Detect anomalies, flag exceptions, and track SLA deadlines on your data.
+- **Action Agents** — Fetch context, make decisions, and call your APIs to update records or notify teams.
+- **Bring-Your-Own Databases** — Query PostgreSQL, execute SQL directly, or use external databases as agent memory.
+- **MCP Server Support** — Use Model Context Protocol servers for extensible tool integrations into any system.
 
 For the full system design, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
@@ -278,4 +289,5 @@ cargo build --release
 
 - [ARCHITECTURE.md](ARCHITECTURE.md)
 - [CLAUDE.md](CLAUDE.md)
+
 

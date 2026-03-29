@@ -14,7 +14,7 @@ use sqlx::Row;
 use printpdf::*;
 
 use crate::{
-    agent::{AgentChatManager, AgentManager},
+    agent::{agent_chat::{list_or_none, maybe_or_dash, trigger_summary}, AgentManager},
     agent::PlanModeTestResult,
     auth::{hash_password, issue_token, verify_password},
     gateway::{cost::AgentUsage, CostTracker},
@@ -1816,30 +1816,30 @@ pub async fn connector_inbound(
             input_data.clone()
         };
 
-        let gi = crate::state::GoalInstance::new(
-            uuid::Uuid::new_v4().to_string(),
-            tenant.tenant_id.clone(),
-            role.agent_id.clone(),
-            role.id.clone(),
-            role.version,
-            mapped_input,
-            crate::state::TriggerSource::Webhook {
-                connector: connector_type.clone(),
-                event_type: event_type.clone(),
-                external_id: external_id_str.clone(),
-            },
-            role.status == crate::agent::definition::RoleStatus::Testing,
-        );
-
-        match state.store.upsert_goal_instance(&gi).await {
-            Ok(_) => {
+        match state
+            .manager
+            .create_role_run(
+                tenant.tenant_id.clone(),
+                role,
+                mapped_input,
+                crate::state::TriggerSource::Webhook {
+                    connector: connector_type.clone(),
+                    event_type: event_type.clone(),
+                    external_id: external_id_str.clone(),
+                },
+                None, // conversation_id
+                None, // triggered_by_gi_id
+            )
+            .await
+        {
+            Ok((gi, _agent)) => {
                 tracing::info!(
                     connector   = %connector_type,
                     event_type  = %event_type,
                     role_id     = %role.id,
                     role_name   = %role.name,
                     gi_id       = %gi.id,
-                    "connector matched AgentRole trigger → GoalInstance created"
+                    "connector matched AgentRole trigger → GoalInstance + AgentState created"
                 );
                 role_instances_created.push(gi.id);
             }
@@ -2563,19 +2563,19 @@ pub async fn trigger_role(
     }
 
     let input_data = body.get("input_data").cloned().unwrap_or(serde_json::json!({}));
-    let gi = crate::state::GoalInstance::new(
-        uuid::Uuid::new_v4().to_string(),
-        tenant.tenant_id.clone(),
-        agent_id.clone(),
-        role_id.clone(),
-        role.version,
-        input_data,
-        crate::state::TriggerSource::Manual { created_by: tenant.tenant_id.clone() },
-        role.status == crate::agent::definition::RoleStatus::Testing,
-    );
-
-    match state.store.upsert_goal_instance(&gi).await {
-        Ok(_) => Json(serde_json::json!({ "goal_instance_id": gi.id, "status": "pending" })).into_response(),
+    match state
+        .manager
+        .create_role_run(
+            tenant.tenant_id.clone(),
+            &role,
+            input_data,
+            crate::state::TriggerSource::Manual { created_by: tenant.tenant_id.clone() },
+            None, // conversation_id
+            None, // triggered_by_gi_id
+        )
+        .await
+    {
+        Ok((gi, _agent)) => Json(serde_json::json!({ "goal_instance_id": gi.id, "status": "pending" })).into_response(),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
@@ -3271,7 +3271,7 @@ pub async fn role_chat_apply(
 // ══════════════════════════════════════════════════════════════════════════
 
 /// POST /plan-mode/sessions — start a new plan mode session
-/// GET /plan-mode/templates — list all 20 pre-built templates for the picker UI
+/// GET /plan-mode/templates — list all 22 pre-built templates for the picker UI
 pub async fn list_plan_mode_templates(_tenant: AuthenticatedTenant) -> impl IntoResponse {
     use crate::agent::templates::all_templates;
     let list: Vec<serde_json::Value> = all_templates()
@@ -3698,7 +3698,7 @@ fn build_agent_chat_manager(state: &AppState) -> crate::agent::AgentChatManager 
     crate::agent::AgentChatManager::new(state.manager.gateway(), Arc::clone(&state.store))
 }
 
-/// GET /agents/:id/workspace/files/*path/download â€” download a workspace file without preview limits.
+/// GET /agents/:id/workspace/download/*path â€” download a workspace file without preview limits.
 pub async fn download_workspace_file(
     State(state): State<AppState>,
     tenant: AuthenticatedTenant,
@@ -3801,7 +3801,7 @@ pub async fn download_workspace_bundle(
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     };
 
-    let filename = format!("{}-workspace-files.tar.zst", sanitise_file_name(&agent.name));
+    let filename = format!("{}-workspace-files.tar.zst", sanitise_file_name(&agent.id));
     let disposition = format!("attachment; filename=\"{}\"", filename);
 
     (

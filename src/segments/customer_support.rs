@@ -4,7 +4,13 @@
 
 use crate::{
     compliance::sla::{EscalationAction, EscalationRule, SlaPolicy, SlaPriority},
-    connectors::{freshdesk::FreshdeskConnector, intercom::IntercomConnector, zendesk::ZendeskConnector},
+    connectors::{
+        freshdesk::FreshdeskConnector,
+        gorgias::GorgiasConnector,
+        intercom::IntercomConnector,
+        twilio::TwilioConnector,
+        zendesk::ZendeskConnector,
+    },
     policy::rules::{PolicyAction, PolicyCondition, PolicyRule, PolicyRuleSet},
     segments::{
         registry::{SegmentPlugin, SegmentServices, SharedDeps},
@@ -44,6 +50,8 @@ pub fn plugin(deps: &SharedDeps, tenant_id: &str) -> SegmentPlugin {
             Arc::new(ZendeskConnector::new()),
             Arc::new(IntercomConnector::new()),
             Arc::new(FreshdeskConnector::new()),
+            Arc::new(GorgiasConnector::new()),
+            Arc::new(TwilioConnector::new()),
         ],
         services: SegmentServices {
             policy: Some(deps.policy_engine.clone()),

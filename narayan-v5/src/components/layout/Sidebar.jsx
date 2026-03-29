@@ -117,35 +117,37 @@ export default function Sidebar({
   }
 
   return (
-    <aside className="w-64 flex flex-col border-r border-border bg-bg-card shrink-0 h-screen">
+    <aside className="flex h-screen w-72 shrink-0 flex-col border-r border-border bg-bg-card/90 backdrop-blur">
 
       {/* Header */}
-      <div className="flex items-center justify-between px-4 py-4 border-b border-border">
-        <p className="font-serif text-xl text-tx-1">Narayan</p>
+      <div className="flex items-start justify-between gap-3 border-b border-border px-4 py-4">
+        <div>
+          <p className="font-serif text-xl leading-none text-tx-1">Narayan</p>
+          <p className="mt-1 text-[0.7rem] uppercase tracking-[0.24em] text-tx-4">Operational workspace</p>
+        </div>
         <div className="flex items-center gap-0.5">
           {pendingReviews.length > 0 && (
             <button
               onClick={() => onNavigate('settings')}
-              className="relative p-1.5 rounded-lg text-warn hover:bg-warn-soft transition-all"
+              className="relative rounded-lg p-1.5 text-warn transition-all hover:bg-warn-soft"
               title={`${pendingReviews.length} pending`}
             >
               <Bell size={15} />
-              <span className="absolute -top-0.5 -right-0.5 min-w-[14px] h-[14px] rounded-full bg-warn
-                               text-bg-card text-[9px] font-bold flex items-center justify-center px-0.5">
+              <span className="absolute -right-0.5 -top-0.5 flex h-[14px] min-w-[14px] items-center justify-center rounded-full bg-warn px-0.5 text-[9px] font-bold text-bg-card">
                 {pendingReviews.length}
               </span>
             </button>
           )}
           <button
             onClick={() => onNavigate('settings')}
-            className="p-1.5 rounded-lg text-tx-3 hover:text-tx-1 hover:bg-bg-hover transition-all"
+            className="rounded-lg p-1.5 text-tx-3 transition-all hover:bg-bg-hover hover:text-tx-1"
             title="Settings"
           >
             <Settings size={15} />
           </button>
           <button
             onClick={() => onNavigate('logout')}
-            className="p-1.5 rounded-lg text-tx-3 hover:text-err hover:bg-err-soft transition-all"
+            className="rounded-lg p-1.5 text-tx-3 transition-all hover:bg-err-soft hover:text-err"
             title="Sign out"
           >
             <LogOut size={15} />
@@ -157,8 +159,7 @@ export default function Sidebar({
       <div className="px-3 pt-3 pb-2">
         <button
           onClick={onNewAgent}
-          className="w-full flex items-center gap-2 rounded-lg px-3 py-2 text-xs font-medium
-                     bg-accent text-white hover:bg-accent-text transition-all active:scale-[0.98]"
+          className="flex w-full items-center gap-2 rounded-2xl border border-accent/20 bg-gradient-to-r from-accent to-accent-text px-4 py-3 text-left text-sm font-medium text-white shadow-[0_12px_30px_rgba(201,106,46,0.2)] transition-all hover:translate-y-[-1px] active:scale-[0.99]"
         >
           <Plus size={13} />
           New agent
@@ -173,7 +174,7 @@ export default function Sidebar({
           </div>
         ) : agents.length === 0 ? (
           <div className="px-3 py-8 text-center">
-            <div className="size-10 rounded-xl bg-accent-soft border border-accent/20 flex items-center justify-center mx-auto mb-3">
+            <div className="mx-auto mb-3 flex size-10 items-center justify-center rounded-2xl border border-accent/20 bg-accent-soft">
               <Zap size={18} className="text-accent" />
             </div>
             <p className="text-xs font-medium text-tx-1 mb-1">No agents yet</p>
@@ -196,6 +197,16 @@ export default function Sidebar({
             ))}
           </>
         )}
+      </div>
+
+      <div className="border-t border-border px-4 py-4">
+        <div className="rounded-2xl border border-border bg-bg-hover px-3 py-3">
+          <p className="text-[0.7rem] uppercase tracking-[0.24em] text-tx-4">Workspace health</p>
+          <div className="mt-2 flex items-center gap-2 text-sm text-tx-2">
+            <span className="size-2 rounded-full bg-ok" />
+            Connected and syncing
+          </div>
+        </div>
       </div>
     </aside>
   );

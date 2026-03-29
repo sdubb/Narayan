@@ -271,6 +271,22 @@ pub static ALL_CONNECTORS: &[ConnectorDef] = &[
         keywords: &["gmail", "email", "inbox", "send", "draft", "google mail"],
     },
     ConnectorDef {
+        name: "google_calendar",
+        category: "connector/communication",
+        mcp_url: "https://calendar.mcp.claude.com/mcp",
+        summary: "Google Calendar: events, scheduling, invitations",
+        description: "Interact with Google Calendar. List events, create meetings, \
+                       update calendar items, check availability, send invitations.",
+        operations: &[
+            "list_events    — list calendar events for a date range",
+            "get_event      — fetch event details by ID",
+            "create_event   — create a new calendar event",
+            "update_event   — update event time, title, or description",
+            "find_free_time — find available time slots across calendars",
+        ],
+        keywords: &["google calendar", "calendar", "meeting", "event", "schedule", "availability", "invite"],
+    },
+    ConnectorDef {
         name: "outlook",
         category: "connector/communication",
         mcp_url: "https://graph.microsoft.com/mcp/sse",
@@ -398,6 +414,92 @@ pub static ALL_CONNECTORS: &[ConnectorDef] = &[
             "list_models — list models and their last run status",
         ],
         keywords: &["dbt", "transform", "pipeline", "datawarehouse", "model", "run", "analytics"],
+    },
+    // ── Communication (continued) ──────────────────────────────────────────
+    ConnectorDef {
+        name: "twilio",
+        category: "connector/communication",
+        mcp_url: "https://api.twilio.com/mcp/sse",
+        summary: "Twilio: SMS, voice calls, WhatsApp, video",
+        description: "Interact with Twilio. Send SMS and WhatsApp messages, make voice calls, \
+                       check message logs, manage phone numbers and conference rooms.",
+        operations: &[
+            "send_sms        — send an SMS to a phone number",
+            "send_whatsapp   — send a WhatsApp message",
+            "make_call       — initiate a voice call",
+            "list_messages   — list recent SMS/messaging logs",
+            "get_message     — fetch a message's details and status",
+        ],
+        keywords: &["twilio", "sms", "whatsapp", "call", "voice", "message", "communication", "notify"],
+    },
+    ConnectorDef {
+        name: "teams",
+        category: "connector/communication",
+        mcp_url: "https://graph.microsoft.com/mcp/sse",
+        summary: "Microsoft Teams: messages, channels, video",
+        description: "Interact with Microsoft Teams. Send messages to channels or users, \
+                       create channels, post rich cards, manage meetings.",
+        operations: &[
+            "send_message   — post a message to a channel or chat",
+            "list_messages  — read recent messages from a channel",
+            "create_channel — create a new team channel",
+            "send_card      — post an adaptive card",
+            "create_meeting — schedule a Teams meeting",
+        ],
+        keywords: &["teams", "microsoft teams", "channel", "message", "chat", "meeting", "notification"],
+    },
+    // ── E-commerce & no-code ───────────────────────────────────────────────
+    ConnectorDef {
+        name: "shopify",
+        category: "connector/commerce",
+        mcp_url: "https://api.shopify.com/mcp/sse",
+        summary: "Shopify: orders, customers, products, inventory",
+        description: "Interact with Shopify. List and update orders, manage customers, \
+                       query products, check inventory, create fulfilments.",
+        operations: &[
+            "list_orders    — list recent orders with optional filters",
+            "get_order      — fetch full order details",
+            "update_order   — update order status or metafields",
+            "get_customer   — look up a customer by ID or email",
+            "list_products  — list products with optional search",
+            "update_inventory— update stock levels",
+        ],
+        keywords: &["shopify", "order", "customer", "product", "inventory", "ecommerce", "store"],
+    },
+    ConnectorDef {
+        name: "airtable",
+        category: "connector/database",
+        mcp_url: "https://mcp.airtable.com/sse",
+        summary: "Airtable: tables, records, views, attachments",
+        description: "Interact with Airtable bases. List and create records, update fields, \
+                       filter by views, manage attachments and formulas.",
+        operations: &[
+            "list_records   — list records from a table with optional view filter",
+            "get_record     — fetch a record by ID",
+            "create_record  — create a new record with field values",
+            "update_record  — update fields on an existing record",
+            "delete_record  — delete a record",
+            "list_tables    — list all tables in a base",
+        ],
+        keywords: &["airtable", "table", "record", "base", "database", "spreadsheet", "no-code", "view"],
+    },
+    // ── Email marketing ────────────────────────────────────────────────────
+    ConnectorDef {
+        name: "mailchimp",
+        category: "connector/marketing",
+        mcp_url: "https://api.mailchimp.com/mcp/sse",
+        summary: "Mailchimp: campaigns, lists, subscribers, reports",
+        description: "Interact with Mailchimp. Manage subscriber lists, create campaigns, \
+                       send emails, view analytics, segment audiences.",
+        operations: &[
+            "list_campaigns   — list recent email campaigns",
+            "create_campaign  — create a new email campaign",
+            "send_campaign    — send a campaign to a list",
+            "add_subscriber   — add a contact to a list",
+            "get_campaign_stats— get performance metrics for a campaign",
+            "list_subscribers — list contacts in a list with optional filters",
+        ],
+        keywords: &["mailchimp", "email", "campaign", "subscriber", "list", "marketing", "newsletter"],
     },
 ];
 
@@ -2376,6 +2478,48 @@ mod tests {
     fn test_find_by_name_stripe() {
         let def = find_by_name("stripe").expect("stripe should exist");
         assert_eq!(def.category, "connector/finance");
+    }
+
+    #[test]
+    fn test_find_by_name_google_calendar() {
+        let def = find_by_name("google_calendar").expect("google_calendar should exist");
+        assert_eq!(def.category, "connector/communication");
+        assert!(def.keywords.contains(&"calendar"));
+    }
+
+    #[test]
+    fn test_find_by_name_twilio() {
+        let def = find_by_name("twilio").expect("twilio should exist");
+        assert_eq!(def.category, "connector/communication");
+        assert!(def.keywords.contains(&"sms"));
+    }
+
+    #[test]
+    fn test_find_by_name_teams() {
+        let def = find_by_name("teams").expect("teams should exist");
+        assert_eq!(def.category, "connector/communication");
+        assert!(def.keywords.contains(&"teams"));
+    }
+
+    #[test]
+    fn test_find_by_name_shopify() {
+        let def = find_by_name("shopify").expect("shopify should exist");
+        assert_eq!(def.category, "connector/commerce");
+        assert!(def.keywords.contains(&"order"));
+    }
+
+    #[test]
+    fn test_find_by_name_airtable() {
+        let def = find_by_name("airtable").expect("airtable should exist");
+        assert_eq!(def.category, "connector/database");
+        assert!(def.keywords.contains(&"table"));
+    }
+
+    #[test]
+    fn test_find_by_name_mailchimp() {
+        let def = find_by_name("mailchimp").expect("mailchimp should exist");
+        assert_eq!(def.category, "connector/marketing");
+        assert!(def.keywords.contains(&"email"));
     }
 
     #[test]

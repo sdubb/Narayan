@@ -143,6 +143,13 @@ impl PostgresStore {
         sqlx::query("CREATE INDEX IF NOT EXISTS costs_tenant_period ON costs (tenant_id, period_start)")
             .execute(&self.pool)
             .await?;
+        
+        // --- Migrations for Distributed Execution ---
+        sqlx::query("ALTER TABLE agents ADD COLUMN IF NOT EXISTS claimed_by TEXT").execute(&self.pool).await?;
+        sqlx::query("ALTER TABLE agents ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ").execute(&self.pool).await?;
+        sqlx::query("ALTER TABLE goal_instances ADD COLUMN IF NOT EXISTS current_step INTEGER NOT NULL DEFAULT 0").execute(&self.pool).await?;
+        sqlx::query("ALTER TABLE goal_instances ADD COLUMN IF NOT EXISTS total_steps INTEGER NOT NULL DEFAULT 0").execute(&self.pool).await?;
+        sqlx::query("ALTER TABLE goal_instances ADD COLUMN IF NOT EXISTS last_message TEXT").execute(&self.pool).await?;
 
         // ── Conversations ────────────────────────────────────────────────
         sqlx::query(
@@ -485,8 +492,8 @@ impl PostgresStore {
                 id, tenant_id, goal, status, current_task, current_step,
                 workspace_path, memory_ref, next_run, created_at, updated_at,
                 started_at, plan, final_answer, metadata, parent_agent_id, pending_children,
-                conversation_id, plan_rejection_count
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+                conversation_id, plan_rejection_count, claimed_by, lease_expires_at
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
             ON CONFLICT (id) DO UPDATE SET
                 goal                 = EXCLUDED.goal,
                 status               = EXCLUDED.status,
@@ -502,7 +509,9 @@ impl PostgresStore {
                 metadata             = EXCLUDED.metadata,
                 pending_children     = EXCLUDED.pending_children,
                 conversation_id      = EXCLUDED.conversation_id,
-                plan_rejection_count = EXCLUDED.plan_rejection_count
+                plan_rejection_count = EXCLUDED.plan_rejection_count,
+                claimed_by           = EXCLUDED.claimed_by,
+                lease_expires_at     = EXCLUDED.lease_expires_at
         "#,
         )
         .bind(&state.id)
@@ -524,6 +533,8 @@ impl PostgresStore {
         .bind(serde_json::json!(state.pending_children))
         .bind(&state.conversation_id)
         .bind(state.plan_rejection_count as i32)
+        .bind(&state.claimed_by)
+        .bind(state.lease_expires_at)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -551,31 +562,65 @@ impl PostgresStore {
         Ok(rows.iter().map(|r| row_to_agent_state(r)).collect())
     }
 
-    /// Claim due agents (pending/waiting) using FOR UPDATE SKIP LOCKED.
-    pub async fn claim_due_agents(&self, limit: i64) -> Result<Vec<AgentState>> {
+    /// Claim due agents (pending/waiting OR stale running) using FOR UPDATE SKIP LOCKED.
+    pub async fn claim_due_agents(&self, worker_id: &str, lease_duration_secs: i64, limit: i64) -> Result<Vec<AgentState>> {
         let rows = sqlx::query(
             r#"
             UPDATE agents
-            SET    status = 'running', updated_at = NOW()
+            SET    status = 'running', 
+                   claimed_by = $1,
+                   lease_expires_at = NOW() + ($2 || ' seconds')::interval,
+                   updated_at = NOW()
             WHERE  id IN (
                 SELECT id FROM agents
                 WHERE  next_run <= NOW()
-                  -- NOTE: plan_approval_needed, clarifying, paused, and delegating
-                  -- are intentionally excluded from scheduling.  These statuses
-                  -- require human input or external completion before the agent
-                  -- can proceed.  Do NOT add them to this IN clause.
-                  AND  status   IN ('pending', 'waiting')
+                  AND (
+                    status IN ('pending', 'waiting')
+                    OR (status = 'running' AND (lease_expires_at IS NULL OR lease_expires_at < NOW()))
+                  )
                 ORDER  BY next_run ASC
-                LIMIT  $1
+                LIMIT  $3
                 FOR UPDATE SKIP LOCKED
             )
             RETURNING *
         "#,
         )
+        .bind(worker_id)
+        .bind(lease_duration_secs.to_string())
         .bind(limit)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows.iter().map(|r| row_to_agent_state(r)).collect())
+    }
+
+    pub async fn renew_lease(&self, agent_id: &str, worker_id: &str, lease_duration_secs: i64) -> Result<bool> {
+        let res = sqlx::query(
+            "UPDATE agents 
+             SET    lease_expires_at = NOW() + ($1 || ' seconds')::interval,
+                    updated_at = NOW()
+             WHERE  id = $2 AND claimed_by = $3"
+        )
+        .bind(lease_duration_secs.to_string())
+        .bind(agent_id)
+        .bind(worker_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected() > 0)
+    }
+
+    pub async fn release_lease(&self, agent_id: &str, worker_id: &str) -> Result<()> {
+        sqlx::query(
+            "UPDATE agents 
+             SET    claimed_by = NULL, 
+                    lease_expires_at = NULL,
+                    updated_at = NOW()
+             WHERE  id = $1 AND claimed_by = $2"
+        )
+        .bind(agent_id)
+        .bind(worker_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     /// Check delegating agents whose all children have finished.
@@ -1273,8 +1318,8 @@ impl PostgresStore {
                 (id, tenant_id, agent_id, role_id, role_version, input_data, status,
                  result, failure_reason, trigger_source, is_test, cost_usd,
                  agent_state_id, triggered_by_goal_instance_id,
-                 created_at, updated_at, completed_at)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+                 created_at, updated_at, completed_at, current_step, total_steps, last_message)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
             ON CONFLICT (id) DO UPDATE SET
                 status                          = EXCLUDED.status,
                 result                          = EXCLUDED.result,
@@ -1282,7 +1327,10 @@ impl PostgresStore {
                 cost_usd                        = EXCLUDED.cost_usd,
                 agent_state_id                  = EXCLUDED.agent_state_id,
                 updated_at                      = EXCLUDED.updated_at,
-                completed_at                    = EXCLUDED.completed_at
+                completed_at                    = EXCLUDED.completed_at,
+                current_step                    = EXCLUDED.current_step,
+                total_steps                     = EXCLUDED.total_steps,
+                last_message                    = EXCLUDED.last_message
             "#,
         )
         .bind(&gi.id)
@@ -1302,6 +1350,9 @@ impl PostgresStore {
         .bind(gi.created_at)
         .bind(gi.updated_at)
         .bind(gi.completed_at)
+        .bind(gi.current_step as i32)
+        .bind(gi.total_steps as i32)
+        .bind(&gi.last_message)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -1920,6 +1971,8 @@ fn row_to_agent_state(row: &PgRow) -> AgentState {
         pending_children,
         conversation_id: row.try_get("conversation_id").ok().flatten(),
         plan_rejection_count: row.try_get::<i32, _>("plan_rejection_count").ok().map(|v| v as u32).unwrap_or(0),
+        claimed_by: row.try_get("claimed_by").ok().flatten(),
+        lease_expires_at: row.try_get::<Option<DateTime<Utc>>, _>("lease_expires_at").ok().flatten(),
     }
 }
 
@@ -2130,6 +2183,9 @@ fn row_to_goal_instance(row: &PgRow) -> GoalInstance {
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
         completed_at: row.try_get("completed_at").ok().flatten(),
+        current_step: row.try_get::<i32, _>("current_step").unwrap_or(0) as u32,
+        total_steps: row.try_get::<i32, _>("total_steps").unwrap_or(0) as u32,
+        last_message: row.try_get("last_message").ok().flatten(),
     }
 }
 

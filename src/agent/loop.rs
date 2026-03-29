@@ -20,11 +20,13 @@ use crate::{
     compliance::sla::{EscalationAction, SlaStatus},
     debug::recorder::AgentRecorder,
     events::{AgentEvent, EventBus},
+    gateway::CostTracker,
     knowledge::graph::KnowledgeGraph,
+    agent::definition::ExecutionLimits,
     segments::AgentServices,
     skill_evolution::evolution::evolve_skill,
     skills::registry::SkillRegistry,
-    state::{AgentState, AgentStatus},
+    state::{AgentState, AgentStatus, GoalInstanceStatus},
     tools::ToolRegistry,
     util::next_run_after,
 };
@@ -214,6 +216,11 @@ fn format_step_condition(step: &crate::agent::planner::PlannedStep) -> Option<St
     })
 }
 
+const SOFT_LIMIT_WARNING_RATIO: f64 = 0.8;
+const EXTENSION_REQUEST_REMAINING_STEPS: u32 = 2;
+const EXTENSION_REQUEST_STEPS: u32 = 10;
+const EXTENSION_REQUEST_TIMEOUT_SECS: u64 = 900;
+
 fn plan_step_event(step: &crate::agent::planner::PlannedStep) -> crate::events::PlanStepEvent {
     crate::events::PlanStepEvent {
         step_index: step.index,
@@ -291,6 +298,7 @@ pub struct AgentLoop {
     embedder: Arc<dyn crate::memory::EmbeddingModel>,
     services: Arc<AgentServices>,
     store: Option<Arc<crate::storage::PostgresStore>>,
+    cost_tracker: Option<Arc<CostTracker>>,
     max_steps: usize,
     timeout_secs: u64,
 }
@@ -325,13 +333,19 @@ impl AgentLoop {
             embedder,
             services,
             store: None,
-            max_steps: 50,
-            timeout_secs: 300,
+            cost_tracker: None,
+            max_steps: 100,
+            timeout_secs: 3_600,
         }
     }
 
     pub fn with_store(mut self, store: Arc<crate::storage::PostgresStore>) -> Self {
         self.store = Some(store);
+        self
+    }
+
+    pub fn with_cost_tracker(mut self, cost_tracker: Arc<CostTracker>) -> Self {
+        self.cost_tracker = Some(cost_tracker);
         self
     }
 
@@ -341,6 +355,134 @@ impl AgentLoop {
         self
     }
 
+    async fn resolve_execution_limits(&self, state: &AgentState) -> ExecutionLimits {
+        if let (Some(store), Some(role_id)) = (&self.store, state.metadata.get("role_id").and_then(|v| v.as_str())) {
+            if let Ok(Some(role)) = store.get_agent_role(&state.tenant_id, role_id).await {
+                let mut limits = role.execution_limits;
+                if let Some(extra_steps) = state.metadata.get("execution_limit_extension_steps").and_then(|v| v.as_u64()) {
+                    limits.max_steps = limits.max_steps.saturating_add(extra_steps.min(u32::MAX as u64) as u32);
+                }
+                if let Some(extra_timeout) = state
+                    .metadata
+                    .get("execution_limit_extension_timeout_secs")
+                    .and_then(|v| v.as_u64())
+                {
+                    limits.timeout_secs = limits.timeout_secs.saturating_add(extra_timeout);
+                }
+                return limits;
+            }
+        }
+
+        let mut limits = ExecutionLimits {
+            max_steps: self.max_steps as u32,
+            max_retries: ExecutionLimits::default().max_retries,
+            timeout_secs: self.timeout_secs,
+            max_cost_usd: None,
+        };
+        if let Some(extra_steps) = state.metadata.get("execution_limit_extension_steps").and_then(|v| v.as_u64()) {
+            limits.max_steps = limits.max_steps.saturating_add(extra_steps.min(u32::MAX as u64) as u32);
+        }
+        if let Some(extra_timeout) = state
+            .metadata
+            .get("execution_limit_extension_timeout_secs")
+            .and_then(|v| v.as_u64())
+        {
+            limits.timeout_secs = limits.timeout_secs.saturating_add(extra_timeout);
+        }
+        limits
+    }
+
+    async fn current_cost_usd(&self, state: &AgentState) -> Option<f64> {
+        let tracker = self.cost_tracker.as_ref()?;
+        let usage = tracker.get_usage(&state.id).await?;
+        Some(usage.total_cost_usd)
+    }
+
+    async fn cost_limit_exceeded(&self, state: &AgentState, limits: &ExecutionLimits) -> bool {
+        let Some(limit) = limits.max_cost_usd else {
+            return false;
+        };
+        if limit <= 0.0 {
+            return false;
+        }
+        matches!(self.current_cost_usd(state).await, Some(current) if current >= limit)
+    }
+
+    async fn fail_if_cost_limit_hit(&self, state: &mut AgentState, limits: &ExecutionLimits, context: &str) -> Result<Option<StepOutcome>> {
+        if !self.cost_limit_exceeded(state, limits).await {
+            return Ok(None);
+        }
+
+        let current = self.current_cost_usd(state).await.unwrap_or(0.0);
+        let limit = limits.max_cost_usd.unwrap_or(0.0);
+        let reason = format!(
+            "agent exceeded cost limit (${current:.4} / ${limit:.4}) during {context}"
+        );
+        tracing::warn!(agent_id = %state.id, current_cost_usd = current, limit_usd = limit, context = context, "cost limit reached");
+        state.mark_failed();
+        self.event_bus.publish(AgentEvent::GoalFailed { agent_id: state.id.clone(), reason: reason.clone() });
+        self.event_bus.close(&state.id);
+        Ok(Some(StepOutcome::Failed(reason)))
+    }
+
+    async fn maybe_warn_execution_limit(&self, state: &mut AgentState, limits: &ExecutionLimits) -> Result<()> {
+        if state.metadata.get("execution_limit_warning_sent").and_then(|v| v.as_bool()).unwrap_or(false) {
+            return Ok(());
+        }
+
+        let max_steps = limits.max_steps.max(1);
+        let current_step = state.current_step;
+        let used_ratio = current_step as f64 / max_steps as f64;
+        let remaining_steps = max_steps.saturating_sub(current_step);
+        if used_ratio < SOFT_LIMIT_WARNING_RATIO && remaining_steps > EXTENSION_REQUEST_REMAINING_STEPS {
+            return Ok(());
+        }
+
+        let message = format!(
+            "Approaching the step budget: {current_step}/{max_steps} steps used. Auto-extending by about {} more steps if more work remains.",
+            EXTENSION_REQUEST_STEPS
+        );
+        state.metadata["execution_limit_warning_sent"] = serde_json::json!(true);
+        self.event_bus.publish(AgentEvent::ExecutionLimitWarning {
+            agent_id: state.id.clone(),
+            current_step,
+            max_steps,
+            remaining_steps,
+            suggested_extension_steps: EXTENSION_REQUEST_STEPS,
+            message,
+        });
+        Ok(())
+    }
+
+    async fn maybe_request_extension(&self, state: &mut AgentState, limits: &ExecutionLimits) -> Result<()> {
+        if state.metadata.get("execution_limit_extension_requested").and_then(|v| v.as_bool()).unwrap_or(false) {
+            return Ok(());
+        }
+
+        let max_steps = limits.max_steps.max(1);
+        let remaining_steps = max_steps.saturating_sub(state.current_step);
+        if remaining_steps > EXTENSION_REQUEST_REMAINING_STEPS {
+            return Ok(());
+        }
+
+        state.metadata["execution_limit_extension_steps"] = serde_json::json!(EXTENSION_REQUEST_STEPS);
+        state.metadata["execution_limit_extension_timeout_secs"] = serde_json::json!(EXTENSION_REQUEST_TIMEOUT_SECS);
+        state.metadata["execution_limit_extension_requested"] = serde_json::json!(true);
+        let message = format!(
+            "Automatically extended execution budget by {} steps and {} seconds.",
+            EXTENSION_REQUEST_STEPS, EXTENSION_REQUEST_TIMEOUT_SECS
+        );
+        self.event_bus.publish(AgentEvent::ExecutionLimitWarning {
+            agent_id: state.id.clone(),
+            current_step: state.current_step,
+            max_steps: limits.max_steps,
+            remaining_steps,
+            suggested_extension_steps: EXTENSION_REQUEST_STEPS,
+            message,
+        });
+        Ok(())
+    }
+
     /// Execute exactly one step of the agent state machine.
     /// Called by the worker — NEVER runs a continuous loop itself.
     pub async fn run_step(
@@ -348,6 +490,23 @@ impl AgentLoop {
         state: &mut AgentState,
         plan: &mut Option<Plan>,
         history: &mut StepHistory,
+        cancel_token: tokio_util::sync::CancellationToken,
+    ) -> Result<StepOutcome> {
+        if cancel_token.is_cancelled() {
+            tracing::info!(agent_id = %state.id, "agent loop step cancelled");
+            return Ok(StepOutcome::Continue { delay_secs: 0 });
+        }
+        self.run_step_internal(state, plan, history, cancel_token).await
+    }
+
+    /// Execute exactly one step of the agent state machine.
+    /// Called by the worker — NEVER runs a continuous loop itself.
+     async fn run_step_internal(
+        &self,
+        state: &mut AgentState,
+        plan: &mut Option<Plan>,
+        history: &mut StepHistory,
+        _cancel_token: tokio_util::sync::CancellationToken,
     ) -> Result<StepOutcome> {
         tracing::info!(
             agent_id = %state.id,
@@ -359,25 +518,37 @@ impl AgentLoop {
         );
 
         // ── 1. Cognitive control — prevent infinite loops ──────────────────
-        let control = CognitiveControlLoop::new(self.max_steps, self.timeout_secs);
+        let limits = self.resolve_execution_limits(state).await;
+        self.maybe_request_extension(state, &limits).await?;
+        let limits = self.resolve_execution_limits(state).await;
+        let control = CognitiveControlLoop::new(limits.max_steps as usize, limits.timeout_secs);
         if !control.should_continue(state) {
             let reason = format!(
                 "agent exceeded safety limits ({} steps / {}s timeout) — aborting to prevent infinite loop",
-                self.max_steps, self.timeout_secs
+                limits.max_steps, limits.timeout_secs
             );
             tracing::error!(agent_id = %state.id, reason = %reason, "cognitive control limit hit");
             state.mark_failed();
             self.event_bus.publish(AgentEvent::GoalFailed { agent_id: state.id.clone(), reason: reason.clone() });
             self.event_bus.close(&state.id);
+            let _ = self.update_goal_instance(state, GoalInstanceStatus::Failed, None, Some(reason.clone()), None, None, None).await;
             return Ok(StepOutcome::Failed(reason));
+        }
+
+        if let Some(outcome) = self.fail_if_cost_limit_hit(state, &limits, "start of step").await? {
+            return Ok(outcome);
         }
 
         // ── 2. Pre-flight (first run only) ─────────────────────────────────
         if state.status == AgentStatus::Pending {
-            return self.run_preflight(state).await;
+            let outcome = self.run_preflight(state).await?;
+            if let Some(outcome) = self.fail_if_cost_limit_hit(state, &limits, "preflight").await? {
+                return Ok(outcome);
+            }
+            return Ok(outcome);
         }
 
-        // ── 3. Clarification — wait for user answer ─────────────────────────
+        // 3. Clarification — wait for user answer ─────────────────────────
         if state.status == AgentStatus::Clarifying {
             return Ok(StepOutcome::NeedsClarification {
                 questions: state
@@ -388,7 +559,7 @@ impl AgentLoop {
             });
         }
 
-        // ── 3b. Plan approval — wait for user sign-off ──────────────────────
+        // 3b. Plan approval — wait for user sign-off ──────────────────────
         if state.status == AgentStatus::PlanApprovalNeeded {
             return Ok(StepOutcome::PlanApprovalNeeded);
         }
@@ -412,6 +583,10 @@ impl AgentLoop {
                         }
                     }
                 }
+            }
+
+            if let Some(outcome) = self.fail_if_cost_limit_hit(state, &limits, "clarification/planning").await? {
+                return Ok(outcome);
             }
 
             let _tool_names: Vec<&str> = self.tools.list();
@@ -452,6 +627,9 @@ impl AgentLoop {
                 );
                 Plan::from_skill(&skill)
             } else if let Some(workflow_plan) = self.try_plan_from_workflow_outline(state).await {
+                // Ensure GoalInstance is marked as running when we start a role run
+                let _ = self.update_goal_instance(state, GoalInstanceStatus::Running, None, None, None, None, None).await;
+
                 tracing::info!(
                     agent_id = %state.id,
                     steps    = workflow_plan.steps.len(),
@@ -484,6 +662,7 @@ impl AgentLoop {
                 state.mark_failed();
                 self.event_bus.publish(AgentEvent::GoalFailed { agent_id: state.id.clone(), reason: reason.clone() });
                 self.event_bus.close(&state.id);
+                let _ = self.update_goal_instance(state, GoalInstanceStatus::Failed, None, Some(reason.clone()), None, None, None).await;
                 return Ok(StepOutcome::Failed(reason));
             };
 
@@ -539,8 +718,18 @@ impl AgentLoop {
             
             self.event_bus.publish(AgentEvent::GoalComplete { agent_id: state.id.clone(), summary: summary.clone() });
             self.event_bus.close(&state.id);
+
+            // Update GoalInstance to Completed if linked
+            let final_output = state.metadata.get("final_output").cloned().unwrap_or(serde_json::json!({ "summary": summary }));
+            let _ = self.update_goal_instance(state, GoalInstanceStatus::Completed, Some(final_output), None, None, None, None).await;
+
             return Ok(StepOutcome::Complete);
         }
+
+        if let Err(error) = self.maybe_warn_execution_limit(state, &limits).await {
+            tracing::warn!(agent_id = %state.id, error = %error, "failed to publish execution limit warning");
+        }
+        self.maybe_request_extension(state, &limits).await?;
 
         let step = current_plan.next_step(state.current_step as usize).unwrap().clone();
 
@@ -635,6 +824,9 @@ impl AgentLoop {
             state.set_final_answer(candidate);
         }
         persist_step_output(state, &step, &result);
+        if let Some(outcome) = self.fail_if_cost_limit_hit(state, &limits, "after step execution").await? {
+            return Ok(outcome);
+        }
 
         // ── 8. Delegation check ─────────────────────────────────────────────
         for tool_result in &result.tool_results {
@@ -714,7 +906,13 @@ impl AgentLoop {
 
         // ── 9. Evaluate + Reflect (one combined LLM call) ──────────────────
         let retry_count = state.metadata.get("retry_count").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-        let eval = self.evaluator.evaluate_and_reflect(state, current_plan, &step, &result, retry_count).await?;
+        if let Some(outcome) = self.fail_if_cost_limit_hit(state, &limits, "before evaluation").await? {
+            return Ok(outcome);
+        }
+        let eval = self
+            .evaluator
+            .evaluate_and_reflect(state, current_plan, &step, &result, retry_count, limits.max_retries)
+            .await?;
         tracing::info!(
             agent_id = %state.id,
             step_index = step.index,
@@ -723,6 +921,10 @@ impl AgentLoop {
             should_revise = eval.should_revise,
             "agent loop evaluation complete"
         );
+
+        if let Some(outcome) = self.fail_if_cost_limit_hit(state, &limits, "after evaluation").await? {
+            return Ok(outcome);
+        }
 
         state.metadata["last_reflection"] = serde_json::Value::String(eval.summary.clone());
         state.metadata["key_findings"] = serde_json::json!(eval.key_findings);
@@ -866,6 +1068,19 @@ impl AgentLoop {
                 Err(e) => tracing::debug!(error = %e, "embedding failed — skipping vector store"),
             }
         }
+
+        // --- Distributed Execution: Update GoalInstance Progress ---
+        let total_steps = current_plan.steps.len() as u32;
+        let _ = self.update_goal_instance(
+            state,
+            GoalInstanceStatus::Running,
+            None,
+            None,
+            Some(state.current_step),
+            Some(total_steps),
+            Some(eval.summary.clone()),
+        )
+        .await;
 
         // ── 12c. Citation tracking — record source attribution per step ──────
         if result.success && !eval.summary.is_empty() {
@@ -1085,6 +1300,7 @@ impl AgentLoop {
                 let reason = format!("step {} aborted: {}", step.index, eval.summary);
                 self.event_bus.publish(AgentEvent::GoalFailed { agent_id: state.id.clone(), reason: reason.clone() });
                 self.event_bus.close(&state.id);
+                let _ = self.update_goal_instance(state, GoalInstanceStatus::Failed, None, Some(reason.clone()), None, None, None).await;
                 Ok(StepOutcome::Failed(reason))
             }
         }
@@ -1141,14 +1357,13 @@ impl AgentLoop {
                 );
                 self.event_bus.publish(AgentEvent::PreflightFailed { agent_id: state.id.clone(), reason: msg.clone() });
                 self.event_bus.close(&state.id);
+                let _ = self.update_goal_instance(state, GoalInstanceStatus::Failed, None, Some(msg.clone()), None, None, None).await;
                 Ok(StepOutcome::Infeasible { reason: msg })
             }
         }
     }
 
     /// Try to build a deterministic Plan from the role's enriched workflow outline.
-    /// Returns None if no role is found or the workflow outline is empty, causing
-    /// the caller to fail fast and let plan mode repair the role.
     async fn try_plan_from_workflow_outline(&self, state: &AgentState) -> Option<Plan> {
         let store = self.store.as_ref()?;
         let role_id = state.metadata.get("role_id").and_then(|v| v.as_str())?;
@@ -1161,6 +1376,52 @@ impl AgentLoop {
         let input_data = state.metadata.get("input_data").cloned().unwrap_or_else(|| serde_json::json!({}));
 
         Some(Plan::from_workflow_outline(&role, &input_data))
+    }
+
+    /// Update the status and result of a linked GoalInstance if goal_instance_id is present in metadata.
+    async fn update_goal_instance(
+        &self,
+        state: &AgentState,
+        status: GoalInstanceStatus,
+        result: Option<serde_json::Value>,
+        failure_reason: Option<String>,
+        current_step: Option<u32>,
+        total_steps: Option<u32>,
+        last_message: Option<String>,
+    ) -> Result<()> {
+        let store = match self.store.as_ref() {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let gi_id = match state.metadata.get("goal_instance_id").and_then(|v| v.as_str()) {
+            Some(id) => id,
+            None => return Ok(()),
+        };
+
+        if let Ok(Some(mut gi)) = store.get_goal_instance(&state.tenant_id, gi_id).await {
+            gi.status = status;
+            if let Some(res) = result {
+                gi.result = Some(res);
+                gi.completed_at = Some(chrono::Utc::now());
+            }
+            if let Some(reason) = failure_reason {
+                gi.failure_reason = Some(reason);
+                gi.completed_at = Some(chrono::Utc::now());
+            }
+            if let Some(step) = current_step {
+                gi.current_step = step;
+            }
+            if let Some(steps) = total_steps {
+                gi.total_steps = steps;
+            }
+            if let Some(msg) = last_message {
+                gi.last_message = Some(msg);
+            }
+            gi.cost_usd = state.metadata.get("total_cost_usd").and_then(|v| v.as_f64()).unwrap_or(gi.cost_usd);
+            gi.updated_at = chrono::Utc::now();
+            let _ = store.upsert_goal_instance(&gi).await;
+        }
+        Ok(())
     }
 
     fn prompt_for_provider_credentials(&self, state: &mut AgentState) -> Result<StepOutcome> {
@@ -2057,3 +2318,7 @@ mod tests {
         assert_eq!(state.status, AgentStatus::Completed);
     }
 }
+
+
+
+

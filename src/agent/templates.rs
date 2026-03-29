@@ -115,9 +115,9 @@ macro_rules! retry {
     };
 }
 
-// ── 20 Templates ─────────────────────────────────────────────────────────────
+// ── 22 Templates ─────────────────────────────────────────────────────────────
 
-static TEMPLATES: [RoleTemplate; 20] = [
+static TEMPLATES: [RoleTemplate; 22] = [
     // ── 1. Invoice Processor ─────────────────────────────────────────────────
     RoleTemplate {
         id: "invoice_processor",
@@ -1393,5 +1393,136 @@ static TEMPLATES: [RoleTemplate; 20] = [
             role
         },
         ask_steps: &[],
+    },
+    // â”€â”€ 21. Call Center Triage â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    RoleTemplate {
+        id: "call_center_triage",
+        name: "Call Center Triage",
+        description: "Handle inbound calls and texts, pull account context, and route urgent issues with a clean case note",
+        persona: "teams",
+        category: "customer_support",
+        emoji: "📞",
+        required_connectors: &["twilio", "gorgias", "zendesk", "salesforce"],
+        intent: || {
+            serde_json::json!({
+                "category":           "customer_support",
+                "trigger_hint":       "webhook",
+                "trigger_confidence": "high",
+                "trigger_source":     "twilio",
+                "trigger_event":      "sms.received",
+                "output_hint":        "connector_record",
+                "output_destination_hint": "gorgias_ticket",
+                "multi_role_suggested": true,
+                "actions": [
+                    "Capture the caller or text sender identity and classify urgency",
+                    "Look up the customer in Salesforce and recent support history in Gorgias or Zendesk",
+                    "Draft a short resolution note and route billing, cancellation, or escalation cases to a human queue",
+                    "Send a concise follow-up SMS when appropriate",
+                    "Log the final disposition and next step"
+                ],
+                "workflow_outline": [
+                    "receive twilio inbound call or sms",
+                    "look up customer context in salesforce and support tools",
+                    "draft case note and escalation summary",
+                    "attach note to gorgias or zendesk and log follow-up"
+                ]
+            })
+        },
+        build_role: |agent_id, tenant_id| {
+            let mut role = AgentRole::new(crate::util::new_id(), agent_id.into(), tenant_id.into(), "Call Center Triage".into());
+            role.purpose = "Triage inbound calls and texts, then route or resolve with a clear case summary".into();
+            role.connectors = vec!["twilio".into(), "gorgias".into(), "zendesk".into(), "salesforce".into()];
+            role.trigger = TriggerDef {
+                trigger_type: TriggerType::Webhook,
+                source_connector: Some("twilio".into()),
+                event_filter: Some("sms.received".into()),
+                ..Default::default()
+            };
+            let mut g = ExecutionGuidelines::default();
+            g.add_rule(before!("twilio", "Confirm caller identity or phone number before sharing account details"));
+            g.add_rule(always!("Pull customer context from Salesforce and the support inbox before replying"));
+            g.add_rule(always!("If the issue is billing, cancellation, legal, or high-frustration, route to a human queue"));
+            g.add_rule(always!("Keep replies short, calm, and action-oriented"));
+            g.add_rule(after!("gorgias", "Attach a concise disposition note to the ticket or case"));
+            g.add_rule(after!("salesforce", "Log call outcome, follow-up owner, and next step"));
+            g.add_failure(escalate!("Customer requests a human or threatens churn", "#call-center-escalations"));
+            g.add_failure(retry!("Twilio delivery or lookup failure", "twilio"));
+            g.add_completion(CompletionCriterion::record_updated("gorgias", "Call summary attached"));
+            g.add_completion(CompletionCriterion::record_updated("salesforce", "Case or contact updated"));
+            role.execution_guidelines = g;
+            role
+        },
+        ask_steps: &["support_number", "escalation_channel", "default_queue"],
+    },
+    // â”€â”€ 22. Commerce / Dropshipping Ops â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    RoleTemplate {
+        id: "commerce_fulfillment_ops",
+        name: "Commerce Fulfillment Ops",
+        description: "Manage Shopify orders, shipping exceptions, and customer updates for fast-moving ecommerce stores",
+        persona: "teams",
+        category: "sales_revops",
+        emoji: "🛒",
+        required_connectors: &["shopify", "shipstation", "gorgias", "stripe", "quickbooks"],
+        intent: || {
+            serde_json::json!({
+                "category":           "sales_revops",
+                "trigger_hint":       "webhook",
+                "trigger_confidence": "high",
+                "trigger_source":     "shopify",
+                "trigger_event":      "orders/create",
+                "output_hint":        "connector_record",
+                "output_destination_hint": "shipstation_fulfillment",
+                "multi_role_suggested": true,
+                "actions": [
+                    "Verify payment, shipping address, and fraud risk for each order",
+                    "Check inventory and determine whether the order can ship immediately",
+                    "Create shipping or fulfillment notes and handle exceptions cleanly",
+                    "Draft customer updates for delays, refunds, or substitutions",
+                    "Log financial and fulfillment outcomes for reconciliation"
+                ],
+                "workflow_outline": [
+                    "ingest new shopify order",
+                    "verify payment and shipping status",
+                    "update shipstation fulfillment or exception note",
+                    "notify gorgias and log the financial outcome"
+                ]
+            })
+        },
+        build_role: |agent_id, tenant_id| {
+            let mut role = AgentRole::new(
+                crate::util::new_id(),
+                agent_id.into(),
+                tenant_id.into(),
+                "Commerce Fulfillment Ops".into(),
+            );
+            role.purpose = "Manage ecommerce orders, shipping, and customer updates with strong exception handling".into();
+            role.connectors = vec![
+                "shopify".into(),
+                "shipstation".into(),
+                "gorgias".into(),
+                "stripe".into(),
+                "quickbooks".into(),
+            ];
+            role.trigger = TriggerDef {
+                trigger_type: TriggerType::Webhook,
+                source_connector: Some("shopify".into()),
+                event_filter: Some("orders/create".into()),
+                ..Default::default()
+            };
+            let mut g = ExecutionGuidelines::default();
+            g.add_rule(before!("shopify", "Verify address, payment status, and fraud flags before fulfillment"));
+            g.add_rule(always!("If inventory is uncertain, move the order to an exception queue instead of guessing"));
+            g.add_rule(always!("Use ShipStation for shipping and tracking handoff whenever possible"));
+            g.add_rule(always!("If a refund or replacement is needed, keep the customer informed with a clear timeline"));
+            g.add_rule(after!("shipstation", "Record shipping or exception outcome in the workspace log"));
+            g.add_rule(after!("gorgias", "Attach the customer-facing status update to the support ticket"));
+            g.add_failure(skip_log!("Order has a clear payment or address mismatch â€” flag for review", "shopify"));
+            g.add_failure(retry!("Shipping provider API error", "shipstation"));
+            g.add_completion(CompletionCriterion::record_updated("shopify", "Order reviewed"));
+            g.add_completion(CompletionCriterion::record_updated("shipstation", "Shipment or exception updated"));
+            role.execution_guidelines = g;
+            role
+        },
+        ask_steps: &["shop_domain", "shipping_origin", "escalation_channel"],
     },
 ];

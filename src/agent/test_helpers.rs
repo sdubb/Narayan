@@ -154,6 +154,7 @@ impl Evaluator for MockEvaluator {
         _step: &PlannedStep,
         _result: &StepResult,
         _retry_count: u32,
+        _max_retries: u32,
     ) -> Result<EvalVerdict> {
         let mut queue = self.responses.lock().await;
         if queue.is_empty() {
@@ -170,8 +171,9 @@ impl Evaluator for MockEvaluator {
         step: &PlannedStep,
         result: &StepResult,
         retry_count: u32,
+        max_retries: u32,
     ) -> Result<EvalReflection> {
-        let verdict = self.evaluate(state, plan, step, result, retry_count).await?;
+        let verdict = self.evaluate(state, plan, step, result, retry_count, max_retries).await?;
         Ok(EvalReflection {
             verdict,
             summary: result.output.clone(),
