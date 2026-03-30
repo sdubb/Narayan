@@ -15,6 +15,10 @@ pub struct Metrics {
     pub goals_total: AtomicU64,
     pub llm_calls_total: AtomicU64,
     pub llm_cache_hits: AtomicU64,
+    pub response_cache_hits: AtomicU64,      // LLM response cache hits
+    pub response_cache_misses: AtomicU64,    // LLM response cache misses
+    pub audit_bridge_lags: AtomicU64,        // Number of times audit bridge lagged
+    pub audit_events_dropped: AtomicU64,     // Total audit events lost to lag
     pub input_tokens_total: AtomicU64,
     pub output_tokens_total: AtomicU64,
     pub started_at: Instant,
@@ -32,6 +36,10 @@ impl Metrics {
             goals_total: AtomicU64::new(0),
             llm_calls_total: AtomicU64::new(0),
             llm_cache_hits: AtomicU64::new(0),
+            response_cache_hits: AtomicU64::new(0),
+            response_cache_misses: AtomicU64::new(0),
+            audit_bridge_lags: AtomicU64::new(0),
+            audit_events_dropped: AtomicU64::new(0),
             input_tokens_total: AtomicU64::new(0),
             output_tokens_total: AtomicU64::new(0),
             started_at: Instant::now(),
@@ -109,6 +117,30 @@ impl Metrics {
         if cache_hit {
             self.llm_cache_hits.fetch_add(1, Ordering::Relaxed);
         }
+    }
+
+    /// Record an LLM response cache hit.
+    pub fn response_cache_hit(&self) {
+        self.response_cache_hits.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record an LLM response cache miss.
+    pub fn response_cache_miss(&self) {
+        self.response_cache_misses.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Get cache hit ratio (0.0 to 1.0) for observability.
+    pub fn cache_hit_ratio(&self) -> f64 {
+        let hits = self.response_cache_hits.load(Ordering::Relaxed) as f64;
+        let misses = self.response_cache_misses.load(Ordering::Relaxed) as f64;
+        let total = hits + misses;
+        if total == 0.0 { 0.0 } else { hits / total }
+    }
+
+    /// Record an audit bridge lag event — called when events are dropped.
+    pub fn audit_bridge_lag(&self, events_dropped: u64) {
+        self.audit_bridge_lags.fetch_add(1, Ordering::Relaxed);
+        self.audit_events_dropped.fetch_add(events_dropped, Ordering::Relaxed);
     }
 
     pub fn uptime_secs(&self) -> u64 {

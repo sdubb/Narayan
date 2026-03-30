@@ -28,6 +28,18 @@ impl Tool for WebSearchTool {
         "Search the web for information. Returns titles, URLs, and snippets for the top results. \
          Set SERPAPI_KEY env var for real results; otherwise uses DuckDuckGo Instant Answer API."
     }
+    fn input_contract(&self) -> Option<String> {
+        Some("{ query, count?, region? }. query is required; count defaults to 10 and is capped at 20.".into())
+    }
+    fn output_contract(&self) -> Option<String> {
+        Some("{ query, count, results }. results is an array of { title, url, snippet } records.".into())
+    }
+    fn when_to_use(&self) -> Option<String> {
+        Some("Use for web discovery, broad search, and finding public sources when the exact URL is not already known.".into())
+    }
+    fn when_not_to_use(&self) -> Option<String> {
+        Some("Avoid when you already know the URL, when local files contain the answer, or when you need to fetch a specific page directly.".into())
+    }
     fn parameters_schema(&self) -> Vec<ParameterSchema> {
         vec![
             ParameterSchema::required("query", "string", "Search query."),

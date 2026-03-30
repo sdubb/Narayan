@@ -173,6 +173,7 @@ async fn main() -> Result<()> {
         .add(segments::procurement_vendor_ops::plugin(&shared_deps, tenant_id))
         .add(segments::security_ops_grc::plugin(&shared_deps, tenant_id))
         .add(segments::customer_success_renewals::plugin(&shared_deps, tenant_id))
+        .add(segments::brand_protection::plugin(&shared_deps, tenant_id))
         .build();
 
     let agent_services = Arc::new(segment_registry.agent_services());
@@ -419,7 +420,6 @@ async fn main() -> Result<()> {
             agent_services.clone(),
         )
         .with_store(Arc::clone(&store))
-        .with_cost_tracker(cost_tracker.clone())
         .with_limits(100, 3_600),
     );
 

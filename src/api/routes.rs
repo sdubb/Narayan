@@ -1,8 +1,8 @@
-use std::{io::{BufWriter, Cursor}, sync::Arc};
+use std::{collections::HashMap, io::BufWriter, path::PathBuf, sync::Arc};
 
 use axum::{
     extract::{Path, Query, State},
-    http::{header, HeaderValue, StatusCode},
+    http::StatusCode,
     response::IntoResponse,
     Json,
 };
@@ -11,20 +11,20 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
 use sqlx::Row;
-use printpdf::*;
 
 use crate::{
-    agent::{agent_chat::{list_or_none, maybe_or_dash, trigger_summary}, AgentManager},
-    agent::PlanModeTestResult,
+    agent::{AgentChatManager, AgentChatRequest, AgentManager, PlanModeTestResult},
     auth::{hash_password, issue_token, verify_password},
     gateway::{cost::AgentUsage, CostTracker},
     metrics::Metrics,
     skill_marketplace::{marketplace::MarketplaceSkill, SkillMarketplace},
     skills::registry::{Skill, SkillRegistry},
-    state::AgentStatus,
+    state::{AgentStatus, GoalInstance, TriggerSource},
     storage::PostgresStore,
     tenant::{encrypt_secret, model::AuthenticatedTenant, ProviderCredential, TenantStore},
 };
+use printpdf::*;
+use zstd::stream::write::Encoder as ZstdEncoder;
 
 // ── Auto-approval store ────────────────────────────────────────────────────
 
@@ -182,7 +182,7 @@ pub struct AppState {
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 fn err(code: StatusCode, msg: impl Into<String>) -> Response {
-    (code, Json(serde_json::json!({ "error": msg.into() }))).into_response()
+    crate::util::http_error(code, msg)
 }
 type Response = axum::response::Response;
 const MAX_TENANT_WASM_MODULE_BYTES: usize = 2 * 1024 * 1024;
@@ -1029,6 +1029,65 @@ pub async fn read_workspace_file(
     }
 }
 
+/// GET /agents/:id/workspace/download/*path — legacy alias for `read_workspace_file`.
+pub async fn download_workspace_file(
+    State(state): State<AppState>,
+    tenant: AuthenticatedTenant,
+    Path((agent_id, file_path)): Path<(String, String)>,
+) -> impl IntoResponse {
+    read_workspace_file(State(state), tenant, Path((agent_id, file_path))).await
+}
+
+/// GET /agents/:id/workspace/files.tar.zst — export the workspace files directory as a compressed tarball.
+pub async fn download_workspace_bundle(
+    State(state): State<AppState>,
+    tenant: AuthenticatedTenant,
+    Path(agent_id): Path<String>,
+) -> impl IntoResponse {
+    let agent = match state.store.get_agent(&tenant.tenant_id, &agent_id).await {
+        Ok(Some(a)) => a,
+        Ok(None) => return err(StatusCode::NOT_FOUND, "agent not found"),
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    };
+
+    let files_root = PathBuf::from(&agent.workspace_path).join("files");
+    if !files_root.exists() {
+        return err(StatusCode::NOT_FOUND, "workspace files not found");
+    }
+
+    let mut zstd = match ZstdEncoder::new(Vec::new(), 3) {
+        Ok(encoder) => encoder,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    };
+
+    {
+        let mut tar = tar::Builder::new(&mut zstd);
+        if let Err(e) = tar.append_dir_all("files", &files_root) {
+            return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+        }
+        if let Err(e) = tar.finish() {
+            return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+        }
+    }
+
+    let bytes = match zstd.finish() {
+        Ok(bytes) => bytes,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    };
+
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, "application/zstd"),
+            (
+                axum::http::header::CONTENT_DISPOSITION,
+                "attachment; filename=\"workspace-files.tar.zst\"",
+            ),
+        ],
+        bytes,
+    )
+        .into_response()
+}
+
 /// GET /agents/:id/children — list child agents for delegation view.
 pub async fn list_agent_children(
     State(state): State<AppState>,
@@ -1816,30 +1875,30 @@ pub async fn connector_inbound(
             input_data.clone()
         };
 
-        match state
-            .manager
-            .create_role_run(
-                tenant.tenant_id.clone(),
-                role,
-                mapped_input,
-                crate::state::TriggerSource::Webhook {
-                    connector: connector_type.clone(),
-                    event_type: event_type.clone(),
-                    external_id: external_id_str.clone(),
-                },
-                None, // conversation_id
-                None, // triggered_by_gi_id
-            )
-            .await
-        {
-            Ok((gi, _agent)) => {
+        let gi = crate::state::GoalInstance::new(
+            uuid::Uuid::new_v4().to_string(),
+            tenant.tenant_id.clone(),
+            role.agent_id.clone(),
+            role.id.clone(),
+            role.version,
+            mapped_input,
+            crate::state::TriggerSource::Webhook {
+                connector: connector_type.clone(),
+                event_type: event_type.clone(),
+                external_id: external_id_str.clone(),
+            },
+            role.status == crate::agent::definition::RoleStatus::Testing,
+        );
+
+        match state.store.upsert_goal_instance(&gi).await {
+            Ok(_) => {
                 tracing::info!(
                     connector   = %connector_type,
                     event_type  = %event_type,
                     role_id     = %role.id,
                     role_name   = %role.name,
                     gi_id       = %gi.id,
-                    "connector matched AgentRole trigger → GoalInstance + AgentState created"
+                    "connector matched AgentRole trigger → GoalInstance created"
                 );
                 role_instances_created.push(gi.id);
             }
@@ -2130,135 +2189,63 @@ pub async fn get_agent_definition(
     }
 }
 
-#[derive(Debug, Deserialize)]
-pub struct AgentChatBody {
-    pub message: String,
-    #[serde(default)]
-    pub conversation: Vec<crate::agent::AgentChatMessage>,
-}
-
-/// POST /agent-definitions/:id/chat — centralized agent chat for one agent
-pub async fn agent_chat(
+/// PUT /agent-definitions/:id — update an existing agent definition
+/// GET /agent-definitions/:id/summary — consolidated payload for the agent drawer.
+pub async fn agent_definition_summary(
     State(state): State<AppState>,
     tenant: AuthenticatedTenant,
-    Path(agent_id): Path<String>,
-    Json(body): Json<AgentChatBody>,
+    Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let manager = build_agent_chat_manager(&state);
-    match manager
-        .respond(&tenant.tenant_id, &agent_id, &body.message, &body.conversation)
-        .await
-    {
-        Ok(reply) => Json(serde_json::json!({
-            "agent_id": agent_id,
-            "reply": reply,
-        }))
-        .into_response(),
-        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
-    }
-}
-
-/// GET /agent-definitions/:id/summary.pdf â€” export a compact agent summary as PDF.
-pub async fn export_agent_summary_pdf(
-    State(state): State<AppState>,
-    tenant: AuthenticatedTenant,
-    Path(agent_id): Path<String>,
-) -> impl IntoResponse {
-    let agent = match state.store.get_agent_definition(&tenant.tenant_id, &agent_id).await {
-        Ok(Some(agent)) => agent,
+    let agent = match state.store.get_agent_definition(&tenant.tenant_id, &id).await {
+        Ok(Some(def)) => def,
         Ok(None) => return err(StatusCode::NOT_FOUND, "agent definition not found"),
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     };
 
-    let roles = state.store.list_roles_for_agent(&tenant.tenant_id, &agent_id).await.unwrap_or_default();
-    let runs = state.store.list_goal_instances_for_agent(&tenant.tenant_id, &agent_id, 8).await.unwrap_or_default();
-    let others = state.store.list_agent_definitions(&tenant.tenant_id).await.unwrap_or_default();
-    let role_lookup: std::collections::HashMap<String, String> =
-        roles.iter().map(|role| (role.id.clone(), role.name.clone())).collect();
+    let agent_state = match state.store.get_agent(&tenant.tenant_id, &id).await {
+        Ok(Some(state)) => Some(state),
+        Ok(None) => None,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    };
 
-    let mut sections = vec![
-        ("Agent overview".to_string(), format!(
-            "Name: {}\nStatus: {}\nPersona: {}\nConnectors: {}\nConstraints: {}\nPending roles: {}",
-            agent.name,
-            format!("{:?}", agent.status).to_lowercase(),
-            maybe_or_dash(&agent.persona),
-            list_or_none(&agent.connectors),
-            list_or_none(&agent.constraints),
-            pending_roles_len(&agent.memory_ref),
-        )),
-    ];
+    let roles = state.store.list_roles_for_agent(&tenant.tenant_id, &id).await.unwrap_or_default();
+    let runs = state.store.list_goal_instances_for_agent(&tenant.tenant_id, &id, 8).await.unwrap_or_default();
 
-    if !roles.is_empty() {
-        sections.push(("Roles".to_string(), roles.iter().take(8).map(|role| {
-            format!(
-                "- {} [{}] trigger={} connectors={}",
-                role.name,
-                format!("{:?}", role.status).to_lowercase(),
-                trigger_summary(&role.trigger),
-                if role.connectors.is_empty() { "none".into() } else { role.connectors.join(", ") }
-            )
-        }).collect::<Vec<_>>().join("\n")));
-    }
-
-    if !runs.is_empty() {
-        sections.push(("Recent runs".to_string(), runs.iter().take(8).map(|gi| {
-            let role_name = role_lookup.get(&gi.role_id).cloned().unwrap_or_else(|| gi.role_id.clone());
-            let state = match gi.status {
-                crate::state::GoalInstanceStatus::Completed => "completed",
-                crate::state::GoalInstanceStatus::PartiallyComplete => "partial",
-                crate::state::GoalInstanceStatus::Failed => "failed",
-                crate::state::GoalInstanceStatus::Cancelled => "cancelled",
-                crate::state::GoalInstanceStatus::Running => "running",
-                crate::state::GoalInstanceStatus::Pending => "pending",
-            };
-            let mut line = format!("- {} [{}] role={} cost=${:.4}", gi.id, state, role_name, gi.cost_usd);
-            if let Some(reason) = &gi.failure_reason {
-                line.push_str(&format!(" note={}", reason));
-            }
-            line
-        }).collect::<Vec<_>>().join("\n")));
-    }
-
-    let mut peer_lines = Vec::new();
-    for other in others.iter().filter(|other| other.id != agent_id).take(8) {
-        let role_count = state
-            .store
-            .list_roles_for_agent(&tenant.tenant_id, &other.id)
-            .await
-            .map(|roles| roles.len())
-            .unwrap_or(0);
-        peer_lines.push(format!(
-            "- {} [{}] roles={}",
-            other.name,
-            format!("{:?}", other.status).to_lowercase(),
-            role_count
-        ));
-    }
-    if !peer_lines.is_empty() {
-        sections.push(("Other agents".to_string(), peer_lines.join("\n")));
-    }
-
-    match build_pdf_bytes(&format!("{} summary", agent.name), &sections) {
-        Ok(bytes) => {
-            let filename = format!("{}-summary.pdf", sanitise_file_name(&agent.name));
-            let disposition = format!("attachment; filename=\"{}\"", filename);
-            (
-                [
-                    (header::CONTENT_TYPE, HeaderValue::from_static("application/pdf")),
-                    (
-                        header::CONTENT_DISPOSITION,
-                        HeaderValue::from_str(&disposition).unwrap_or_else(|_| HeaderValue::from_static("attachment")),
-                    ),
-                ],
-                bytes,
-            )
-                .into_response()
+    let peer_defs = state.store.list_agent_definitions(&tenant.tenant_id).await.unwrap_or_default();
+    let mut peers = Vec::with_capacity(peer_defs.len());
+    for peer in peer_defs {
+        let peer_roles = state.store.list_roles_for_agent(&tenant.tenant_id, &peer.id).await.unwrap_or_default();
+        let mut value = serde_json::to_value(peer).unwrap_or_default();
+        if let Some(obj) = value.as_object_mut() {
+            obj.insert("roles".into(), serde_json::to_value(peer_roles).unwrap_or_default());
         }
-        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        peers.push(value);
     }
+    peers.retain(|peer| peer.get("id").and_then(|v| v.as_str()) != Some(id.as_str()));
+
+    let files_root = agent_state.as_ref().map(|state| std::path::PathBuf::from(&state.workspace_path).join("files"));
+    let mut workspace_files = Vec::new();
+    if let Some(files_root) = files_root.as_ref() {
+        if files_root.exists() {
+            collect_workspace_files(files_root, files_root, &mut workspace_files);
+        }
+    }
+    let workspace_files_count = workspace_files.len();
+
+    Json(serde_json::json!({
+        "agent": agent,
+        "roles": roles,
+        "recent_runs": runs,
+        "peers": peers,
+        "workspace_files": {
+            "agent_id": id,
+            "files": workspace_files,
+            "count": workspace_files_count,
+        },
+    }))
+    .into_response()
 }
 
-/// PUT /agent-definitions/:id — update an existing agent definition
 pub async fn update_agent_definition(
     State(state): State<AppState>,
     tenant: AuthenticatedTenant,
@@ -2309,6 +2296,269 @@ pub async fn delete_agent_definition(
         Ok(_) => Json(serde_json::json!({ "deleted": true })).into_response(),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
+}
+
+/// POST /agent-definitions/:id/chat — centralized agent chat for the drawer.
+pub async fn agent_chat(
+    State(state): State<AppState>,
+    tenant: AuthenticatedTenant,
+    Path(agent_id): Path<String>,
+    Json(body): Json<AgentChatRequest>,
+) -> impl IntoResponse {
+    let message = body.message.trim();
+    if message.is_empty() {
+        return err(StatusCode::BAD_REQUEST, "'message' is required");
+    }
+
+    let manager = AgentChatManager::new(state.manager.gateway(), Arc::clone(&state.store));
+    match manager.respond(&tenant.tenant_id, &agent_id, message, &body.conversation).await {
+        Ok(reply) => Json(serde_json::json!({
+            "agent_id": agent_id,
+            "reply": reply,
+        }))
+        .into_response(),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+/// GET /agent-definitions/:id/summary.pdf — export a concise agent summary for the drawer.
+pub async fn export_agent_summary_pdf(
+    State(state): State<AppState>,
+    tenant: AuthenticatedTenant,
+    Path(agent_id): Path<String>,
+) -> impl IntoResponse {
+    let agent = match state.store.get_agent_definition(&tenant.tenant_id, &agent_id).await {
+        Ok(Some(def)) => def,
+        Ok(None) => return err(StatusCode::NOT_FOUND, "agent definition not found"),
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    };
+
+    let roles = state.store.list_roles_for_agent(&tenant.tenant_id, &agent_id).await.unwrap_or_default();
+    let runs = state.store.list_goal_instances_for_agent(&tenant.tenant_id, &agent_id, 8).await.unwrap_or_default();
+    let peers = state.store.list_agent_definitions(&tenant.tenant_id).await.unwrap_or_default();
+
+    let pdf_bytes = match build_agent_summary_pdf(&agent, &roles, &runs, &peers) {
+        Ok(bytes) => bytes,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    };
+
+    let filename = format!(
+        "{}-summary.pdf",
+        agent
+            .name
+            .to_ascii_lowercase()
+            .chars()
+            .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+            .collect::<String>()
+            .split('-')
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("-")
+    );
+
+    (
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                axum::http::HeaderValue::from_static("application/pdf"),
+            ),
+            (
+                axum::http::header::CONTENT_DISPOSITION,
+                axum::http::HeaderValue::from_str(&format!("attachment; filename=\"{}\"", filename))
+                    .expect("sanitized filename must be a valid header value"),
+            ),
+        ],
+        pdf_bytes,
+    )
+        .into_response()
+}
+
+fn build_agent_summary_pdf(
+    agent: &crate::agent::definition::AgentDefinition,
+    roles: &[crate::agent::definition::AgentRole],
+    runs: &[GoalInstance],
+    peers: &[crate::agent::definition::AgentDefinition],
+) -> anyhow::Result<Vec<u8>> {
+    let title = format!("Agent Summary: {}", agent.name);
+    let (doc, page1, layer1) = PdfDocument::new(&title, Mm(210.0), Mm(297.0), "Layer 1");
+    let font = doc.add_builtin_font(BuiltinFont::Helvetica)?;
+    let font_bold = doc.add_builtin_font(BuiltinFont::HelveticaBold)?;
+    let layer = doc.get_page(page1).get_layer(layer1);
+
+    let margin = 18.0_f32;
+    let page_w = 210.0_f32;
+    let page_h = 297.0_f32;
+    let mut y = page_h - margin;
+    let usable_w = page_w - (margin * 2.0);
+    let chars_per_line = (usable_w / 2.9).max(28.0) as usize;
+
+    layer.use_text(&title, 18.0, Mm(margin), Mm(y), &font_bold);
+    y -= 14.0;
+
+    let sections = vec![
+        (
+            "Overview".to_string(),
+            format!(
+                "Status: {:?}\nPersona: {}\nConnectors: {}\nConstraints: {}\nMemory ref: {}",
+                agent.status,
+                crate::agent::agent_chat::maybe_or_dash(&agent.persona),
+                crate::agent::agent_chat::list_or_none(&agent.connectors),
+                crate::agent::agent_chat::list_or_none(&agent.constraints),
+                crate::agent::agent_chat::maybe_or_dash(&agent.memory_ref),
+            ),
+        ),
+        (
+            format!("Roles ({})", roles.len()),
+            summarize_roles(roles),
+        ),
+        (
+            format!("Recent Runs ({})", runs.len()),
+            summarize_runs(runs, roles),
+        ),
+        (
+            format!("Peer Agents ({})", peers.iter().filter(|peer| peer.id != agent.id).count()),
+            summarize_peers(agent.id.as_str(), peers),
+        ),
+    ];
+
+    for (heading, body) in sections {
+        write_wrapped(&layer, &font_bold, &heading, margin, &mut y, 12.5, chars_per_line);
+        write_wrapped(&layer, &font, &body, margin, &mut y, 10.5, chars_per_line);
+        if y < margin + 10.0 {
+            break;
+        }
+    }
+
+    let mut buf = BufWriter::new(Vec::new());
+    doc.save(&mut buf)?;
+    Ok(buf.into_inner()?)
+}
+
+fn summarize_roles(roles: &[crate::agent::definition::AgentRole]) -> String {
+    if roles.is_empty() {
+        return "No roles yet.".into();
+    }
+
+    roles
+        .iter()
+        .take(5)
+        .map(|role| {
+            format!(
+                "- {} [{}] | trigger: {} | connectors: {} | output: {}",
+                role.name,
+                format!("{:?}", role.status).to_lowercase(),
+                crate::agent::agent_chat::trigger_summary(&role.trigger),
+                crate::agent::agent_chat::list_or_none(&role.connectors),
+                match &role.output_spec.destination {
+                    crate::agent::definition::OutputDestination::Workspace { path } => {
+                        path.as_deref().map(|p| format!("workspace:{}", p)).unwrap_or_else(|| "workspace".into())
+                    }
+                    crate::agent::definition::OutputDestination::Connector { name, target_field, .. } => {
+                        format!("connector:{} -> {}", name, target_field)
+                    }
+                    crate::agent::definition::OutputDestination::Channel { connector, channel } => {
+                        format!("channel:{}#{}", connector, channel)
+                    }
+                    crate::agent::definition::OutputDestination::Email { connector, draft } => {
+                        format!("email:{} draft={}", connector, draft)
+                    }
+                    crate::agent::definition::OutputDestination::WorkforceEvent { event_name } => {
+                        format!("workforce event:{}", event_name)
+                    }
+                    crate::agent::definition::OutputDestination::ConversationReply => "conversation reply".into(),
+                }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn summarize_runs(runs: &[GoalInstance], roles: &[crate::agent::definition::AgentRole]) -> String {
+    if runs.is_empty() {
+        return "No goal instances yet.".into();
+    }
+
+    let role_names: HashMap<String, String> = roles.iter().map(|role| (role.id.clone(), role.name.clone())).collect();
+
+    runs
+        .iter()
+        .take(5)
+        .map(|run| {
+            let role_name = role_names.get(&run.role_id).cloned().unwrap_or_else(|| run.role_id.clone());
+            let trigger = match &run.trigger_source {
+                TriggerSource::Webhook { connector, event_type, .. } => format!("webhook:{}:{}", connector, event_type),
+                TriggerSource::Schedule { cron, .. } => format!("schedule:{}", cron),
+                TriggerSource::UserMessage { .. } => "user message".into(),
+                TriggerSource::Manual { .. } => "manual".into(),
+                TriggerSource::WorkforceEvent { source_role_name, .. } => {
+                    format!("workforce event from {}", source_role_name)
+                }
+            };
+            let note = run.failure_reason.as_deref().unwrap_or("");
+            format!(
+                "- {} [{}] | {} | cost ${:.2}{}",
+                role_name,
+                format!("{:?}", run.status).to_lowercase(),
+                trigger,
+                run.cost_usd,
+                if note.is_empty() { String::new() } else { format!(" | {}", note) }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn summarize_peers(agent_id: &str, peers: &[crate::agent::definition::AgentDefinition]) -> String {
+    let items: Vec<String> = peers
+        .iter()
+        .filter(|peer| peer.id != agent_id)
+        .take(5)
+        .map(|peer| {
+            format!(
+                "- {} [{}] | connectors: {}",
+                peer.name,
+                format!("{:?}", peer.status).to_lowercase(),
+                peer.connectors.len()
+            )
+        })
+        .collect();
+
+    if items.is_empty() {
+        "No other agents found.".into()
+    } else {
+        items.join("\n")
+    }
+}
+
+fn write_wrapped(
+    layer: &PdfLayerReference,
+    font: &IndirectFontRef,
+    text: &str,
+    x: f32,
+    y: &mut f32,
+    font_size: f32,
+    chars_per_line: usize,
+) {
+    let line_height = font_size * 0.35278 + 1.0;
+    for paragraph in text.split('\n') {
+        let chunks: Vec<&str> = paragraph
+            .as_bytes()
+            .chunks(chars_per_line.max(1))
+            .map(|chunk| std::str::from_utf8(chunk).unwrap_or(""))
+            .collect();
+        if chunks.is_empty() {
+            *y -= line_height;
+            continue;
+        }
+        for chunk in chunks {
+            if *y < 20.0 {
+                return;
+            }
+            layer.use_text(chunk, font_size, Mm(x), Mm(*y), font);
+            *y -= line_height;
+        }
+    }
+    *y -= line_height;
 }
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -2563,19 +2813,19 @@ pub async fn trigger_role(
     }
 
     let input_data = body.get("input_data").cloned().unwrap_or(serde_json::json!({}));
-    match state
-        .manager
-        .create_role_run(
-            tenant.tenant_id.clone(),
-            &role,
-            input_data,
-            crate::state::TriggerSource::Manual { created_by: tenant.tenant_id.clone() },
-            None, // conversation_id
-            None, // triggered_by_gi_id
-        )
-        .await
-    {
-        Ok((gi, _agent)) => Json(serde_json::json!({ "goal_instance_id": gi.id, "status": "pending" })).into_response(),
+    let gi = crate::state::GoalInstance::new(
+        uuid::Uuid::new_v4().to_string(),
+        tenant.tenant_id.clone(),
+        agent_id.clone(),
+        role_id.clone(),
+        role.version,
+        input_data,
+        crate::state::TriggerSource::Manual { created_by: tenant.tenant_id.clone() },
+        role.status == crate::agent::definition::RoleStatus::Testing,
+    );
+
+    match state.store.upsert_goal_instance(&gi).await {
+        Ok(_) => Json(serde_json::json!({ "goal_instance_id": gi.id, "status": "pending" })).into_response(),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
@@ -3271,7 +3521,7 @@ pub async fn role_chat_apply(
 // ══════════════════════════════════════════════════════════════════════════
 
 /// POST /plan-mode/sessions — start a new plan mode session
-/// GET /plan-mode/templates — list all 22 pre-built templates for the picker UI
+/// GET /plan-mode/templates — list all 20 pre-built templates for the picker UI
 pub async fn list_plan_mode_templates(_tenant: AuthenticatedTenant) -> impl IntoResponse {
     use crate::agent::templates::all_templates;
     let list: Vec<serde_json::Value> = all_templates()
@@ -3313,42 +3563,22 @@ pub async fn start_plan_mode_session(
     let manager = build_plan_mode_manager(&state);
     let mut session = manager.new_session(&tenant.tenant_id, &agent_name);
 
-    // If an existing agent_id is provided, either resume the next pending role
-    // or load its definition for a fresh role configuration.
+    // If an existing agent_id is provided, load its definition instead of creating a new draft
     if let Some(existing_id) = body["agent_id"].as_str() {
         match state.store.get_agent_definition(&tenant.tenant_id, existing_id).await {
             Ok(Some(existing)) => {
-                let has_pending_roles = crate::agent::manager::AgentManager::split_pending_roles(&existing.memory_ref)
-                    .map(|(pending_roles, _)| !pending_roles.is_empty())
-                    .unwrap_or(false);
-                if has_pending_roles {
-                    match state.manager.start_plan_mode_for_next_role(existing_id, &tenant.tenant_id).await {
-                        Ok(resumed) => {
-                            session = resumed;
-                        }
-                        Err(_) => {
-                            session.draft_agent = existing;
-                        }
-                    }
-                } else {
-                    session.draft_agent = existing;
-                }
+                session.draft_agent = existing;
             }
             _ => {}
         }
     }
 
-    // ── Template fast-path ──────────────────────────────────────────────────
+    // ── Template fast-path with full clarification pipeline ────────────────────────────────────────────────────
     // If a template_id is provided, skip CapturingIntent entirely.
-    // Pre-populate intent_cache, draft_role, and pending_steps from the template.
-    // Plan mode enters CapturingClarifications with only the personalisation questions.
-    let first_message = if session.draft_role.is_some() && !session.pending_steps.is_empty() {
-        session
-            .pending_steps
-            .first()
-            .and_then(|s| s["question"].as_str().map(String::from))
-            .unwrap_or_else(|| "Let's configure the next role. What should it do?".into())
-    } else if let Some(template_id) = body["template_id"].as_str() {
+    // Pre-populate intent_cache, draft_role, connectors from the template.
+    // BUT: run through the FULL clarification pipeline to ask all questions.
+    // Only skip questions that the template explicitly pre-answered (in ask_steps exclusion).
+    let first_message = if let Some(template_id) = body["template_id"].as_str() {
         if let Some(tmpl) = find_template(template_id) {
             // Build the pre-configured role
             let mut role = (tmpl.build_role)(&session.draft_agent.id, &session.tenant_id);
@@ -3368,16 +3598,9 @@ pub async fn start_plan_mode_session(
             }
 
             session.draft_agent.connectors = role.connectors.clone();
-            session.draft_role = Some(role);
+            session.draft_role = Some(role.clone());
             session.intent_cache = Some((tmpl.intent)());
-            session.phase = crate::agent::definition::PlanModePhase::CapturingClarifications;
-
-            // Build the clarification queue from ask_steps only
-            // These are the only questions the template hasn't pre-answered
-            let step_names: Vec<&str> = tmpl.ask_steps.iter().copied().collect();
-            let pending = build_template_clarification_steps(tmpl, &step_names);
-            session.pending_steps = pending.iter().filter_map(|s| serde_json::to_value(s).ok()).collect();
-
+            
             // Check which required connectors are not yet installed
             let installed: Vec<String> = state
                 .connector_installs
@@ -3392,30 +3615,67 @@ pub async fn start_plan_mode_session(
                 tmpl.required_connectors.iter().copied().filter(|&c| !installed.iter().any(|i| i == c)).collect();
 
             if !missing.is_empty() {
+                // Missing required connectors — ask user to install them first
                 let connector_list = missing.join(", ");
+                session.phase = crate::agent::definition::PlanModePhase::CapturingIntent;
                 format!(
-                    "I've set up your **{}** agent. Before we continue, you'll need to connect: **{}**.\n\n\
+                    "I've configured your **{}** agent. Before we continue, you'll need to connect: **{}**.\n\n\
                      Head to **Settings → Connectors** to connect them, then come back and we'll \
-                     finish the last {} detail{}.",
+                     finish the setup.",
                     tmpl.name,
-                    connector_list,
-                    step_names.len(),
-                    if step_names.len() == 1 { "" } else { "s" }
-                )
-            } else if !step_names.is_empty() {
-                // First question from the personalisation queue
-                session.pending_steps.first().and_then(|s| s["question"].as_str().map(String::from)).unwrap_or_else(
-                    || {
-                        format!(
-                            "I've configured your **{}** agent. Does this look right? Say **yes** to save.",
-                            tmpl.name
-                        )
-                    },
+                    connector_list
                 )
             } else {
-                // Nothing to ask — jump straight to review
-                session.phase = crate::agent::definition::PlanModePhase::Reviewing;
-                manager.build_review_summary_pub(&mut session).await
+                // Build the FULL clarification queue respecting template exclusions
+                let intent = session.intent_cache.as_ref().cloned().unwrap_or_else(|| serde_json::json!({}));
+                let installed: Vec<String> = state
+                    .connector_installs
+                    .list_for_tenant(&session.tenant_id)
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|c| c.connector_type)
+                    .collect();
+                
+                let existing_role_names: Vec<String> = state
+                    .store
+                    .list_roles_for_agent(&session.tenant_id, &session.draft_agent.id)
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|r| r.name)
+                    .collect();
+
+                // Generate full step queue from the intent
+                let all_steps = crate::agent::plan_mode_steps::generate_steps(
+                    &intent,
+                    role.role_category.as_str(),
+                    &installed,
+                    &existing_role_names,
+                );
+
+                // Filter OUT only the steps that template explicitly says to skip (ask_steps exclusion)
+                let template_ask_set: std::collections::HashSet<&str> = tmpl.ask_steps.iter().copied().collect();
+                let steps_to_ask: Vec<_> = all_steps
+                    .into_iter()
+                    .filter(|step| template_ask_set.contains(step.id.as_str()))
+                    .collect();
+
+                session.pending_steps = steps_to_ask.iter().filter_map(|s| serde_json::to_value(s).ok()).collect();
+                session.phase = crate::agent::definition::PlanModePhase::CapturingClarifications;
+
+                // Return first question or review summary
+                if let Some(first_step) = steps_to_ask.first() {
+                    format!(
+                        "I've configured your **{}** agent. Let me ask a few personalization questions:\n\n{}",
+                        tmpl.name,
+                        first_step.question
+                    )
+                } else {
+                    // No questions to ask — proceed to review
+                    session.phase = crate::agent::definition::PlanModePhase::Reviewing;
+                    manager.build_review_summary_pub(&mut session).await
+                }
             }
         } else {
             "Template not found — let's set this up from scratch. What should this agent do?".into()
@@ -3426,15 +3686,7 @@ pub async fn start_plan_mode_session(
 
     let uploads = plan_mode_attachments_from_body(&body);
     if !uploads.is_empty() {
-        if let Err(e) = manager
-            .ingest_attachments(
-                &mut session,
-                uploads,
-                tenant.plan.workspace_file_cap_bytes(),
-                tenant.plan.workspace_cap_bytes(),
-            )
-            .await
-        {
+        if let Err(e) = manager.ingest_attachments(&mut session, uploads, None, None).await {
             return err(StatusCode::BAD_REQUEST, e.to_string());
         }
     }
@@ -3458,99 +3710,6 @@ pub async fn start_plan_mode_session(
         .into_response(),
         (Err(e), _) | (_, Err(e)) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
-}
-
-/// Build a short clarification step queue for the template fast-path.
-/// Only asks the questions the template genuinely can't pre-answer.
-fn build_template_clarification_steps(
-    _tmpl: &crate::agent::templates::RoleTemplate,
-    step_names: &[&str],
-) -> Vec<crate::agent::plan_mode_steps::ClarificationStep> {
-    use crate::agent::plan_mode_steps::{ClarificationStep, StepField};
-
-    step_names.iter().filter_map(|&name| match name {
-        "approval_threshold" => Some(ClarificationStep::new(
-            "approval_threshold",
-            "What approval threshold should flag an item for human review? e.g. '$5,000' or '10%'",
-            StepField::AgentConstraint,
-        )),
-        "output_dest" => Some(ClarificationStep::new(
-            "output_dest",
-            "Where should the output go? e.g. 'workspace/output/' or '#slack-channel' or 'email to me@company.com'",
-            StepField::OutputDestination,
-        )),
-        "escalation_channel" => Some(ClarificationStep::new(
-            "escalation_channel",
-            "Which Slack channel or email should escalations go to? e.g. '#cs-escalations' or 'ops@company.com'",
-            StepField::GuidelineRule,
-        )),
-        "docs_url" => Some(ClarificationStep::new(
-            "docs_url",
-            "What is the URL of your help documentation? e.g. 'https://docs.yourproduct.com'",
-            StepField::GuidelineRule,
-        )),
-        "db_name" => Some(ClarificationStep::new(
-            "db_name",
-            "What is the name of your connected database? (Set up in Settings → Connectors)",
-            StepField::AgentConstraint,
-        )),
-        "metrics_table" => Some(ClarificationStep::new(
-            "metrics_table",
-            "Which database table or view contains your weekly metrics? e.g. 'metrics_summary' or 'weekly_stats'",
-            StepField::GuidelineRule,
-        )),
-        "investor_email" => Some(ClarificationStep::new(
-            "investor_email",
-            "What email address(es) should receive the investor update draft? e.g. 'investors@yourfund.com'",
-            StepField::OutputDestination,
-        )),
-        "inactivity_days" => Some(ClarificationStep::new(
-            "inactivity_days",
-            "How many days of inactivity before a record is considered stale? e.g. '14' or '21'",
-            StepField::AgentConstraint,
-        )),
-        "competitor_names" => Some(ClarificationStep::new(
-            "competitor_names",
-            "Which competitors should I monitor? List them, e.g. 'Acme Corp, Widget Inc, FastCo'",
-            StepField::GuidelineRule,
-        )),
-        "slack_channel" => Some(ClarificationStep::new(
-            "slack_channel",
-            "Which Slack channel should results be posted to? e.g. '#competitive-intel'",
-            StepField::OutputDestination,
-        )),
-        "delivery_channel" => Some(ClarificationStep::new(
-            "delivery_channel",
-            "How should the brief be delivered? e.g. 'Slack DM' or 'email me@company.com'",
-            StepField::OutputDestination,
-        )),
-        "job_requirements" => Some(ClarificationStep::new(
-            "job_requirements",
-            "What are the must-have requirements for this role? e.g. '3+ years React, TypeScript, system design experience'",
-            StepField::GuidelineRule,
-        )),
-        "tax_year" => Some(ClarificationStep::new(
-            "tax_year",
-            "Which tax year are we preparing for? e.g. '2025'",
-            StepField::AgentConstraint,
-        )),
-        "research_topic" => Some(ClarificationStep::new(
-            "research_topic",
-            "What topic should I research each week? e.g. 'AI policy', 'electric vehicles', 'fintech regulation'",
-            StepField::GuidelineRule,
-        )),
-        "monitor_subject" => Some(ClarificationStep::new(
-            "monitor_subject",
-            "What company, person, or topic should I monitor? e.g. 'OpenAI', 'Elon Musk', 'semiconductor supply chain'",
-            StepField::GuidelineRule,
-        )),
-        "output_email" => Some(ClarificationStep::new(
-            "output_email",
-            "Which email address should receive the brief? e.g. 'you@email.com'",
-            StepField::OutputDestination,
-        )),
-        _ => None,
-    }).collect()
 }
 
 /// POST /plan-mode/sessions/:session_id/turn — send a message in plan mode
@@ -3578,15 +3737,7 @@ pub async fn plan_mode_turn(
     let mut session = session;
     let uploads = plan_mode_attachments_from_body(&body);
     if !uploads.is_empty() {
-        if let Err(e) = manager
-            .ingest_attachments(
-                &mut session,
-                uploads,
-                tenant.plan.workspace_file_cap_bytes(),
-                tenant.plan.workspace_cap_bytes(),
-            )
-            .await
-        {
+        if let Err(e) = manager.ingest_attachments(&mut session, uploads, None, None).await {
             return err(StatusCode::BAD_REQUEST, e.to_string());
         }
         let _ = state.store.upsert_agent_definition(&session.draft_agent).await;
@@ -3667,9 +3818,6 @@ pub async fn save_plan_mode_session(
                 "agent_id": agent.id,
                 "role_id":  role.id,
                 "status":   "deployed",
-                "has_more_roles": crate::agent::manager::AgentManager::split_pending_roles(&agent.memory_ref)
-                    .map(|(pending_roles, _)| !pending_roles.is_empty())
-                    .unwrap_or(false),
                 "goal_fingerprint": completed_session.goal_fingerprint,
                 "repair_version": completed_session.repair_version,
                 "reused_from_session_id": completed_session.reused_from_session_id,
@@ -3692,191 +3840,6 @@ fn build_plan_mode_manager(state: &AppState) -> crate::agent::PlanModeManager {
         state.manager.workspace_root(),
     )
     .with_skill_registry(Arc::clone(&state.skill_registry))
-}
-
-fn build_agent_chat_manager(state: &AppState) -> crate::agent::AgentChatManager {
-    crate::agent::AgentChatManager::new(state.manager.gateway(), Arc::clone(&state.store))
-}
-
-/// GET /agents/:id/workspace/download/*path â€” download a workspace file without preview limits.
-pub async fn download_workspace_file(
-    State(state): State<AppState>,
-    tenant: AuthenticatedTenant,
-    Path((agent_id, file_path)): Path<(String, String)>,
-) -> impl IntoResponse {
-    let agent = match state.store.get_agent(&tenant.tenant_id, &agent_id).await {
-        Ok(Some(a)) => a,
-        Ok(None) => return err(StatusCode::NOT_FOUND, "agent not found"),
-        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
-    };
-
-    if file_path.contains("..") {
-        return err(StatusCode::BAD_REQUEST, "invalid path");
-    }
-
-    let base = std::path::PathBuf::from(&agent.workspace_path).join("files");
-    let full_path = base.join(&file_path);
-    if !full_path.starts_with(&base) {
-        return err(StatusCode::BAD_REQUEST, "invalid path");
-    }
-
-    match tokio::fs::read(&full_path).await {
-        Ok(content) => {
-            let ct = match full_path.extension().and_then(|e| e.to_str()) {
-                Some("md" | "txt" | "log") => "text/plain; charset=utf-8",
-                Some("json") => "application/json",
-                Some("csv") => "text/csv",
-                Some("html") => "text/html",
-                Some("png") => "image/png",
-                Some("jpg" | "jpeg") => "image/jpeg",
-                Some("pdf") => "application/pdf",
-                Some("doc") => "application/msword",
-                Some("docx") => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                Some("xls") => "application/vnd.ms-excel",
-                Some("xlsx") => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                _ => "application/octet-stream",
-            };
-            let filename = std::path::Path::new(&file_path)
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("download");
-            let disposition = format!("attachment; filename=\"{}\"", filename);
-            (
-                [
-                    (header::CONTENT_TYPE, HeaderValue::from_static(ct)),
-                    (
-                        header::CONTENT_DISPOSITION,
-                        HeaderValue::from_str(&disposition).unwrap_or_else(|_| HeaderValue::from_static("attachment")),
-                    ),
-                ],
-                content,
-            )
-                .into_response()
-        }
-        Err(_) => err(StatusCode::NOT_FOUND, "file not found"),
-    }
-}
-
-fn build_workspace_bundle_bytes(base: &std::path::Path) -> anyhow::Result<Vec<u8>> {
-    let cursor = Cursor::new(Vec::new());
-    let mut tar_builder = tar::Builder::new(cursor);
-
-    for entry in walkdir::WalkDir::new(base).into_iter().filter_map(Result::ok) {
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let rel = match entry.path().strip_prefix(base) {
-            Ok(path) => path,
-            Err(_) => continue,
-        };
-        tar_builder.append_path_with_name(entry.path(), rel)?;
-    }
-
-    tar_builder.finish()?;
-    let cursor = tar_builder.into_inner()?;
-    let tar_bytes = cursor.into_inner();
-    let compressed = zstd::stream::encode_all(Cursor::new(tar_bytes), 9)?;
-    Ok(compressed)
-}
-
-/// GET /agents/:id/workspace/files.tar.zst — download a compressed bundle of the workspace files directory.
-pub async fn download_workspace_bundle(
-    State(state): State<AppState>,
-    tenant: AuthenticatedTenant,
-    Path(agent_id): Path<String>,
-) -> impl IntoResponse {
-    let agent = match state.store.get_agent(&tenant.tenant_id, &agent_id).await {
-        Ok(Some(a)) => a,
-        Ok(None) => return err(StatusCode::NOT_FOUND, "agent not found"),
-        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
-    };
-
-    let base = std::path::PathBuf::from(&agent.workspace_path).join("files");
-    if !base.exists() {
-        return err(StatusCode::NOT_FOUND, "workspace files not found");
-    }
-
-    let bundle = match build_workspace_bundle_bytes(&base) {
-        Ok(bytes) => bytes,
-        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
-    };
-
-    let filename = format!("{}-workspace-files.tar.zst", sanitise_file_name(&agent.id));
-    let disposition = format!("attachment; filename=\"{}\"", filename);
-
-    (
-        [
-            (header::CONTENT_TYPE, HeaderValue::from_static("application/octet-stream")),
-            (
-                header::CONTENT_DISPOSITION,
-                HeaderValue::from_str(&disposition).unwrap_or_else(|_| HeaderValue::from_static("attachment")),
-            ),
-        ],
-        bundle,
-    )
-        .into_response()
-}
-
-fn pending_roles_len(memory_ref: &str) -> usize {
-    crate::agent::manager::AgentManager::split_pending_roles(memory_ref)
-        .map(|(pending_roles, _)| pending_roles.len())
-        .unwrap_or(0)
-}
-
-fn sanitise_file_name(name: &str) -> String {
-    let mut out = String::new();
-    for ch in name.chars() {
-        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
-            out.push(ch);
-        } else if !out.ends_with('-') {
-            out.push('-');
-        }
-    }
-    let trimmed = out.trim_matches('-').to_string();
-    if trimmed.is_empty() { "agent".into() } else { trimmed }
-}
-
-fn build_pdf_bytes(title: &str, sections: &[(String, String)]) -> anyhow::Result<Vec<u8>> {
-    let (doc, page1, layer1) = PdfDocument::new(title, Mm(210.0), Mm(297.0), "Layer 1");
-    let font = doc.add_builtin_font(BuiltinFont::Helvetica)?;
-    let font_bold = doc.add_builtin_font(BuiltinFont::HelveticaBold)?;
-    let layer = doc.get_page(page1).get_layer(layer1);
-
-    let margin = 18.0_f32;
-    let page_h = 297.0_f32;
-    let usable_w = 210.0_f32 - 2.0 * margin;
-    let mut y = page_h - margin;
-
-    layer.use_text(title, 18.0, Mm(margin), Mm(y), &font_bold);
-    y -= 10.0;
-
-    let write_wrapped = |layer: &PdfLayerReference, text: &str, x: f32, y: &mut f32, fs: f32, bold: bool| {
-        let selected_font = if bold { &font_bold } else { &font };
-        let chars_per_line = ((usable_w / (fs * 0.5 * 0.35278)).floor() as usize).max(1);
-        for line in text.split('\n') {
-            for chunk in line.as_bytes().chunks(chars_per_line) {
-                if *y < 24.0 {
-                    return;
-                }
-                let chunk = std::str::from_utf8(chunk).unwrap_or("");
-                layer.use_text(chunk, fs, Mm(x), Mm(*y), selected_font);
-                *y -= fs * 0.35278 + 1.0;
-            }
-        }
-        *y -= 3.0;
-    };
-
-    for (heading, body) in sections {
-        if y < 34.0 {
-            break;
-        }
-        write_wrapped(&layer, heading, margin, &mut y, 13.0, true);
-        write_wrapped(&layer, body, margin, &mut y, 10.0, false);
-    }
-
-    let mut buf = BufWriter::new(Vec::new());
-    doc.save(&mut buf)?;
-    Ok(buf.into_inner()?)
 }
 
 fn plan_mode_attachments_from_body(body: &serde_json::Value) -> Vec<crate::agent::PlanModeAttachmentUpload> {

@@ -13,6 +13,18 @@ impl Tool for FileEditTool {
         "Edit a file by replacing occurrences of a string or regex pattern with a new string. \
          Fails if the 'old' string is not found, preventing silent no-ops."
     }
+    fn input_contract(&self) -> Option<String> {
+        Some("{ path, old, new, count?, use_regex? }. path, old, and new are required.".into())
+    }
+    fn output_contract(&self) -> Option<String> {
+        Some("{ edited, path, replacements? }. Confirms the file edit result.".into())
+    }
+    fn when_to_use(&self) -> Option<String> {
+        Some("Use for targeted text replacements in an existing file when the change is small and local.".into())
+    }
+    fn when_not_to_use(&self) -> Option<String> {
+        Some("Avoid for broad refactors, binary files, or when a file rewrite is simpler than a targeted replacement.".into())
+    }
     fn parameters_schema(&self) -> Vec<ParameterSchema> {
         vec![
             ParameterSchema::required("path", "string", "File path to edit."),

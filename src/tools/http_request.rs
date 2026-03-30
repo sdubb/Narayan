@@ -14,6 +14,18 @@ impl Tool for HttpRequestTool {
     fn description(&self) -> &str {
         "Make an HTTP request to any URL. Supports GET, POST, PUT, PATCH, DELETE."
     }
+    fn input_contract(&self) -> Option<String> {
+        Some("{ url, method?, headers?, body?, json?, timeout?, follow_redirects? }. url is required.".into())
+    }
+    fn output_contract(&self) -> Option<String> {
+        Some("{ status, headers, body }. Non-2xx responses return success=false with the response payload preserved.".into())
+    }
+    fn when_to_use(&self) -> Option<String> {
+        Some("Use for direct API calls or HTTP interactions when no dedicated connector exists.".into())
+    }
+    fn when_not_to_use(&self) -> Option<String> {
+        Some("Avoid when a dedicated API tool or connector is already available, or when the exact URL is not known.".into())
+    }
     fn parameters_schema(&self) -> Vec<ParameterSchema> {
         vec![
             ParameterSchema::required("url", "string", "Request URL."),

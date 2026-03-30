@@ -117,7 +117,7 @@ macro_rules! retry {
 
 // ── 22 Templates ─────────────────────────────────────────────────────────────
 
-static TEMPLATES: [RoleTemplate; 22] = [
+static TEMPLATES: [RoleTemplate; 23] = [
     // ── 1. Invoice Processor ─────────────────────────────────────────────────
     RoleTemplate {
         id: "invoice_processor",
@@ -1524,5 +1524,71 @@ static TEMPLATES: [RoleTemplate; 22] = [
             role
         },
         ask_steps: &["shop_domain", "shipping_origin", "escalation_channel"],
+    },
+    // ── 23. Brand Protection & Monitoring ────────────────────────────────────
+    RoleTemplate {
+        id: "brand_protection_monitoring",
+        name: "Brand Protection & Monitoring",
+        description: "Monitor your website, competitors, and social media for threats — escalate critical issues with evidence",
+        persona: "teams",
+        category: "brand_protection",
+        emoji: "🛡️",
+        required_connectors: &["brand_monitoring"],
+        intent: || {
+            serde_json::json!({
+                "category":              "brand_protection",
+                "trigger_hint":          "webhook",
+                "trigger_confidence":    "high",
+                "trigger_source":        "brand_monitoring",
+                "trigger_event":         "alert",
+                "output_hint":           "notification",
+                "output_destination_hint": "slack_channel",
+                "multi_role_suggested":  false,
+                "uses_external_db":      null,
+                "actions": [
+                    "Monitor website for defacement, content changes, and uptime issues",
+                    "Track competitor announcements and product launches",
+                    "Monitor social media mentions and brand handle usage",
+                    "Detect trademark violations and counterfeit activity",
+                    "Escalate high-severity threats with evidence links and remediation options",
+                    "Log all monitoring events for audit and trend analysis"
+                ],
+                "workflow_outline": [
+                    "receive brand monitoring alert from external service",
+                    "classify severity: low/medium/high/critical",
+                    "collect evidence: screenshots, URLs, timestamps, source metadata",
+                    "escalate critical issues to security/legal team with action items",
+                    "log threat in workspace for trend analysis"
+                ]
+            })
+        },
+        build_role: |agent_id, tenant_id| {
+            let mut role =
+                AgentRole::new(crate::util::new_id(), agent_id.into(), tenant_id.into(), "Brand Protection & Monitoring".into());
+            role.purpose = "Monitor brand threats across website, competitors, and social media — escalate critical issues with evidence".into();
+            role.connectors = vec!["brand_monitoring".into()];
+            role.trigger = TriggerDef {
+                trigger_type: TriggerType::Webhook,
+                source_connector: Some("brand_monitoring".into()),
+                event_filter: Some("alert".into()),
+                ..Default::default()
+            };
+            let mut g = ExecutionGuidelines::default();
+            g.add_rule(before!("brand_monitoring", "Verify alert authenticity — check timestamp and source reputation"));
+            g.add_rule(always!("Classify severity: low (typo/misspelling) / medium (unauthorized use on minor platform) / high (competitor misuse) / critical (counterfeiting, defacement, active fraud)"));
+            g.add_rule(always!("For all alerts except low: capture screenshots, URLs, timestamps, and IP/account metadata"));
+            g.add_rule(always!("Document evidence references for potential legal action"));
+            g.add_rule(always!("For critical threats: immediately escalate with specific remediation options (DMCA takedown, account suspension, cease-and-desist)"));
+            g.add_rule(always!("Never directly contact alleged infringers — only escalate to legal/security team"));
+            g.add_rule(after!("brand_monitoring", "Log the threat classification, evidence links, and remediation status to workspace/brand-threats.txt"));
+            g.add_failure(escalate!("Critical threat detected: counterfeiting or active fraud", "#security-incidents"));
+            g.add_failure(escalate!("Website defacement or mass credential compromise", "#security-incidents"));
+            g.add_failure(retry!("Brand monitoring service connectivity issue", "brand_monitoring"));
+            g.add_completion(CompletionCriterion::record_updated("brand_monitoring", "Threat investigated"));
+            g.add_completion(CompletionCriterion::errors_logged("workspace/brand-threats.txt", "Threat logged and escalated"));
+            role.execution_guidelines = g;
+            role
+        },
+        ask_steps: &["bp_competitors", "bp_channels", "bp_approval_threshold", "bp_escalation_channel", "bp_response_mode"],
     },
 ];

@@ -21,6 +21,18 @@ impl Tool for FileWriteTool {
         "Write or overwrite a file with the given content. \
          Creates parent directories as needed. Supports append mode."
     }
+    fn input_contract(&self) -> Option<String> {
+        Some("{ path, content, append?, encoding? }. path and content are required.".into())
+    }
+    fn output_contract(&self) -> Option<String> {
+        Some("{ written, path, bytes, appended }. Indicates the file write result.".into())
+    }
+    fn when_to_use(&self) -> Option<String> {
+        Some("Use when the final artifact should be stored as a workspace file or when appending to an existing file.".into())
+    }
+    fn when_not_to_use(&self) -> Option<String> {
+        Some("Avoid when you only need to read content, or when the output should be a structured transform rather than a file write.".into())
+    }
     fn parameters_schema(&self) -> Vec<ParameterSchema> {
         vec![
             ParameterSchema::required("path", "string", "File path to write."),

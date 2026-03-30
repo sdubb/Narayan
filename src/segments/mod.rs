@@ -16,6 +16,7 @@
 //! An agent whose goal matches multiple segments uses the union of services
 //! from all active segments — the most permissive policy wins per tool.
 
+pub mod brand_protection;
 pub mod compliance_ops;
 pub mod customer_success_renewals;
 pub mod customer_support;

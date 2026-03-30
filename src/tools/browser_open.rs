@@ -13,6 +13,18 @@ impl Tool for BrowserOpenTool {
     fn description(&self) -> &str {
         "Open a URL and verify it is reachable. Returns the final URL after redirects and the HTTP status."
     }
+    fn input_contract(&self) -> Option<String> {
+        Some("{ url, timeout? }. url is required.".into())
+    }
+    fn output_contract(&self) -> Option<String> {
+        Some("{ url, status, reachable }. Confirms reachability and final URL after redirects.".into())
+    }
+    fn when_to_use(&self) -> Option<String> {
+        Some("Use to quickly verify that a URL is reachable before fetching or browser automation.".into())
+    }
+    fn when_not_to_use(&self) -> Option<String> {
+        Some("Avoid when you need the page body, browser interactions, or search/discovery first.".into())
+    }
     fn parameters_schema(&self) -> Vec<ParameterSchema> {
         vec![
             ParameterSchema::required("url", "string", "URL to open."),

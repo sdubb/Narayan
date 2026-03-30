@@ -15,6 +15,22 @@ impl Tool for DataExtractorTool {
         "Extract structured data from HTML or plain text. Supports: tables→CSV, CSS selectors, \
          regex patterns, emails, URLs, phone numbers, prices."
     }
+    fn input_contract(&self) -> Option<String> {
+        Some("{ content, extract, selector?, pattern?, attribute? }. content and extract are required.".into())
+    }
+
+    fn output_contract(&self) -> Option<String> {
+        Some("{ count, tables? | links? | emails? | prices? | phones? | urls? | items? }. Output shape depends on extract mode.".into())
+    }
+
+    fn when_to_use(&self) -> Option<String> {
+        Some("Use to pull structured records or fields out of HTML/text before passing the result to data_engine.".into())
+    }
+
+    fn when_not_to_use(&self) -> Option<String> {
+        Some("Avoid when the data is already structured records or when a deterministic record transform can be done directly in data_engine.".into())
+    }
+
     fn parameters_schema(&self) -> Vec<ParameterSchema> {
         vec![
             ParameterSchema::required("content", "string", "HTML or text content to extract from."),

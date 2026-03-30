@@ -6,7 +6,7 @@ use std::{
 
 use tokio::sync::RwLock;
 
-use crate::providers::ChatResponse;
+use crate::{metrics::Metrics, providers::ChatResponse};
 
 struct CacheEntry {
     response: ChatResponse,
@@ -21,10 +21,12 @@ impl CacheEntry {
 }
 
 /// Thread-safe TTL response cache keyed by a hash of the request.
+/// Tracks cache hit/miss metrics for observability.
 pub struct ResponseCache {
     inner: Arc<RwLock<HashMap<String, CacheEntry>>>,
     default_ttl: Duration,
     max_entries: usize,
+    metrics: Option<Arc<Metrics>>,  // Optional metrics tracking
 }
 
 impl ResponseCache {
@@ -33,13 +35,36 @@ impl ResponseCache {
             inner: Arc::new(RwLock::new(HashMap::new())),
             default_ttl: Duration::from_secs(default_ttl_secs),
             max_entries,
+            metrics: None,
+        }
+    }
+
+    /// Create a cache with metrics tracking enabled.
+    pub fn with_metrics(default_ttl_secs: u64, max_entries: usize, metrics: Arc<Metrics>) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(HashMap::new())),
+            default_ttl: Duration::from_secs(default_ttl_secs),
+            max_entries,
+            metrics: Some(metrics),
         }
     }
 
     /// Look up a cached response. Returns `None` if missing or expired.
+    /// Records cache hit/miss metrics.
     pub async fn get(&self, key: &str) -> Option<ChatResponse> {
         let cache = self.inner.read().await;
-        cache.get(key).and_then(|entry| if entry.is_expired() { None } else { Some(entry.response.clone()) })
+        let result = cache.get(key).and_then(|entry| if entry.is_expired() { None } else { Some(entry.response.clone()) });
+        
+        // Track metrics
+        if let Some(ref metrics) = self.metrics {
+            if result.is_some() {
+                metrics.response_cache_hit();
+            } else {
+                metrics.response_cache_miss();
+            }
+        }
+        
+        result
     }
 
     /// Store a response. Evicts expired entries and enforces `max_entries`.

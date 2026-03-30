@@ -23,6 +23,18 @@ impl Tool for CompressTool {
     fn description(&self) -> &str {
         "Compress files or directories into a zip, tar.gz, or tar.bz2 archive."
     }
+    fn input_contract(&self) -> Option<String> {
+        Some("{ output, paths, format?, level? }. output and paths are required.".into())
+    }
+    fn output_contract(&self) -> Option<String> {
+        Some("{ output, format, files, output_bytes, elapsed_ms }. Describes the created archive.".into())
+    }
+    fn when_to_use(&self) -> Option<String> {
+        Some("Use when the final artifact should be an archive containing files or directories.".into())
+    }
+    fn when_not_to_use(&self) -> Option<String> {
+        Some("Avoid when you only need to transform data or when the output should remain as individual files.".into())
+    }
     fn parameters_schema(&self) -> Vec<ParameterSchema> {
         vec![
             ParameterSchema::required("output", "string", "Output archive path (e.g. 'archive.zip', 'out.tar.gz')."),
@@ -148,6 +160,18 @@ impl Tool for DecompressTool {
     }
     fn description(&self) -> &str {
         "Extract a zip, tar.gz, or tar.bz2 archive to a directory."
+    }
+    fn input_contract(&self) -> Option<String> {
+        Some("{ path, output_dir? }. path is required and must point to an archive.".into())
+    }
+    fn output_contract(&self) -> Option<String> {
+        Some("{ extracted, output_dir, files, elapsed_ms }. Indicates extraction result.".into())
+    }
+    fn when_to_use(&self) -> Option<String> {
+        Some("Use when you need to unpack an archive and inspect or process its contents.".into())
+    }
+    fn when_not_to_use(&self) -> Option<String> {
+        Some("Avoid for ordinary file moves or when no archive extraction is needed.".into())
     }
     fn parameters_schema(&self) -> Vec<ParameterSchema> {
         vec![

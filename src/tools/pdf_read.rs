@@ -13,6 +13,18 @@ impl Tool for PdfReadTool {
     fn description(&self) -> &str {
         "Extract text content from a PDF file. Requires pdftotext (poppler-utils) to be installed."
     }
+    fn input_contract(&self) -> Option<String> {
+        Some("{ path, start_page?, end_page? }. path is required and must point to a PDF file.".into())
+    }
+    fn output_contract(&self) -> Option<String> {
+        Some("{ text, path, char_count, total_pages }. Returns extracted text plus PDF metadata.".into())
+    }
+    fn when_to_use(&self) -> Option<String> {
+        Some("Use when the source is a PDF and you need its text or page metadata.".into())
+    }
+    fn when_not_to_use(&self) -> Option<String> {
+        Some("Avoid when the source is not a PDF or when you need structured record transforms after extraction.".into())
+    }
     fn parameters_schema(&self) -> Vec<ParameterSchema> {
         vec![
             ParameterSchema::required("path", "string", "Path to the PDF file."),

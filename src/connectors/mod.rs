@@ -1,3 +1,4 @@
+pub mod brand_monitoring;
 pub mod dbt_cloud;
 pub mod docusign;
 pub mod framework;

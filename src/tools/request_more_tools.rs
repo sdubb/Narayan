@@ -7,7 +7,7 @@
 //!
 //! The executor starts each step with 10-15 carefully selected core tools.
 //! If the LLM determines mid-step that it needs tools from a category that
-//! wasn't included (e.g. it needs `wasm_exec` but only `code_run` was sent),
+//! wasn't included (e.g. it needs `data_engine` but only `code_run` was sent),
 //! it calls `request_more_tools { categories: ["code"] }` and the executor
 //! injects the full category toolset before re-calling the LLM.
 //!
@@ -64,8 +64,8 @@ impl Tool for RequestMoreToolsTool {
                 "Core tool categories to expand. Available: \
                  filesystem (shell, file_read, file_write, glob_search, compress...), \
                  web (web_search_tool, web_fetch, http_request, browser...), \
-                 code (code_run, wasm_exec, wasm_compile, wasm_call, run_registered_wasm, sql_query, diff, patch...), \
-                 data (data_extractor, pdf_read, pdf_create, spreadsheet...), \
+                 code (code_run, diff, patch, sql_query...), \
+                 data (data_engine, data_extractor, pdf_read, pdf_create, spreadsheet...), \
                  memory (vector_store, vector_search, memory_store...), \
                  infra (docker, kubernetes, ssh_exec, process_monitor), \
                  security (crypto_tool, request_credential), \

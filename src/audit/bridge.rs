@@ -8,11 +8,19 @@ use std::sync::Arc;
 use crate::{
     audit::log::{AuditAction, AuditLog},
     events::{AgentEvent, EventBus},
+    metrics::Metrics,
 };
 
 /// Spawn a background task that forwards agent events to the audit log.
 /// Call this when a new agent starts executing.
-pub fn bridge_agent_events(event_bus: Arc<EventBus>, audit_log: Arc<AuditLog>, agent_id: String, tenant_id: String) {
+/// Metrics are optional — if provided, lag events are tracked for observability.
+pub fn bridge_agent_events(
+    event_bus: Arc<EventBus>,
+    audit_log: Arc<AuditLog>,
+    agent_id: String,
+    tenant_id: String,
+    metrics: Option<Arc<Metrics>>,
+) {
     tokio::spawn(async move {
         let mut rx = event_bus.subscribe(&agent_id);
         loop {
@@ -27,6 +35,10 @@ pub fn bridge_agent_events(event_bus: Arc<EventBus>, audit_log: Arc<AuditLog>, a
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                     tracing::warn!(agent_id = %agent_id, skipped = n, "audit bridge lagged");
+                    // Track the lag event in metrics for alerting
+                    if let Some(ref metrics) = metrics {
+                        metrics.audit_bridge_lag(n as u64);
+                    }
                 }
             }
         }

@@ -17,7 +17,7 @@
 use crate::{
     agent::{planner::PlannedStep, prompts::JobType},
     providers::ToolSpec,
-    tools::ToolRegistry,
+    tools::{tool_spec_from_tool, ToolRegistry, HIDDEN_TOOLS},
 };
 
 /// Maximum tools sent to any single LLM call.
@@ -33,6 +33,7 @@ const ALWAYS_INCLUDE: &[&str] = &[
     "file_write",
     "memory_recall",
     "memory_store",
+    "data_engine",
     "ask_user",
     "delegate",
     "plane_guard",
@@ -55,7 +56,7 @@ pub fn select_tools_for_step(
     let mut seen = std::collections::HashSet::new();
 
     let add = |name: &str, selected: &mut Vec<String>, seen: &mut std::collections::HashSet<String>| {
-        if RUNTIME_BLOCKED_TOOLS.contains(&name) {
+        if RUNTIME_BLOCKED_TOOLS.contains(&name) || HIDDEN_TOOLS.contains(&name) {
             return;
         }
         if seen.insert(name.to_string()) && registry.get(name).is_some() {
@@ -140,27 +141,7 @@ pub fn select_tools_for_step(
     selected
         .into_iter()
         .filter_map(|name| registry.get(&name))
-        .map(|t| ToolSpec {
-            name: t.name().to_string(),
-            description: t.description().to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": t.parameters_schema().iter().fold(
-                    serde_json::Map::new(),
-                    |mut acc, p| {
-                        acc.insert(p.name.clone(), serde_json::json!({
-                            "type":        p.param_type,
-                            "description": p.description,
-                        }));
-                        acc
-                    }
-                ),
-                "required": t.parameters_schema().iter()
-                    .filter(|p| p.required)
-                    .map(|p| p.name.clone())
-                    .collect::<Vec<_>>(),
-            }),
-        })
+        .map(|t| tool_spec_from_tool(t.as_ref()))
         .collect()
 }
 
@@ -226,22 +207,12 @@ pub fn tool_manifest(registry: &ToolRegistry) -> String {
         ),
         (
             "code",
-            &[
-                "code_run",
-                "wasm_exec",
-                "wasm_compile",
-                "wasm_inspect",
-                "wasm_call",
-                "run_registered_wasm",
-                "diff",
-                "patch",
-                "git_operations",
-                "sql_query",
-            ],
+            &["code_run", "diff", "patch", "git_operations", "sql_query"],
         ),
         (
             "data",
             &[
+                "data_engine",
                 "data_extractor",
                 "pdf_read",
                 "pdf_create",
@@ -287,7 +258,7 @@ pub fn tool_manifest(registry: &ToolRegistry) -> String {
 /// Build a grouped manifest from a slice of tool names (for preflight + planner).
 /// Same grouping as tool_manifest but works from a &[&str] instead of registry.
 pub fn tool_manifest_from_names(names: &[&str]) -> String {
-    let set: std::collections::HashSet<&&str> = names.iter().collect();
+    let set: std::collections::HashSet<&&str> = names.iter().filter(|name| !HIDDEN_TOOLS.contains(name)).collect();
     let groups: &[(&str, &[&str])] = &[
         (
             "filesystem",
@@ -317,22 +288,12 @@ pub fn tool_manifest_from_names(names: &[&str]) -> String {
         ),
         (
             "code",
-            &[
-                "code_run",
-                "wasm_exec",
-                "wasm_compile",
-                "wasm_inspect",
-                "wasm_call",
-                "run_registered_wasm",
-                "diff",
-                "patch",
-                "git_operations",
-                "sql_query",
-            ],
+            &["code_run", "diff", "patch", "git_operations", "sql_query"],
         ),
         (
             "data",
             &[
+                "data_engine",
                 "data_extractor",
                 "pdf_read",
                 "pdf_create",
@@ -362,7 +323,7 @@ pub fn tool_manifest_from_names(names: &[&str]) -> String {
             lines.push(format!("  {}: {}", group, available.join(", ")));
         }
     }
-    let extras: Vec<&&str> = names.iter().filter(|n| !all_known.contains(**n)).collect();
+    let extras: Vec<&&str> = names.iter().filter(|n| !all_known.contains(**n) && !HIDDEN_TOOLS.contains(n)).collect();
     if !extras.is_empty() {
         lines.push(format!("  other: {}", extras.iter().map(|n| **n).collect::<Vec<_>>().join(", ")));
     }

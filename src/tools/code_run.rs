@@ -19,9 +19,21 @@ impl Tool for CodeRunTool {
         "code_run"
     }
     fn description(&self) -> &str {
-        "Execute a code snippet in Python 3, Node.js, Deno, Ruby, or Bash. \
-         The code is written to a temp file and run with the correct interpreter. \
-         Stdout, stderr, exit code, and runtime are returned."
+        "Execute a code snippet in Python 3, Node.js, Deno, Ruby, Bash, or Bun."
+    }
+    fn input_contract(&self) -> Option<String> {
+        Some(
+            "{ code, language, stdin?, packages?, timeout_secs?, workspace?, env? }. language must be one of python, node, deno, bun, ruby, or bash.".into(),
+        )
+    }
+    fn output_contract(&self) -> Option<String> {
+        Some("{ stdout, stderr, exit_code, elapsed_ms, language }. Non-zero exits return success=false with stderr in error.".into())
+    }
+    fn when_to_use(&self) -> Option<String> {
+        Some("Use for structured snippets, quick scripts, and small deterministic code tasks that fit one of the supported runtimes.".into())
+    }
+    fn when_not_to_use(&self) -> Option<String> {
+        Some("Do not use for multi-file applications, long-running services, or workflows better expressed as typed data_engine operations.".into())
     }
     fn parameters_schema(&self) -> Vec<ParameterSchema> {
         vec![

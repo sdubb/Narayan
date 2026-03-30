@@ -13,6 +13,18 @@ impl Tool for ContentSearchTool {
     fn description(&self) -> &str {
         "Search for a text pattern inside files (like grep). Returns matching file paths, line numbers, and matched lines."
     }
+    fn input_contract(&self) -> Option<String> {
+        Some("{ pattern, path?, glob?, max_results?, case_insensitive? }. pattern is required.".into())
+    }
+    fn output_contract(&self) -> Option<String> {
+        Some("{ pattern, count, matches }. matches contains file path, line number, and line text.".into())
+    }
+    fn when_to_use(&self) -> Option<String> {
+        Some("Use when you need text or regex search across files and want matching line context.".into())
+    }
+    fn when_not_to_use(&self) -> Option<String> {
+        Some("Avoid when the task is about path discovery, direct file reading, or structured data transforms.".into())
+    }
     fn parameters_schema(&self) -> Vec<ParameterSchema> {
         vec![
             ParameterSchema::required("pattern", "string", "Text or regex pattern to search for."),

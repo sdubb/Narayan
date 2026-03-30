@@ -14,6 +14,18 @@ impl Tool for WebFetchTool {
         "Fetch the content of a URL. Returns extracted text by default (strips HTML tags). \
          Set 'raw' to true to get the full HTML."
     }
+    fn input_contract(&self) -> Option<String> {
+        Some("{ url, raw?, timeout?, headers? }. url is required; raw returns HTML instead of extracted text.".into())
+    }
+    fn output_contract(&self) -> Option<String> {
+        Some("{ text | html, title, url, status, content_type, char_count }. Non-2xx HTTP statuses return success=false.".into())
+    }
+    fn when_to_use(&self) -> Option<String> {
+        Some("Use when the exact URL is known and you need the page content or metadata.".into())
+    }
+    fn when_not_to_use(&self) -> Option<String> {
+        Some("Avoid when you need search/discovery first or when a browser interaction flow is required.".into())
+    }
     fn parameters_schema(&self) -> Vec<ParameterSchema> {
         vec![
             ParameterSchema::required("url", "string", "URL to fetch."),

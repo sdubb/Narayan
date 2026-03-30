@@ -5,7 +5,7 @@ import {
   Bot, User, Loader2, X, Sparkles, ArrowRight, Download,
   MessageSquare, Layers3, Activity, Users, AlertTriangle, FileText, Image, Code, File,
 } from 'lucide-react';
-import { agentDefs as agentDefsApi, agents as agentsApi, workspace as workspaceApi } from '../../api';
+import { agentDefs as agentDefsApi, workspace as workspaceApi } from '../../api';
 
 function humanize(value) {
   if (value == null || value === '') return 'None';
@@ -285,18 +285,14 @@ export default function AgentChatDrawer({
       setContextLoading(true);
       setContextError('');
       try {
-        const [runsRes, peersRes, rolesRes, agentRes] = await Promise.all([
-          agentDefsApi.listGoalInstances(agentId, 8).catch(() => ({ goal_instances: [] })),
-          agentDefsApi.list().catch(() => ({ agents: [] })),
-          initialRoles?.length ? Promise.resolve(null) : agentDefsApi.listRoles(agentId).catch(() => null),
-          agentState ? Promise.resolve(null) : agentDefsApi.get(agentId).catch(() => null),
-        ]);
+        const summary = await agentDefsApi.summary(agentId);
 
         if (cancelled) return;
-        setRuns(runsRes?.goal_instances || []);
-        setPeerAgents(peersRes?.agents || []);
-        if (rolesRes?.roles) setRoles(rolesRes.roles);
-        if (agentRes) setAgentState(agentRes);
+        setAgentState(summary?.agent || agent || null);
+        setRoles(summary?.roles || initialRoles || []);
+        setRuns(summary?.recent_runs || []);
+        setPeerAgents(summary?.peers || []);
+        setWorkspaceFiles(summary?.workspace_files?.files || []);
       } catch (e) {
         if (!cancelled) setContextError(e.message || 'Failed to load agent context');
       } finally {
@@ -306,26 +302,7 @@ export default function AgentChatDrawer({
 
     loadContext();
     return () => { cancelled = true; };
-  }, [agentId, agentState, initialRoles]);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    async function loadWorkspaceFiles() {
-      if (!agentId) return;
-      try {
-        const data = await workspaceApi.tree(agentId).catch(() => ({ files: [] }));
-        if (cancelled) return;
-        const tree = data?.files || data?.tree || data || [];
-        setWorkspaceFiles(tree);
-      } catch {
-        if (!cancelled) setWorkspaceFiles([]);
-      }
-    }
-
-    loadWorkspaceFiles();
-    return () => { cancelled = true; };
-  }, [agentId]);
+  }, [agentId, agent, initialRoles]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });

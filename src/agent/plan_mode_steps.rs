@@ -1,7 +1,7 @@
 //! Sequential clarification step pipeline for plan mode.
 //!
 //! After IntentExtractor runs, `generate_steps()` builds an ordered queue of
-//! `ClarificationStep` items — one per piece of information the system still needs.
+//! `ClarificationStep` items â€” one per piece of information the system still needs.
 //! Each step knows:
 //!   - The exact question to ask
 //!   - Which field it writes to (`StepField`)
@@ -23,7 +23,7 @@ use crate::agent::definition::{
     TriggerType,
 };
 
-// ── Step field target ──────────────────────────────────────────────────────
+// â”€â”€ Step field target â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// What field of the draft role a step's answer writes to.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -31,17 +31,17 @@ use crate::agent::definition::{
 pub enum StepField {
     /// Confirm / specify the trigger (schedule cron or webhook event).
     Trigger,
-    /// For WorkforceEvent triggers — which role/event fires this one.
+    /// For WorkforceEvent triggers â€” which role/event fires this one.
     WorkforceEventFilter,
-    /// For WorkforceEvent triggers — what data to receive from the triggering run.
+    /// For WorkforceEvent triggers â€” what data to receive from the triggering run.
     WorkforceEventInputMapping,
-    /// For within-agent strict ordering — which role must complete first.
+    /// For within-agent strict ordering â€” which role must complete first.
     DependsOnRole,
     /// Specify where the output goes (workspace / channel / email / connector).
     OutputDestination,
     /// Specify the output format (markdown / json / html).
     OutputFormat,
-    /// Role split decision — one role or split into multiple.
+    /// Role split decision â€” one role or split into multiple.
     RoleSplit,
     /// A rule to add to execution_guidelines.rules.
     GuidelineRule,
@@ -53,9 +53,9 @@ pub enum StepField {
     AgentConstraint,
     /// A free-form guideline the user can provide at the end.
     UserGuidelines,
+    /// Where the workflow's source of truth lives, if any.
+    SourceDiscovery,
 }
-
-// ── Step ──────────────────────────────────────────────────────────────────
 
 /// One clarification step in the sequential pipeline.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,10 +87,10 @@ impl ClarificationStep {
     }
 }
 
-// ── Queue generation ──────────────────────────────────────────────────────
+// â”€â”€ Queue generation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Build the ordered step queue from the extracted intent.
-/// `existing_roles` — names of roles already on this agent (empty for new agents).
+/// `existing_roles` â€” names of roles already on this agent (empty for new agents).
 pub fn generate_steps(
     intent: &serde_json::Value,
     category: &str,
@@ -99,7 +99,7 @@ pub fn generate_steps(
 ) -> Vec<ClarificationStep> {
     let mut steps: Vec<ClarificationStep> = Vec::new();
 
-    // ── Step 1: Multi-role split ───────────────────────────────────────
+    // â”€â”€ Step 1: Multi-role split â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if intent["multi_role_suggested"].as_bool().unwrap_or(false) {
         let names: Vec<&str> = intent["responsibilities"]
             .as_array()
@@ -109,9 +109,9 @@ pub fn generate_steps(
         steps.push(ClarificationStep::new(
             "role_split",
             format!(
-                "I see {} distinct responsibilities — {}.\n\n\
-                 **A) One role** — simpler, all in one\n\
-                 **B) {} separate roles** (recommended) — easier to debug and monitor\n\n\
+                "I see {} distinct responsibilities â€” {}.\n\n\
+                 **A) One role** â€” simpler, all in one\n\
+                 **B) {} separate roles** (recommended) â€” easier to debug and monitor\n\n\
                  Which do you prefer? (A or B)",
                 names.len(),
                 reason,
@@ -121,7 +121,7 @@ pub fn generate_steps(
         ));
     }
 
-    // ── Step 2: Trigger ────────────────────────────────────────────────
+    // â”€â”€ Step 2: Trigger â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     let trigger_hint = intent["trigger_hint"].as_str().unwrap_or("manual");
     let trigger_confidence = intent["trigger_confidence"].as_str().unwrap_or("medium");
     let is_workforce = trigger_hint == "workforce_event" || trigger_hint == "after_role";
@@ -131,7 +131,7 @@ pub fn generate_steps(
         let role_hint = if !existing_roles.is_empty() {
             format!(
                 "**Which role triggers this one?** Existing roles on this agent: {}\n\n\
-                 e.g. 'Lead Enrichment & Drafts' — or describe it.",
+                 e.g. 'Lead Enrichment & Drafts' â€” or describe it.",
                 existing_roles.join(", ")
             )
         } else {
@@ -156,10 +156,10 @@ pub fn generate_steps(
                 ClarificationStep::new(
                     "depends_on_role",
                     format!(
-                        "**Should this role also enforce strict ordering** — i.e. block until a \
+                        "**Should this role also enforce strict ordering** â€” i.e. block until a \
                          specific role finishes before it can start?\n\
                          Current roles: {}\n\
-                         Or say 'no' — the workforce trigger above is enough.",
+                         Or say 'no' â€” the workforce trigger above is enough.",
                         existing_roles.join(", ")
                     ),
                     StepField::DependsOnRole,
@@ -173,13 +173,13 @@ pub fn generate_steps(
         steps.push(ClarificationStep::new("trigger", q, StepField::Trigger));
     }
 
-    // ── Step 3: Output destination ────────────────────────────────────
+    // â”€â”€ Step 3: Output destination â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     let dest_hint = intent["output_destination_hint"].as_str().unwrap_or("");
     if dest_hint.is_empty() {
         let hint = intent["output_hint"].as_str().unwrap_or("workspace");
         let q: String = match hint {
             "email_draft" | "email_send" =>
-                "Where should the emails go — **drafts saved to workspace** for review, or **sent directly** via Gmail/Outlook?".into(),
+                "Where should the emails go â€” **drafts saved to workspace** for review, or **sent directly** via Gmail/Outlook?".into(),
             "connector_record" =>
                 "Which record should I update, and which field? e.g. 'Salesforce Lead Description'".into(),
             "slack_message" =>
@@ -187,17 +187,17 @@ pub fn generate_steps(
             "report" =>
                 "Where should the report go? e.g. 'workspace/reports/' or 'email to manager@co.com'".into(),
             "notification" =>
-                "Where should notifications go — Slack channel, email, or both?".into(),
+                "Where should notifications go â€” Slack channel, email, or both?".into(),
             _ =>
                 "Where should the output go, and in what format? e.g. 'workspace/output.md' or '#slack-channel'".into(),
         };
         steps.push(ClarificationStep::new("output_dest", q, StepField::OutputDestination).with_hint(hint));
     }
 
-    // ── Steps 4+: Domain steps ────────────────────────────────────────
+    // â”€â”€ Steps 4+: Domain steps â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     steps.extend(domain_steps_for(category));
 
-    // ── Final: Completion criteria ────────────────────────────────────
+    // â”€â”€ Final: Completion criteria â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     steps.push(ClarificationStep::new(
         "completion",
         "What does 'done' look like for one run? e.g. 'all leads enriched, drafts saved, errors logged'. \
@@ -213,12 +213,12 @@ fn build_trigger_question(intent: &serde_json::Value) -> String {
     let cron = intent["trigger_cron"].as_str();
     match (hint, cron) {
         ("schedule", Some(c)) => format!(
-            "I guessed: `{}` — is that right? Or describe it more precisely \
+            "I guessed: `{}` â€” is that right? Or describe it more precisely \
              (e.g. 'Every weekday at 8am New York time', 'First Monday of each month at 9am').",
             c
         ),
         ("schedule", None) => "When exactly should this run? e.g. 'Every Monday at 9am', 'Daily at midnight UTC', \
-             'Every hour between 9am–6pm'."
+             'Every hour between 9amâ€“6pm'."
             .into(),
         ("webhook", _) => {
             let src = intent["trigger_source"].as_str().unwrap_or("the connector");
@@ -238,7 +238,7 @@ fn build_trigger_question(intent: &serde_json::Value) -> String {
     }
 }
 
-// ── Answer parsing ─────────────────────────────────────────────────────────
+// â”€â”€ Answer parsing â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Parse the user's answer for a given step and write the result to the role.
 /// Returns a summary of what was written (shown to the user as confirmation).
@@ -262,7 +262,7 @@ pub fn parse_and_apply(
         }
 
         StepField::WorkforceEventFilter => {
-            // User named the triggering role — set workforce_event_filter
+            // User named the triggering role â€” set workforce_event_filter
             let lower = answer.to_lowercase();
             let trimmed = answer.trim();
             if !lower.contains("no") && !trimmed.is_empty() {
@@ -279,7 +279,7 @@ pub fn parse_and_apply(
                 role.trigger.workforce_event_filter = Some(filter.clone());
                 format!("Trigger: runs after {}", trimmed)
             } else {
-                "No specific trigger role set — fires on any completion.".into()
+                "No specific trigger role set â€” fires on any completion.".into()
             }
         }
 
@@ -287,10 +287,10 @@ pub fn parse_and_apply(
             let lower = answer.to_lowercase();
             if lower.contains("none") || lower.contains("no data") || lower.contains("nothing") {
                 role.trigger.input_mapping = None;
-                "No input mapping — this role starts fresh each time.".into()
+                "No input mapping â€” this role starts fresh each time.".into()
             } else {
                 // Parse natural language into JSONPath-style mapping
-                // e.g. "the list of lead IDs enriched" → { "lead_ids": "$.output_data.lead_ids" }
+                // e.g. "the list of lead IDs enriched" â†’ { "lead_ids": "$.output_data.lead_ids" }
                 let mapping = infer_input_mapping(answer);
                 let summary = format!("Will receive: {}", answer.trim());
                 role.trigger.input_mapping = Some(mapping);
@@ -303,7 +303,7 @@ pub fn parse_and_apply(
             if lower.contains("no") || lower.trim().len() < 3 {
                 "No strict ordering set.".into()
             } else {
-                // User named a role — store it as depends_on_role_id hint
+                // User named a role â€” store it as depends_on_role_id hint
                 // (actual ID lookup happens at save time)
                 let role_name = answer.trim();
                 role.trigger.depends_on_role_id = Some(format!("name:{}", role_name));
@@ -386,7 +386,7 @@ pub fn parse_and_apply(
                 let count = g.completion_criteria.len();
                 role.execution_guidelines.extend_dedup(g);
                 if count == 0 {
-                    // User gave free text that didn't parse as completion criteria — treat as custom
+                    // User gave free text that didn't parse as completion criteria â€” treat as custom
                     role.execution_guidelines.add_completion(CompletionCriterion::custom(answer.trim()));
                     "Completion criterion saved.".into()
                 } else {
@@ -412,10 +412,28 @@ pub fn parse_and_apply(
             role.execution_guidelines.extend_dedup(g);
             format!("Added {} guideline item(s).", count)
         }
+
+        StepField::SourceDiscovery => {
+            let trimmed = answer.trim();
+            let lower = trimmed.to_lowercase();
+            if trimmed.is_empty()
+                || lower == "none"
+                || lower.contains("general knowledge")
+                || lower.contains("use defaults")
+            {
+                "No source of truth provided - continuing with defaults.".into()
+            } else {
+                role.execution_guidelines.add_rule(crate::agent::definition::GuidelineRule::always(format!(
+                    "Source of truth for this workflow: {}",
+                    trimmed
+                )));
+                format!("Source of truth noted: {}", trimmed)
+            }
+        }
     }
 }
 
-// ── Trigger parsing ────────────────────────────────────────────────────────
+// â”€â”€ Trigger parsing â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 pub fn parse_trigger_answer(answer: &str, intent: &serde_json::Value) -> (TriggerDef, TriggerConfidence) {
     use crate::agent::plan_mode::{intent_to_trigger, parse_trigger_from_text};
@@ -489,7 +507,7 @@ fn trigger_summary(t: &TriggerDef) -> String {
     }
 }
 
-// ── Output destination parsing ─────────────────────────────────────────────
+// â”€â”€ Output destination parsing â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 pub fn parse_output_destination(answer: &str, intent: &serde_json::Value) -> (OutputDestination, String) {
     let lower = answer.to_lowercase();
@@ -506,7 +524,7 @@ pub fn parse_output_destination(answer: &str, intent: &serde_json::Value) -> (Ou
         let channel =
             extract_channel(&answer).or_else(|| extract_channel(dest_hint)).unwrap_or_else(|| "#general".to_string());
         let connector = if lower.contains("teams") || hint_lower.contains("teams") { "outlook" } else { "slack" };
-        let desc = format!("{} → {}", connector, channel);
+        let desc = format!("{} â†’ {}", connector, channel);
         return (OutputDestination::Channel { connector: connector.into(), channel }, desc);
     }
 
@@ -540,7 +558,7 @@ pub fn parse_output_destination(answer: &str, intent: &serde_json::Value) -> (Ou
         } else {
             "Description"
         };
-        let desc = format!("{} → {} field", connector, field);
+        let desc = format!("{} â†’ {} field", connector, field);
         return (
             OutputDestination::Connector {
                 name: connector.into(),
@@ -551,15 +569,15 @@ pub fn parse_output_destination(answer: &str, intent: &serde_json::Value) -> (Ou
         );
     }
 
-    // Workspace — extract path hint
+    // Workspace â€” extract path hint
     let path = extract_workspace_path(&lower).or_else(|| extract_workspace_path(&hint_lower));
     let desc = path.as_deref().unwrap_or("workspace").to_string();
     (OutputDestination::Workspace { path }, desc)
 }
 
 /// Infer a JSONPath input_mapping from a natural language description.
-/// e.g. "the list of lead IDs" → { "lead_ids": "$.output_data.lead_ids" }
-/// e.g. "the output file path" → { "output_path": "$.output_data.output_path" }
+/// e.g. "the list of lead IDs" â†’ { "lead_ids": "$.output_data.lead_ids" }
+/// e.g. "the output file path" â†’ { "output_path": "$.output_data.output_path" }
 fn infer_input_mapping(answer: &str) -> serde_json::Value {
     let lower = answer.to_lowercase();
     let mut mapping = serde_json::Map::new();
@@ -592,7 +610,7 @@ fn infer_input_mapping(answer: &str) -> serde_json::Value {
     }
 
     if !matched {
-        // Generic fallback — pass the whole output_data
+        // Generic fallback â€” pass the whole output_data
         mapping.insert("data".to_string(), serde_json::json!("$.output_data"));
     }
 
@@ -624,7 +642,7 @@ fn extract_workspace_path(lower: &str) -> Option<String> {
             return Some(word.to_string());
         }
     }
-    // "save to drafts" → "drafts/"
+    // "save to drafts" â†’ "drafts/"
     for word in &["drafts", "output", "reports", "results"] {
         if lower.contains(word) {
             return Some(format!("{}/", word));
@@ -633,7 +651,7 @@ fn extract_workspace_path(lower: &str) -> Option<String> {
     None
 }
 
-// ── Default completion criteria ────────────────────────────────────────────
+// â”€â”€ Default completion criteria â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 pub fn default_completion_criteria(role: &AgentRole) -> Vec<CompletionCriterion> {
     let mut criteria = Vec::new();
@@ -673,21 +691,23 @@ pub fn default_completion_criteria(role: &AgentRole) -> Vec<CompletionCriterion>
 
     // Always add error log criterion
     criteria.push(CompletionCriterion::errors_logged(
-        "workspace/errors.txt written (even if empty — proves the run completed)",
+        "workspace/errors.txt written (even if empty â€” proves the run completed)",
         "workspace/errors.txt",
     ));
 
     criteria
 }
 
-// ── Domain step generators ─────────────────────────────────────────────────
+// â”€â”€ Domain step generators â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Returns domain-specific clarification steps for a category.
 /// These encode the "mandatory questions" from the Superpowers-style domain skills
 /// as typed steps rather than free text.
 pub fn domain_steps_for(category: &str) -> Vec<ClarificationStep> {
+    let source_step = source_discovery_step_for(category);
     match category {
         "customer_support" => vec![
+            source_step.clone(),
             ClarificationStep::new(
                 "cs_response_mode",
                 "**Response mode:** Should I draft replies for human approval, or send automatically?",
@@ -705,15 +725,10 @@ pub fn domain_steps_for(category: &str) -> Vec<ClarificationStep> {
                  (e.g. 'billing disputes, legal threats, VIP accounts'). Or 'none'.",
                 StepField::FailureHandling { tool_scope: None },
             ),
-            ClarificationStep::new(
-                "cs_knowledge_base",
-                "**Knowledge source:** Is there a URL, Notion page, or help docs I should search first? \
-                 Or 'none — use general knowledge'.",
-                StepField::GuidelineRule,
-            ),
         ],
 
         "sales_revops" => vec![
+            source_step.clone(),
             ClarificationStep::new(
                 "sr_write_back",
                 "**Write-back:** Should I update records automatically, or create tasks/notes only?",
@@ -738,6 +753,7 @@ pub fn domain_steps_for(category: &str) -> Vec<ClarificationStep> {
         ],
 
         "finance_accounting" => vec![
+            source_step.clone(),
             ClarificationStep::new(
                 "fa_write_access",
                 "**Write access:** Read-only reporting, or can I create/update financial records?",
@@ -757,6 +773,7 @@ pub fn domain_steps_for(category: &str) -> Vec<ClarificationStep> {
         ],
 
         "devops" | "it_ops_itsm" => vec![
+            source_step.clone(),
             ClarificationStep::new(
                 "do_environment",
                 "**Environment:** Prod, staging, or dev? (I will never default to prod.)",
@@ -781,6 +798,7 @@ pub fn domain_steps_for(category: &str) -> Vec<ClarificationStep> {
         ],
 
         "hr_people_ops" => vec![
+            source_step.clone(),
             ClarificationStep::new(
                 "hr_visibility",
                 "**Visibility:** Who can see this agent's output? (HR only / managers / candidates / all)",
@@ -799,6 +817,7 @@ pub fn domain_steps_for(category: &str) -> Vec<ClarificationStep> {
         ],
 
         "legal_contract" => vec![
+            source_step.clone(),
             ClarificationStep::new(
                 "lc_action_scope",
                 "**Scope:** Flag issues only, or also redline and suggest edits?",
@@ -818,6 +837,7 @@ pub fn domain_steps_for(category: &str) -> Vec<ClarificationStep> {
         ],
 
         "research_analyst" => vec![
+            source_step.clone(),
             ClarificationStep::new(
                 "ra_depth",
                 "**Evidence depth:** Quick summary of the provided material or a deeper review with supporting citations?",
@@ -836,7 +856,41 @@ pub fn domain_steps_for(category: &str) -> Vec<ClarificationStep> {
             ),
         ],
 
+        "brand_protection" => vec![
+            source_step.clone(),
+            ClarificationStep::new(
+                "bp_competitors",
+                "**Competitors to monitor:** Which competitor domains or handles should I track? \
+                 e.g. 'competitor.com, @competitor_handle'. Or 'none - my brand only'.",
+                StepField::GuidelineRule,
+            ),
+            ClarificationStep::new(
+                "bp_channels",
+                "**Channels to monitor:** Social media handles to watch? \
+                 e.g. 'Twitter, LinkedIn, Instagram' or 'all'.",
+                StepField::AgentConstraint,
+            ),
+            ClarificationStep::new(
+                "bp_approval_threshold",
+                "**Approval gate:** What severity level requires human review before action? \
+                 e.g. 'high only', 'medium and above', or 'all alerts'.",
+                StepField::FailureHandling { tool_scope: None },
+            ),
+            ClarificationStep::new(
+                "bp_escalation_channel",
+                "**Escalation channel:** Where should critical brand incidents go? \
+                 e.g. '#brand-alerts', 'security@company.com', or a PagerDuty service.",
+                StepField::FailureHandling { tool_scope: None },
+            ),
+            ClarificationStep::new(
+                "bp_response_mode",
+                "**Response mode:** Alerts only, auto-publish takedown requests, or draft actions for review?",
+                StepField::GuidelineRule,
+            ),
+        ],
+
         _ => vec![
+            source_step,
             // Generic fallback: one open constraints question
             ClarificationStep::new(
                 "generic_constraints",
@@ -848,4 +902,47 @@ pub fn domain_steps_for(category: &str) -> Vec<ClarificationStep> {
             .optional(),
         ],
     }
+}
+
+fn source_discovery_step_for(category: &str) -> ClarificationStep {
+    let question = match category {
+        "customer_support" => {
+            "**Source of truth:** Where are the help docs, FAQ, policy pages, or KB articles I should use? \
+             Share a URL, Notion page, doc folder, or say 'none' to continue from ticket context only."
+        }
+        "finance_accounting" => {
+            "**Source of truth:** Where are the invoices, ledger, statements, or accounting records? \
+             Share the system name, database, folder, or say 'none' if you only want a high-level draft."
+        }
+        "legal_contract" => {
+            "**Source of truth:** Where are the contract files or policy documents stored? \
+             Share Drive, DocuSign, Notion, a folder path, or say 'none' if you want a generic draft only."
+        }
+        "hr_people_ops" => {
+            "**Source of truth:** Where are the people policies, handbook, ATS, or HR docs stored? \
+             Share the system, URL, or say 'none' if you only want general guidance."
+        }
+        "sales_revops" => {
+            "**Source of truth:** Where should I look for the account, CRM, product, or enrichment data? \
+             Share the CRM, database, or docs location, or say 'none' to use connected systems only."
+        }
+        "devops" | "it_ops_itsm" => {
+            "**Source of truth:** Where are the runbooks, incident notes, CMDB, or service docs? \
+             Share a wiki, repo, dashboard, or say 'none' if you want me to rely on live systems only."
+        }
+        "research_analyst" => {
+            "**Source of truth:** Which internal docs, approved sources, or reference list should I use first? \
+             Share URLs or docs, or say 'none' if I should start from public sources."
+        }
+        "brand_protection" => {
+            "**Source of truth:** Where are the brand guidelines, approved assets, or monitoring references? \
+             Share a doc, site, or folder, or say 'none' if you want me to proceed with general monitoring rules."
+        }
+        _ => {
+            "**Source of truth:** Where should I look first for the authoritative information for this workflow? \
+             Share a URL, docs, database, folder, or say 'none' to continue with defaults."
+        }
+    };
+
+    ClarificationStep::new("source_discovery", question, StepField::SourceDiscovery)
 }

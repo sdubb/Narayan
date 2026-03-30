@@ -13,6 +13,18 @@ impl Tool for GlobSearchTool {
     fn description(&self) -> &str {
         "Find files matching a glob pattern (e.g. '**/*.rs', 'src/*.toml')."
     }
+    fn input_contract(&self) -> Option<String> {
+        Some("{ pattern, root?, max? }. pattern is required; root defaults to workspace root.".into())
+    }
+    fn output_contract(&self) -> Option<String> {
+        Some("{ pattern, root, count, files }. files contains matching path metadata.".into())
+    }
+    fn when_to_use(&self) -> Option<String> {
+        Some("Use when you need to discover files by filename or path pattern before reading or editing them.".into())
+    }
+    fn when_not_to_use(&self) -> Option<String> {
+        Some("Avoid when you already know the exact file path or when you need text/content matching instead of path matching.".into())
+    }
     fn parameters_schema(&self) -> Vec<ParameterSchema> {
         vec![
             ParameterSchema::required("pattern", "string", "Glob pattern to match files."),

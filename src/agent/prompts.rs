@@ -316,8 +316,6 @@ impl JobType {
                 "diff",
                 "patch",
                 "code_run",
-                "wasm_exec",
-                "run_registered_wasm",
                 "sql_query",
             ],
             Self::ResearchAnalyst => &[
@@ -370,6 +368,7 @@ impl JobType {
                 "web_fetch",
                 "browser",
                 "browser_interact",
+                "data_engine",
                 "data_extractor",
                 "content_search",
                 "spreadsheet_write",
@@ -381,6 +380,7 @@ impl JobType {
                 "web_search_tool",
                 "web_fetch",
                 "browser",
+                "data_engine",
                 "data_extractor",
                 "email",
                 "spreadsheet_write",
@@ -393,6 +393,7 @@ impl JobType {
             Self::FinanceAccounting => &[
                 "pdf_read",
                 "spreadsheet_write",
+                "data_engine",
                 "sql_query",
                 "data_extractor",
                 "file_read",
@@ -443,6 +444,7 @@ impl JobType {
                 "file_read",
                 "file_write",
                 "web_search_tool",
+                "data_engine",
                 "memory_store",
                 "memory_recall",
                 "http_request",
@@ -589,6 +591,9 @@ PLANNING RULES:
 - Process in batches and store partial results after each batch
 - Validate extracted schema against expected structure before writing output
 - Always write both raw JSON and cleaned CSV output
+- Tool contracts include explicit Purpose, Use when, Avoid when, Input, Output, and Output schema sections; treat them as authoritative
+- Use data_engine for deterministic record workflows: filtering, mapping, cleaning, scoring, ranking, grouping, aggregation, and schema-aligned extraction when the logic fits the typed DSL
+- Do not use data_engine for free-form scripts, browser automation, remote execution, or custom runtime code
 STEP SEQUENCE: map_sources → batch_fetch → extract → validate_schema → clean → write_csv → write_summary"
             }
 
@@ -701,6 +706,10 @@ CONSTRAINTS:
 - Use pdf_create for PDF generation; never use file_write to create .pdf files
 - Use compress/decompress for archives; never use file_write to create .zip, .tar.gz, or other archive files
 - Prefer code_run for calculations or short executable snippets; only create a script file first when the user explicitly asks for a saved script
+- Tool contracts are authoritative: read the Purpose, Use when, Avoid when, Input, Output, and Output schema sections before choosing a tool
+- Prefer data_engine for deterministic record transforms, scoring, aggregation, cleaning, and schema-aligned extraction when the task fits the typed DSL
+- Do not use data_engine for free-form scripts, browser automation, remote execution, or arbitrary custom code
+- Use data_extractor for semi-structured source extraction from HTML/text/PDF-like content, then pass the results into data_engine for deterministic transforms
 - Never plan a step you cannot verify as complete or failed"#,
             job_guidance = job_guidance,
             label = job_type.label(),
@@ -908,17 +917,21 @@ You are executing one step from the plan. The current step, retry context, and a
 EXECUTION RULES:
 - Execute ONLY the current step shown in the user message — do not skip ahead
 - Call the tool specified in the plan; only deviate if you have a concrete reason
-- If you need more non-connector tools from a category, call request_more_tools with the category names
-- request_more_tools categories: filesystem, web, code, data, memory, infra, integration, communication, security, automation
-- category quick map 1: filesystem=shell,file_read,file_write,file_edit,glob_search,content_search; web=web_search_tool,web_fetch,http_request,browser,browser_interact,browser_pdf
-- category quick map 2: code=code_run,diff,patch,git_operations,sql_query,run_registered_wasm; data=data_extractor,pdf_read,pdf_create,spreadsheet_read,spreadsheet_write,image_process,image_info
-- category quick map 3: memory=memory_store,memory_recall,memory_forget,vector_store,vector_search,vector_delete; infra=docker,kubernetes,ssh_exec,process_monitor
-- category quick map 4: integration=mcp_session,search_mcp_registry,acp_session,api_call,register_api_tool; communication=email,notification,pushover,ask_user; security=crypto_tool,plane_guard,request_credential; automation=schedule,cron_add,cron_list,cron_remove,cron_run,delegate
-- If you need a connector but only know the category, call list_connectors_in_category first
-- Connector categories are requested as short names like crm, support, communication, project_management, finance, hr, itsm
-- If no listed connector satisfies the need, call request_more_connectors or create_custom_connector
-- Do not create runtime custom tools. If deterministic custom logic is needed, use only pre-approved run_registered_wasm tools configured in plan mode for this role
-- file_read is for files, not directories; if a path is a directory, inspect the listing and then switch to a concrete child file or use glob_search/content_search
+        - If you need more non-connector tools from a category, call request_more_tools with the category names
+        - request_more_tools categories: filesystem, web, code, data, memory, infra, integration, communication, security, automation
+        - category quick map 1: filesystem=shell,file_read,file_write,file_edit,glob_search,content_search; web=web_search_tool,web_fetch,http_request,browser,browser_interact,browser_pdf
+        - category quick map 2: code=code_run,diff,patch,git_operations,sql_query; data=data_engine,data_extractor,pdf_read,pdf_create,spreadsheet_read,spreadsheet_write,image_process,image_info
+        - category quick map 3: memory=memory_store,memory_recall,memory_forget,vector_store,vector_search,vector_delete; infra=docker,kubernetes,ssh_exec,process_monitor
+        - category quick map 4: integration=mcp_session,search_mcp_registry,acp_session,api_call,register_api_tool; communication=email,notification,pushover,ask_user; security=crypto_tool,plane_guard,request_credential; automation=schedule,cron_add,cron_list,cron_remove,cron_run,delegate
+        - If you need a connector but only know the category, call list_connectors_in_category first
+        - Connector categories are requested as short names like crm, support, communication, project_management, finance, hr, itsm
+        - If no listed connector satisfies the need, call request_more_connectors or create_custom_connector
+        - Do not create runtime custom tools. If deterministic custom logic is needed, use data_engine for record workflows or code_run for arbitrary code that needs a full sandbox later
+        - Tool contracts are authoritative: read the Purpose, Use when, Avoid when, Input, Output, and Output schema sections before choosing a tool
+        - Prefer data_engine for deterministic record transforms, scoring, aggregation, cleaning, and schema-aligned extraction when the task fits the typed DSL
+        - Do not use data_engine for free-form scripts, browser automation, remote execution, or arbitrary custom code
+        - Use data_extractor first when the task is semi-structured extraction from HTML/text/PDF-like content; use data_engine after extraction for deterministic record workflows
+        - file_read is for files, not directories; if a path is a directory, inspect the listing and then switch to a concrete child file or use glob_search/content_search
 - After every tool call, state what you observed and whether it achieved the step's intent
 - If the step is complete, end your response with exactly: STEP COMPLETE
 - If the step failed and cannot be recovered without a plan change, end with: STEP FAILED: <concise reason>

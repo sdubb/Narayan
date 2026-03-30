@@ -24,6 +24,32 @@ pub fn truncate(s: &str, max_chars: usize) -> &str {
     }
 }
 
+/// Create a reqwest HTTP client with default timeout and error handling.
+/// This replaces hardcoded `.build().unwrap()` calls across the codebase.
+pub fn create_reqwest_client(timeout_secs: u64) -> anyhow::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(timeout_secs))
+        .build()
+        .map_err(|e| anyhow::anyhow!("failed to create http client: {}", e))
+}
+
+/// Create a JSON error response for HTTP handlers.
+/// Standardizes error format across all API endpoints.
+/// 
+/// # Example
+/// ```ignore
+/// if user.is_none() {
+///     return http_error(StatusCode::NOT_FOUND, "user not found");
+/// }
+/// ```
+pub fn http_error(
+    code: axum::http::StatusCode,
+    msg: impl Into<String>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    (code, axum::Json(serde_json::json!({ "error": msg.into() }))).into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

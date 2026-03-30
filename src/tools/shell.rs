@@ -30,9 +30,21 @@ impl Tool for ShellTool {
         "shell"
     }
     fn description(&self) -> &str {
-        "Execute a shell command in the agent workspace with an isolated environment. \
-         Timeout defaults to 60s (max 600s). Output capped at 1 MiB. \
-         Destructive system-wide commands are blocked."
+        "Execute a shell command in the agent workspace with an isolated environment."
+    }
+    fn input_contract(&self) -> Option<String> {
+        Some(
+            "{ command, cwd?, timeout_secs? }. command is required. cwd is relative to the workspace root. timeout_secs defaults to 60 and is capped at 600.".into(),
+        )
+    }
+    fn output_contract(&self) -> Option<String> {
+        Some("{ stdout, stderr, exit_code }. Non-zero exits return success=false with stderr in error.".into())
+    }
+    fn when_to_use(&self) -> Option<String> {
+        Some("Use for small workspace-local shell actions, repo inspection, and build/test commands that need a shell.".into())
+    }
+    fn when_not_to_use(&self) -> Option<String> {
+        Some("Do not use for destructive system-wide commands, long-running daemons, or tasks better expressed as structured code or data transforms.".into())
     }
     fn parameters_schema(&self) -> Vec<ParameterSchema> {
         vec![

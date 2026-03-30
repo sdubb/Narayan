@@ -16,6 +16,18 @@ impl Tool for SpreadsheetReadTool {
         "Read data from XLSX, XLS, or ODS spreadsheets. Returns rows as JSON arrays. \
          Supports sheet selection, header row detection, and row limits."
     }
+    fn input_contract(&self) -> Option<String> {
+        Some("{ path, sheet?, header_row?, max_rows?, start_row? }. path is required.".into())
+    }
+    fn output_contract(&self) -> Option<String> {
+        Some("{ sheet, sheets, headers, rows, row_count }. rows are returned as arrays or objects depending on headers.".into())
+    }
+    fn when_to_use(&self) -> Option<String> {
+        Some("Use to read structured spreadsheet data into JSON before downstream transforms or analysis.".into())
+    }
+    fn when_not_to_use(&self) -> Option<String> {
+        Some("Avoid when the source is not a spreadsheet or when a CSV/record transform can be done directly from workspace files.".into())
+    }
     fn parameters_schema(&self) -> Vec<ParameterSchema> {
         vec![
             ParameterSchema::required("path", "string", "Spreadsheet file path."),
@@ -120,6 +132,18 @@ impl Tool for SpreadsheetWriteTool {
     fn description(&self) -> &str {
         "Write data to a new XLSX spreadsheet. Accepts rows as JSON arrays or objects. \
          Supports multiple sheets, column headers, and basic cell formatting."
+    }
+    fn input_contract(&self) -> Option<String> {
+        Some("{ output, rows, headers?, sheet? }. output and rows are required.".into())
+    }
+    fn output_contract(&self) -> Option<String> {
+        Some("{ output, rows, columns, sheet, size_bytes }. Indicates the written spreadsheet file.".into())
+    }
+    fn when_to_use(&self) -> Option<String> {
+        Some("Use when the final artifact should be a spreadsheet file or tabular export.".into())
+    }
+    fn when_not_to_use(&self) -> Option<String> {
+        Some("Avoid when you only need a JSON transform or when the output should remain in the workspace as text.".into())
     }
     fn parameters_schema(&self) -> Vec<ParameterSchema> {
         vec![

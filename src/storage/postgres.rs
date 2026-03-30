@@ -37,6 +37,44 @@ impl PostgresStore {
         self.pool.clone()
     }
 
+    /// Start a new transaction. Use for multi-step operations that must be atomic.
+    /// 
+    /// # Transaction Pattern
+    /// 
+    /// Use transactions to ensure consistency when multiple database operations must succeed or fail as one unit.
+    /// This is critical for compliance segments (Finance, Legal) and workflow consistency.
+    /// 
+    /// # Example
+    /// ```ignore
+    /// let mut tx = store.begin_transaction().await?;
+    /// 
+    /// // Multiple operations share the same transaction
+    /// store.create_agent_tx(&mut tx, &agent_state).await?;
+    /// store.create_goal_tx(&mut tx, &goal_state).await?;
+    /// store.record_audit_entry_tx(&mut tx, &audit_entry).await?;
+    /// 
+    /// // If any step fails, none are committed
+    /// tx.commit().await?;
+    /// ```
+    /// 
+    /// # Current Limitations
+    /// 
+    /// Most `upsert_*` methods do not yet accept `&mut Transaction` parameters.
+    /// To migrate existing code, create transaction-aware `_tx` variants alongside non-tx methods:
+    /// - `upsert_agent()` → `upsert_agent_tx(tx, state)`
+    /// - `upsert_goal()` → `upsert_goal_tx(tx, state)`
+    /// - etc.
+    /// 
+    /// # Best Practices
+    /// 
+    /// - Keep transaction scope small (ideally <1ms DB time)
+    /// - Hold locks for the shortest time possible
+    /// - Avoid calling external APIs or LLM endpoints inside transactions
+    /// - Always `commit()` or let the transaction scope drop (auto-rollback on drop)
+    pub async fn begin_transaction(&self) -> Result<sqlx::Transaction<'_, sqlx::Postgres>> {
+        self.pool.begin().await.map_err(|e| anyhow::anyhow!("transaction start failed: {}", e))
+    }
+
     /// Simple connectivity check for readiness probes.
     pub async fn health_check(&self) -> Result<()> {
         sqlx::query("SELECT 1").execute(&self.pool).await?;
@@ -545,12 +583,17 @@ impl PostgresStore {
             .bind(id)
             .bind(tenant_id)
             .fetch_optional(&self.pool)
-            .await?;
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to fetch agent {}: {}", id, e))?;
         Ok(row.map(|r| row_to_agent_state(&r)))
     }
 
     pub async fn get_agent_internal(&self, id: &str) -> Result<Option<AgentState>> {
-        let row = sqlx::query("SELECT * FROM agents WHERE id = $1").bind(id).fetch_optional(&self.pool).await?;
+        let row = sqlx::query("SELECT * FROM agents WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to fetch agent {} (internal query): {}", id, e))?;
         Ok(row.map(|r| row_to_agent_state(&r)))
     }
 
@@ -558,7 +601,8 @@ impl PostgresStore {
         let rows = sqlx::query("SELECT * FROM agents WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT 100")
             .bind(tenant_id)
             .fetch_all(&self.pool)
-            .await?;
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to list agents for tenant {}: {}", tenant_id, e))?;
         Ok(rows.iter().map(|r| row_to_agent_state(r)).collect())
     }
 

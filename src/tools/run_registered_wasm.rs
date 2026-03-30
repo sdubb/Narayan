@@ -53,7 +53,7 @@ impl Tool for RunRegisteredWasmTool {
     }
 
     fn category(&self) -> &'static str {
-        "code"
+        "other"
     }
 
     fn parameters_schema(&self) -> Vec<ParameterSchema> {

@@ -49,7 +49,7 @@ impl WorkerPool {
 
         for id in 0..self.pool_size {
             let worker_name = format!("{}-{}", self.name, id);
-            let worker = Worker::new(
+            let worker = Arc::new(Worker::new(
                 id,
                 worker_name.clone(),
                 self.store.clone(),
@@ -59,19 +59,44 @@ impl WorkerPool {
                 self.workspace_manager.clone(),
                 self.services.clone(),
                 self.event_bus.clone(),
-            );
+            ));
             let token = cancel_token.clone();
             set.spawn(async move {
                 loop {
                     if token.is_cancelled() { break; }
-                    match worker.process_next(token.clone()).await {
-                        Ok(true) => {}
-                        Ok(false) => {
+                    // Wrap process_next in a defensive layer to catch and log panics
+                    let worker = Arc::clone(&worker);
+                    let task_token = token.clone();
+                    let result = tokio::spawn(async move { worker.process_next(task_token).await }).await;
+                    
+                    match result {
+                        Ok(Ok(true)) => {}
+                        Ok(Ok(false)) => {
                             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
                         }
-                        Err(e) => {
-                            tracing::error!(worker = %worker_name, error = %e, "worker failed");
+                        Ok(Err(e)) => {
+                            tracing::error!(worker = %worker_name, error = %e, "worker execution failed");
                             tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                        }
+                        Err(join_error) => {
+                            if join_error.is_panic() {
+                                tracing::error!(
+                                    worker = %worker_name,
+                                    "worker task panicked; will retry after backoff"
+                                );
+                                // Backoff before retry to avoid panic loops
+                                tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+                            } else if join_error.is_cancelled() {
+                                tracing::debug!(worker = %worker_name, "worker task cancelled");
+                                break;
+                            } else {
+                                tracing::error!(
+                                    worker = %worker_name,
+                                    error = %join_error,
+                                    "worker task join error"
+                                );
+                                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                            }
                         }
                     }
                 }
@@ -80,7 +105,8 @@ impl WorkerPool {
 
         while let Some(res) = set.join_next().await {
             if let Err(e) = res {
-                tracing::error!(error = %e, "worker panicked");
+                // Worker itself panicked (panic at top-level loop)
+                tracing::error!(error = %e, "worker pool task panicked");
             }
         }
         Ok(())

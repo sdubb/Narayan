@@ -88,6 +88,14 @@ pub enum AgentEvent {
         reason: String,
         retry_count: u32,
     },
+    /// Emitted after step evaluation completes; surfaces evaluator reasoning in real-time.
+    EvaluationComplete {
+        agent_id: String,
+        step_index: usize,
+        verdict: String, // "Continue" | "Retry" | "Abort" | "GoalComplete"
+        summary: String,
+        key_findings: Vec<String>,
+    },
 
     // ── Policy & compliance ────────────────────────────────────────────────
     /// Emitted whenever the policy engine evaluates a tool call.
@@ -191,16 +199,6 @@ pub enum AgentEvent {
         total_requests: u64,
     },
 
-    /// Emitted when the runtime is approaching a safety limit but can still continue.
-    ExecutionLimitWarning {
-        agent_id: String,
-        current_step: u32,
-        max_steps: u32,
-        remaining_steps: u32,
-        suggested_extension_steps: u32,
-        message: String,
-    },
-
     // ── Plan approval ────────────────────────────────────────────────────
     /// Emitted when the plan is ready and needs user sign-off before execution.
     PlanApprovalNeeded {
@@ -240,8 +238,7 @@ pub enum AgentEvent {
         role_id: String,
         role_name: String,
         output_data: serde_json::Value,
-    },
-    GoalComplete {
+    },    GoalComplete {
         agent_id: String,
         summary: String,
     },
@@ -272,6 +269,7 @@ impl AgentEvent {
             AgentEvent::ToolResult { agent_id, .. } => agent_id,
             AgentEvent::StepCompleted { agent_id, .. } => agent_id,
             AgentEvent::StepRetrying { agent_id, .. } => agent_id,
+            AgentEvent::EvaluationComplete { agent_id, .. } => agent_id,
             AgentEvent::PolicyDecision { agent_id, .. } => agent_id,
             AgentEvent::PiiRedacted { agent_id, .. } => agent_id,
             AgentEvent::SlaCheck { agent_id, .. } => agent_id,
@@ -283,7 +281,6 @@ impl AgentEvent {
             AgentEvent::ChildSpawned { agent_id, .. } => agent_id,
             AgentEvent::ChildrenComplete { agent_id, .. } => agent_id,
             AgentEvent::LlmCostUpdate { agent_id, .. } => agent_id,
-            AgentEvent::ExecutionLimitWarning { agent_id, .. } => agent_id,
             AgentEvent::PlanApprovalNeeded { agent_id, .. } => agent_id,
             AgentEvent::PlanApproved { agent_id, .. } => agent_id,
             AgentEvent::PlanRejected { agent_id, .. } => agent_id,

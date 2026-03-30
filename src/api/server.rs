@@ -93,6 +93,7 @@ pub fn build_router(
         .route("/goal-instances/{id}", get(get_goal_instance_detail))
         .route("/agent-definitions", get(list_agent_definitions))
         .route("/agent-definitions/{id}", get(get_agent_definition))
+        .route("/agent-definitions/{id}/summary", get(agent_definition_summary))
         .route("/agent-definitions/{id}", put(update_agent_definition))
         .route("/agent-definitions/{id}", delete(delete_agent_definition))
         .route("/agent-definitions/{id}/chat", post(agent_chat))

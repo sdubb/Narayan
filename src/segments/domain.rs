@@ -379,6 +379,35 @@ impl DomainProfile {
         )
     }
 
+    pub const fn brand_protection() -> Self {
+        Self::new(
+            "brand_protection",
+            "Brand Protection & Monitoring",
+            "Website monitoring, defacement detection, competitor tracking, reputation management, and trademark protection.",
+            &["brand_monitoring"],
+            true,
+            true,
+            false,
+            JudgementTuning::new(
+                "brand_protection",
+                0.87,
+                0.68,
+                1,
+                0.06,
+                0.30,
+                0.14,
+                0.02,
+                0.03,
+                0.02,
+                0.05,
+                70.0,
+                95.0,
+                0.12,
+                0.22,
+            ),
+        )
+    }
+
     pub fn for_slug(slug: &str) -> Self {
         match slug.trim().to_ascii_lowercase().as_str() {
             "engineering" | "software_engineer" | "devops" => Self::engineering(),
@@ -395,6 +424,7 @@ impl DomainProfile {
             "procurement_vendor_ops" | "procurement" => Self::procurement_vendor_ops(),
             "security_ops_grc" | "security_ops" | "grc" => Self::security_ops_grc(),
             "customer_success_renewals" | "customer_success" => Self::customer_success_renewals(),
+            "brand_protection" | "brand_monitoring" | "reputation" => Self::brand_protection(),
             _ => Self::general(),
         }
     }

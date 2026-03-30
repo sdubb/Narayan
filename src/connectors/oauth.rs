@@ -289,7 +289,18 @@ pub async fn oauth_callback(
     //   Atlassian — needs JSON body not form-encoded
     //   Notion    — needs JSON body not form-encoded
     //   Others    — standard form + Basic auth
-    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).build().unwrap();
+    let client = match crate::util::create_reqwest_client(30) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to create http client");
+            return Redirect::temporary(&format!(
+                "{}/settings/connectors?error={}",
+                ui_base,
+                urlencoding::encode("internal_error")
+            ))
+            .into_response();
+        }
+    };
 
     let token_body: serde_json::Value = match provider.as_str() {
         "github" => {

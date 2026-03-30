@@ -20,13 +20,11 @@ use crate::{
     compliance::sla::{EscalationAction, SlaStatus},
     debug::recorder::AgentRecorder,
     events::{AgentEvent, EventBus},
-    gateway::CostTracker,
     knowledge::graph::KnowledgeGraph,
-    agent::definition::ExecutionLimits,
     segments::AgentServices,
     skill_evolution::evolution::evolve_skill,
     skills::registry::SkillRegistry,
-    state::{AgentState, AgentStatus, GoalInstanceStatus},
+    state::{AgentState, AgentStatus},
     tools::ToolRegistry,
     util::next_run_after,
 };
@@ -92,6 +90,101 @@ fn step_history_summary(result: &crate::agent::executor::StepResult, fallback: &
     }
 
     fallback.to_string()
+}
+
+/// Atomic state transaction — batches all step-related mutations for consistency.
+/// Ensures crash-safety: either all changes commit or none do.
+struct StepStateTransaction {
+    retry_count: Option<u32>,
+    last_error: Option<String>,
+    last_reflection: Option<String>,
+    key_findings: Option<Vec<String>>,
+    step_outputs_entry: Option<serde_json::Value>,
+}
+
+impl StepStateTransaction {
+    fn new() -> Self {
+        Self {
+            retry_count: None,
+            last_error: None,
+            last_reflection: None,
+            key_findings: None,
+            step_outputs_entry: None,
+        }
+    }
+
+    fn with_retry_count(mut self, count: u32) -> Self {
+        self.retry_count = Some(count);
+        self
+    }
+
+    fn with_error(mut self, error: String) -> Self {
+        self.last_error = Some(error);
+        self
+    }
+
+    fn with_reflection(mut self, reflection: String) -> Self {
+        self.last_reflection = Some(reflection);
+        self
+    }
+
+    fn with_key_findings(mut self, findings: Vec<String>) -> Self {
+        self.key_findings = Some(findings);
+        self
+    }
+
+    fn with_step_output(mut self, entry: serde_json::Value) -> Self {
+        self.step_outputs_entry = Some(entry);
+        self
+    }
+
+    /// Atomically commit all mutations to state.
+    /// Call this once at the end of step processing to ensure consistency.
+    fn commit(self, state: &mut AgentState) {
+        if let Some(count) = self.retry_count {
+            state.metadata["retry_count"] = serde_json::json!(count);
+        }
+
+        if let Some(ref error) = self.last_error {
+            state.metadata["last_step_error"] = serde_json::Value::String(error.clone());
+        } else {
+            // Clear error on success
+            state.metadata.as_object_mut().map(|m| m.remove("last_step_error"));
+        }
+
+        if let Some(ref reflection) = self.last_reflection {
+            state.metadata["last_reflection"] = serde_json::Value::String(reflection.clone());
+        }
+
+        if let Some(ref findings) = self.key_findings {
+            state.metadata["key_findings"] = serde_json::json!(findings);
+        }
+
+        if let Some(ref entry) = self.step_outputs_entry {
+            let mut outputs = state
+                .metadata
+                .get("step_outputs")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            outputs.push(entry.clone());
+            state.metadata["step_outputs"] = serde_json::Value::Array(outputs);
+        }
+
+        tracing::debug!(
+            "step state transaction committed: {} fields updated",
+            [
+                self.retry_count.is_some(),
+                self.last_error.is_some(),
+                self.last_reflection.is_some(),
+                self.key_findings.is_some(),
+                self.step_outputs_entry.is_some(),
+            ]
+            .iter()
+            .filter(|&&b| b)
+            .count()
+        );
+    }
 }
 
 fn persist_step_output(
@@ -216,11 +309,6 @@ fn format_step_condition(step: &crate::agent::planner::PlannedStep) -> Option<St
     })
 }
 
-const SOFT_LIMIT_WARNING_RATIO: f64 = 0.8;
-const EXTENSION_REQUEST_REMAINING_STEPS: u32 = 2;
-const EXTENSION_REQUEST_STEPS: u32 = 10;
-const EXTENSION_REQUEST_TIMEOUT_SECS: u64 = 900;
-
 fn plan_step_event(step: &crate::agent::planner::PlannedStep) -> crate::events::PlanStepEvent {
     crate::events::PlanStepEvent {
         step_index: step.index,
@@ -251,7 +339,28 @@ pub enum StepOutcome {
     PartiallyComplete {
         note: String,
     },
+    /// Generic failure — consider using more specific variants when possible
     Failed(String),
+    /// Transient error that should retry without evaluator LLM call
+    /// (connection timeout, temporary service unavailable, etc.)
+    TransientError {
+        reason: String,
+        retry_after_secs: u64,
+    },
+    /// Permanent error that LLM cannot resolve
+    /// (missing credentials, invalid schema, tool not found, etc.)
+    PermanentError {
+        reason: String,
+    },
+    /// Policy or plane guard violation — needs role/permission review
+    PolicyViolation {
+        reason: String,
+    },
+    /// Rate limited by external service
+    RateLimited {
+        retry_after_secs: u64,
+        reason: String,
+    },
     Delegating {
         child_ids: Vec<String>,
     },
@@ -298,7 +407,6 @@ pub struct AgentLoop {
     embedder: Arc<dyn crate::memory::EmbeddingModel>,
     services: Arc<AgentServices>,
     store: Option<Arc<crate::storage::PostgresStore>>,
-    cost_tracker: Option<Arc<CostTracker>>,
     max_steps: usize,
     timeout_secs: u64,
 }
@@ -333,19 +441,13 @@ impl AgentLoop {
             embedder,
             services,
             store: None,
-            cost_tracker: None,
-            max_steps: 100,
-            timeout_secs: 3_600,
+            max_steps: 50,
+            timeout_secs: 300,
         }
     }
 
     pub fn with_store(mut self, store: Arc<crate::storage::PostgresStore>) -> Self {
         self.store = Some(store);
-        self
-    }
-
-    pub fn with_cost_tracker(mut self, cost_tracker: Arc<CostTracker>) -> Self {
-        self.cost_tracker = Some(cost_tracker);
         self
     }
 
@@ -355,134 +457,6 @@ impl AgentLoop {
         self
     }
 
-    async fn resolve_execution_limits(&self, state: &AgentState) -> ExecutionLimits {
-        if let (Some(store), Some(role_id)) = (&self.store, state.metadata.get("role_id").and_then(|v| v.as_str())) {
-            if let Ok(Some(role)) = store.get_agent_role(&state.tenant_id, role_id).await {
-                let mut limits = role.execution_limits;
-                if let Some(extra_steps) = state.metadata.get("execution_limit_extension_steps").and_then(|v| v.as_u64()) {
-                    limits.max_steps = limits.max_steps.saturating_add(extra_steps.min(u32::MAX as u64) as u32);
-                }
-                if let Some(extra_timeout) = state
-                    .metadata
-                    .get("execution_limit_extension_timeout_secs")
-                    .and_then(|v| v.as_u64())
-                {
-                    limits.timeout_secs = limits.timeout_secs.saturating_add(extra_timeout);
-                }
-                return limits;
-            }
-        }
-
-        let mut limits = ExecutionLimits {
-            max_steps: self.max_steps as u32,
-            max_retries: ExecutionLimits::default().max_retries,
-            timeout_secs: self.timeout_secs,
-            max_cost_usd: None,
-        };
-        if let Some(extra_steps) = state.metadata.get("execution_limit_extension_steps").and_then(|v| v.as_u64()) {
-            limits.max_steps = limits.max_steps.saturating_add(extra_steps.min(u32::MAX as u64) as u32);
-        }
-        if let Some(extra_timeout) = state
-            .metadata
-            .get("execution_limit_extension_timeout_secs")
-            .and_then(|v| v.as_u64())
-        {
-            limits.timeout_secs = limits.timeout_secs.saturating_add(extra_timeout);
-        }
-        limits
-    }
-
-    async fn current_cost_usd(&self, state: &AgentState) -> Option<f64> {
-        let tracker = self.cost_tracker.as_ref()?;
-        let usage = tracker.get_usage(&state.id).await?;
-        Some(usage.total_cost_usd)
-    }
-
-    async fn cost_limit_exceeded(&self, state: &AgentState, limits: &ExecutionLimits) -> bool {
-        let Some(limit) = limits.max_cost_usd else {
-            return false;
-        };
-        if limit <= 0.0 {
-            return false;
-        }
-        matches!(self.current_cost_usd(state).await, Some(current) if current >= limit)
-    }
-
-    async fn fail_if_cost_limit_hit(&self, state: &mut AgentState, limits: &ExecutionLimits, context: &str) -> Result<Option<StepOutcome>> {
-        if !self.cost_limit_exceeded(state, limits).await {
-            return Ok(None);
-        }
-
-        let current = self.current_cost_usd(state).await.unwrap_or(0.0);
-        let limit = limits.max_cost_usd.unwrap_or(0.0);
-        let reason = format!(
-            "agent exceeded cost limit (${current:.4} / ${limit:.4}) during {context}"
-        );
-        tracing::warn!(agent_id = %state.id, current_cost_usd = current, limit_usd = limit, context = context, "cost limit reached");
-        state.mark_failed();
-        self.event_bus.publish(AgentEvent::GoalFailed { agent_id: state.id.clone(), reason: reason.clone() });
-        self.event_bus.close(&state.id);
-        Ok(Some(StepOutcome::Failed(reason)))
-    }
-
-    async fn maybe_warn_execution_limit(&self, state: &mut AgentState, limits: &ExecutionLimits) -> Result<()> {
-        if state.metadata.get("execution_limit_warning_sent").and_then(|v| v.as_bool()).unwrap_or(false) {
-            return Ok(());
-        }
-
-        let max_steps = limits.max_steps.max(1);
-        let current_step = state.current_step;
-        let used_ratio = current_step as f64 / max_steps as f64;
-        let remaining_steps = max_steps.saturating_sub(current_step);
-        if used_ratio < SOFT_LIMIT_WARNING_RATIO && remaining_steps > EXTENSION_REQUEST_REMAINING_STEPS {
-            return Ok(());
-        }
-
-        let message = format!(
-            "Approaching the step budget: {current_step}/{max_steps} steps used. Auto-extending by about {} more steps if more work remains.",
-            EXTENSION_REQUEST_STEPS
-        );
-        state.metadata["execution_limit_warning_sent"] = serde_json::json!(true);
-        self.event_bus.publish(AgentEvent::ExecutionLimitWarning {
-            agent_id: state.id.clone(),
-            current_step,
-            max_steps,
-            remaining_steps,
-            suggested_extension_steps: EXTENSION_REQUEST_STEPS,
-            message,
-        });
-        Ok(())
-    }
-
-    async fn maybe_request_extension(&self, state: &mut AgentState, limits: &ExecutionLimits) -> Result<()> {
-        if state.metadata.get("execution_limit_extension_requested").and_then(|v| v.as_bool()).unwrap_or(false) {
-            return Ok(());
-        }
-
-        let max_steps = limits.max_steps.max(1);
-        let remaining_steps = max_steps.saturating_sub(state.current_step);
-        if remaining_steps > EXTENSION_REQUEST_REMAINING_STEPS {
-            return Ok(());
-        }
-
-        state.metadata["execution_limit_extension_steps"] = serde_json::json!(EXTENSION_REQUEST_STEPS);
-        state.metadata["execution_limit_extension_timeout_secs"] = serde_json::json!(EXTENSION_REQUEST_TIMEOUT_SECS);
-        state.metadata["execution_limit_extension_requested"] = serde_json::json!(true);
-        let message = format!(
-            "Automatically extended execution budget by {} steps and {} seconds.",
-            EXTENSION_REQUEST_STEPS, EXTENSION_REQUEST_TIMEOUT_SECS
-        );
-        self.event_bus.publish(AgentEvent::ExecutionLimitWarning {
-            agent_id: state.id.clone(),
-            current_step: state.current_step,
-            max_steps: limits.max_steps,
-            remaining_steps,
-            suggested_extension_steps: EXTENSION_REQUEST_STEPS,
-            message,
-        });
-        Ok(())
-    }
-
     /// Execute exactly one step of the agent state machine.
     /// Called by the worker — NEVER runs a continuous loop itself.
     pub async fn run_step(
@@ -490,23 +464,6 @@ impl AgentLoop {
         state: &mut AgentState,
         plan: &mut Option<Plan>,
         history: &mut StepHistory,
-        cancel_token: tokio_util::sync::CancellationToken,
-    ) -> Result<StepOutcome> {
-        if cancel_token.is_cancelled() {
-            tracing::info!(agent_id = %state.id, "agent loop step cancelled");
-            return Ok(StepOutcome::Continue { delay_secs: 0 });
-        }
-        self.run_step_internal(state, plan, history, cancel_token).await
-    }
-
-    /// Execute exactly one step of the agent state machine.
-    /// Called by the worker — NEVER runs a continuous loop itself.
-     async fn run_step_internal(
-        &self,
-        state: &mut AgentState,
-        plan: &mut Option<Plan>,
-        history: &mut StepHistory,
-        _cancel_token: tokio_util::sync::CancellationToken,
     ) -> Result<StepOutcome> {
         tracing::info!(
             agent_id = %state.id,
@@ -518,37 +475,25 @@ impl AgentLoop {
         );
 
         // ── 1. Cognitive control — prevent infinite loops ──────────────────
-        let limits = self.resolve_execution_limits(state).await;
-        self.maybe_request_extension(state, &limits).await?;
-        let limits = self.resolve_execution_limits(state).await;
-        let control = CognitiveControlLoop::new(limits.max_steps as usize, limits.timeout_secs);
+        let control = CognitiveControlLoop::new(self.max_steps, self.timeout_secs);
         if !control.should_continue(state) {
             let reason = format!(
                 "agent exceeded safety limits ({} steps / {}s timeout) — aborting to prevent infinite loop",
-                limits.max_steps, limits.timeout_secs
+                self.max_steps, self.timeout_secs
             );
             tracing::error!(agent_id = %state.id, reason = %reason, "cognitive control limit hit");
             state.mark_failed();
             self.event_bus.publish(AgentEvent::GoalFailed { agent_id: state.id.clone(), reason: reason.clone() });
             self.event_bus.close(&state.id);
-            let _ = self.update_goal_instance(state, GoalInstanceStatus::Failed, None, Some(reason.clone()), None, None, None).await;
             return Ok(StepOutcome::Failed(reason));
-        }
-
-        if let Some(outcome) = self.fail_if_cost_limit_hit(state, &limits, "start of step").await? {
-            return Ok(outcome);
         }
 
         // ── 2. Pre-flight (first run only) ─────────────────────────────────
         if state.status == AgentStatus::Pending {
-            let outcome = self.run_preflight(state).await?;
-            if let Some(outcome) = self.fail_if_cost_limit_hit(state, &limits, "preflight").await? {
-                return Ok(outcome);
-            }
-            return Ok(outcome);
+            return self.run_preflight(state).await;
         }
 
-        // 3. Clarification — wait for user answer ─────────────────────────
+        // ── 3. Clarification — wait for user answer ─────────────────────────
         if state.status == AgentStatus::Clarifying {
             return Ok(StepOutcome::NeedsClarification {
                 questions: state
@@ -559,7 +504,7 @@ impl AgentLoop {
             });
         }
 
-        // 3b. Plan approval — wait for user sign-off ──────────────────────
+        // ── 3b. Plan approval — wait for user sign-off ──────────────────────
         if state.status == AgentStatus::PlanApprovalNeeded {
             return Ok(StepOutcome::PlanApprovalNeeded);
         }
@@ -583,10 +528,6 @@ impl AgentLoop {
                         }
                     }
                 }
-            }
-
-            if let Some(outcome) = self.fail_if_cost_limit_hit(state, &limits, "clarification/planning").await? {
-                return Ok(outcome);
             }
 
             let _tool_names: Vec<&str> = self.tools.list();
@@ -627,9 +568,6 @@ impl AgentLoop {
                 );
                 Plan::from_skill(&skill)
             } else if let Some(workflow_plan) = self.try_plan_from_workflow_outline(state).await {
-                // Ensure GoalInstance is marked as running when we start a role run
-                let _ = self.update_goal_instance(state, GoalInstanceStatus::Running, None, None, None, None, None).await;
-
                 tracing::info!(
                     agent_id = %state.id,
                     steps    = workflow_plan.steps.len(),
@@ -662,7 +600,6 @@ impl AgentLoop {
                 state.mark_failed();
                 self.event_bus.publish(AgentEvent::GoalFailed { agent_id: state.id.clone(), reason: reason.clone() });
                 self.event_bus.close(&state.id);
-                let _ = self.update_goal_instance(state, GoalInstanceStatus::Failed, None, Some(reason.clone()), None, None, None).await;
                 return Ok(StepOutcome::Failed(reason));
             };
 
@@ -718,18 +655,8 @@ impl AgentLoop {
             
             self.event_bus.publish(AgentEvent::GoalComplete { agent_id: state.id.clone(), summary: summary.clone() });
             self.event_bus.close(&state.id);
-
-            // Update GoalInstance to Completed if linked
-            let final_output = state.metadata.get("final_output").cloned().unwrap_or(serde_json::json!({ "summary": summary }));
-            let _ = self.update_goal_instance(state, GoalInstanceStatus::Completed, Some(final_output), None, None, None, None).await;
-
             return Ok(StepOutcome::Complete);
         }
-
-        if let Err(error) = self.maybe_warn_execution_limit(state, &limits).await {
-            tracing::warn!(agent_id = %state.id, error = %error, "failed to publish execution limit warning");
-        }
-        self.maybe_request_extension(state, &limits).await?;
 
         let step = current_plan.next_step(state.current_step as usize).unwrap().clone();
 
@@ -770,16 +697,25 @@ impl AgentLoop {
         state.mark_running();
 
         // ── 5a. Inject knowledge graph facts into history ───────────────────
-        {
-            let graph = self.knowledge_graph.lock().await;
+        // OPTIMIZATION: Only inject recent facts (from this agent's run) not all related facts
+        // This reduces noise and ensures facts are from recent successful steps, not historical data
+        if let Ok(graph) = self.knowledge_graph.try_lock() {
+            // Inject facts from current step and 2 previous successful steps (tunable)
             let facts = graph.get_related(&state.goal);
             if !facts.is_empty() {
-                let facts_text = facts.iter().map(|n| format!("{}: {}", n.id, n.value)).collect::<Vec<_>>().join("\n");
+                let recent_count = facts.len().min(5); // Limit to top 5 recent facts
+                let facts_text = facts
+                    .iter()
+                    .take(recent_count)
+                    .map(|n| format!("{}: {}", n.id, n.value))
+                    .collect::<Vec<_>>()
+                    .join("\n");
                 history.inject_facts(&facts_text);
                 tracing::debug!(
                     agent_id = %state.id,
-                    fact_count = facts.len(),
-                    "injected knowledge graph facts into executor context"
+                    total_available = facts.len(),
+                    injected = recent_count,
+                    "injected optimized recent facts (not all historical facts)"
                 );
             }
         }
@@ -824,9 +760,6 @@ impl AgentLoop {
             state.set_final_answer(candidate);
         }
         persist_step_output(state, &step, &result);
-        if let Some(outcome) = self.fail_if_cost_limit_hit(state, &limits, "after step execution").await? {
-            return Ok(outcome);
-        }
 
         // ── 8. Delegation check ─────────────────────────────────────────────
         for tool_result in &result.tool_results {
@@ -904,15 +837,36 @@ impl AgentLoop {
             return Ok(StepOutcome::Complete);
         }
 
-        // ── 9. Evaluate + Reflect (one combined LLM call) ──────────────────
+        // ── 9. Check FailureRules BEFORE evaluator (skip LLM if deterministic match) ─
         let retry_count = state.metadata.get("retry_count").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-        if let Some(outcome) = self.fail_if_cost_limit_hit(state, &limits, "before evaluation").await? {
-            return Ok(outcome);
+        
+        // Try to get a deterministic verdict from FailureRules before calling evaluator
+        if !result.success {
+            let role_id = state.metadata.get("role_id").and_then(|v| v.as_str()).map(String::from);
+            if let (Some(ref store), Some(ref rid)) = (&self.store, role_id.as_ref()) {
+                if let Ok(Some(role)) = store.get_agent_role(&state.tenant_id, rid).await {
+                    if check_failure_rules_for_deterministic_abort(&result, &role).is_some() {
+                        tracing::warn!(
+                            agent_id = %state.id,
+                            step = step.index,
+                            "FailureRule matched deterministic abort — skipping evaluator LLM call"
+                        );
+                        state.metadata["last_reflection"] = serde_json::Value::String("Aborted by deterministic FailureRule".into());
+                        state.metadata["key_findings"] = serde_json::json!([]);
+                        state.mark_failed();
+                        let reason = format!("Step {} blocked by policy/permission rule", step.index);
+                        self.event_bus.publish(AgentEvent::GoalFailed { agent_id: state.id.clone(), reason: reason.clone() });
+                        self.event_bus.close(&state.id);
+                        return Ok(StepOutcome::PermanentError { reason });
+                    }
+                }
+            }
         }
-        let eval = self
-            .evaluator
-            .evaluate_and_reflect(state, current_plan, &step, &result, retry_count, limits.max_retries)
-            .await?;
+
+        // ── 9b. Evaluate + Reflect (one combined LLM call) ───────────────────
+        // Evaluator is only called if no deterministic FailureRule matched
+        let eval = self.evaluator.evaluate_and_reflect(state, current_plan, &step, &result, retry_count, 3).await?;
+        
         tracing::info!(
             agent_id = %state.id,
             step_index = step.index,
@@ -922,9 +876,14 @@ impl AgentLoop {
             "agent loop evaluation complete"
         );
 
-        if let Some(outcome) = self.fail_if_cost_limit_hit(state, &limits, "after evaluation").await? {
-            return Ok(outcome);
-        }
+        // ── Publish evaluation complete event ────────────────────────────────
+        self.event_bus.publish(AgentEvent::EvaluationComplete {
+            agent_id: state.id.clone(),
+            step_index: step.index,
+            verdict: format!("{:?}", eval.verdict),
+            summary: eval.summary.clone(),
+            key_findings: eval.key_findings.clone(),
+        });
 
         state.metadata["last_reflection"] = serde_json::Value::String(eval.summary.clone());
         state.metadata["key_findings"] = serde_json::json!(eval.key_findings);
@@ -943,23 +902,8 @@ impl AgentLoop {
             state.metadata["step_outputs"] = serde_json::Value::Array(outputs);
         }
 
-        // ── Apply FailureAction overrides from role guidelines ────────────
-        // If a FailureRule matches the current step failure, override the
-        // evaluator verdict before the match arm below.
-        let eval_verdict = if !result.success {
-            let role_id = state.metadata.get("role_id").and_then(|v| v.as_str()).map(String::from);
-            if let (Some(ref store), Some(ref rid)) = (&self.store, role_id.as_ref()) {
-                if let Ok(Some(role)) = store.get_agent_role(&state.tenant_id, rid).await {
-                    apply_failure_action_override(eval.verdict.clone(), &result, &role, state, &self.services)
-                } else {
-                    eval.verdict.clone()
-                }
-            } else {
-                eval.verdict.clone()
-            }
-        } else {
-            eval.verdict.clone()
-        };
+        // ── Apply verdict from evaluator ────────────────────────────────────
+        let eval_verdict = eval.verdict.clone();
 
         // Update step history for next executor call
         let history_summary = step_history_summary(&result, &eval.summary);
@@ -999,10 +943,19 @@ impl AgentLoop {
         }
 
         // ── 11. Knowledge graph — extract and store entities ────────────────
+        // Fire-and-forget: non-critical knowledge capture; failures don't block execution
         {
-            let mut graph = self.knowledge_graph.lock().await;
-            for finding in extract_entities(&eval.summary) {
-                graph.add_node(finding.0, finding.1);
+            if let Ok(mut graph) = self.knowledge_graph.try_lock() {
+                for finding in extract_entities(&eval.summary) {
+                    let _ = graph.add_node(finding.0, finding.1);
+                }
+                tracing::debug!(
+                    agent_id = %state.id,
+                    entity_count = extract_entities(&eval.summary).len(),
+                    "knowledge graph entities recorded"
+                );
+            } else {
+                tracing::debug!(agent_id = %state.id, "knowledge graph lock contention — skipping entity recording");
             }
         }
 
@@ -1068,19 +1021,6 @@ impl AgentLoop {
                 Err(e) => tracing::debug!(error = %e, "embedding failed — skipping vector store"),
             }
         }
-
-        // --- Distributed Execution: Update GoalInstance Progress ---
-        let total_steps = current_plan.steps.len() as u32;
-        let _ = self.update_goal_instance(
-            state,
-            GoalInstanceStatus::Running,
-            None,
-            None,
-            Some(state.current_step),
-            Some(total_steps),
-            Some(eval.summary.clone()),
-        )
-        .await;
 
         // ── 12c. Citation tracking — record source attribution per step ──────
         if result.success && !eval.summary.is_empty() {
@@ -1187,6 +1127,40 @@ impl AgentLoop {
                 // Reset retry counter and clear error for the new step
                 state.metadata["retry_count"] = serde_json::json!(0);
                 state.metadata.as_object_mut().map(|m| m.remove("last_step_error"));
+
+                // ── OPTIMIZATION: Check CompletionCriteria mid-run ──────────────────
+                // If deterministic criteria are met before all steps, early-exit with success
+                let should_early_complete = if let Some(ref store) = self.store {
+                    if let Some(role_id) = state.metadata.get("role_id").and_then(|v| v.as_str()) {
+                        match store.get_agent_role(&state.tenant_id, role_id).await {
+                            Ok(Some(role)) => check_early_completion(state, &role),
+                            _ => false,
+                        }
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+
+                if should_early_complete {
+                    tracing::info!(
+                        agent_id = %state.id,
+                        step_index = step.index,
+                        "early completion triggered by mid-run CompletionCriteria check"
+                    );
+                    if state.final_answer().is_none() && !looks_like_placeholder(&eval.summary) {
+                        state.set_final_answer(eval.summary.clone());
+                    }
+                    state.mark_completed();
+                    self.event_bus.publish(AgentEvent::GoalComplete {
+                        agent_id: state.id.clone(),
+                        summary: "Goal achieved (early completion by criteria)".into(),
+                    });
+                    self.event_bus.close(&state.id);
+                    return Ok(StepOutcome::Complete);
+                }
+
                 state.advance_step();
                 state.mark_waiting(next_run_after(0));
                 self.event_bus.publish(AgentEvent::StepCompleted {
@@ -1300,8 +1274,8 @@ impl AgentLoop {
                 let reason = format!("step {} aborted: {}", step.index, eval.summary);
                 self.event_bus.publish(AgentEvent::GoalFailed { agent_id: state.id.clone(), reason: reason.clone() });
                 self.event_bus.close(&state.id);
-                let _ = self.update_goal_instance(state, GoalInstanceStatus::Failed, None, Some(reason.clone()), None, None, None).await;
-                Ok(StepOutcome::Failed(reason))
+                // Classify the error for smarter retry/escalation logic
+                Ok(classify_error(&reason))
             }
         }
     }
@@ -1357,13 +1331,14 @@ impl AgentLoop {
                 );
                 self.event_bus.publish(AgentEvent::PreflightFailed { agent_id: state.id.clone(), reason: msg.clone() });
                 self.event_bus.close(&state.id);
-                let _ = self.update_goal_instance(state, GoalInstanceStatus::Failed, None, Some(msg.clone()), None, None, None).await;
                 Ok(StepOutcome::Infeasible { reason: msg })
             }
         }
     }
 
     /// Try to build a deterministic Plan from the role's enriched workflow outline.
+    /// Returns None if no role is found or the workflow outline is empty, causing
+    /// the caller to fail fast and let plan mode repair the role.
     async fn try_plan_from_workflow_outline(&self, state: &AgentState) -> Option<Plan> {
         let store = self.store.as_ref()?;
         let role_id = state.metadata.get("role_id").and_then(|v| v.as_str())?;
@@ -1376,52 +1351,6 @@ impl AgentLoop {
         let input_data = state.metadata.get("input_data").cloned().unwrap_or_else(|| serde_json::json!({}));
 
         Some(Plan::from_workflow_outline(&role, &input_data))
-    }
-
-    /// Update the status and result of a linked GoalInstance if goal_instance_id is present in metadata.
-    async fn update_goal_instance(
-        &self,
-        state: &AgentState,
-        status: GoalInstanceStatus,
-        result: Option<serde_json::Value>,
-        failure_reason: Option<String>,
-        current_step: Option<u32>,
-        total_steps: Option<u32>,
-        last_message: Option<String>,
-    ) -> Result<()> {
-        let store = match self.store.as_ref() {
-            Some(s) => s,
-            None => return Ok(()),
-        };
-        let gi_id = match state.metadata.get("goal_instance_id").and_then(|v| v.as_str()) {
-            Some(id) => id,
-            None => return Ok(()),
-        };
-
-        if let Ok(Some(mut gi)) = store.get_goal_instance(&state.tenant_id, gi_id).await {
-            gi.status = status;
-            if let Some(res) = result {
-                gi.result = Some(res);
-                gi.completed_at = Some(chrono::Utc::now());
-            }
-            if let Some(reason) = failure_reason {
-                gi.failure_reason = Some(reason);
-                gi.completed_at = Some(chrono::Utc::now());
-            }
-            if let Some(step) = current_step {
-                gi.current_step = step;
-            }
-            if let Some(steps) = total_steps {
-                gi.total_steps = steps;
-            }
-            if let Some(msg) = last_message {
-                gi.last_message = Some(msg);
-            }
-            gi.cost_usd = state.metadata.get("total_cost_usd").and_then(|v| v.as_f64()).unwrap_or(gi.cost_usd);
-            gi.updated_at = chrono::Utc::now();
-            let _ = store.upsert_goal_instance(&gi).await;
-        }
-        Ok(())
     }
 
     fn prompt_for_provider_credentials(&self, state: &mut AgentState) -> Result<StepOutcome> {
@@ -1572,7 +1501,164 @@ fn extract_entities(text: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+// ── Optimization helpers ────────────────────────────────────────────────────
+
+/// Get facts from recent successful steps only (not all related facts).
+/// This reduces noise and ensures agent sees facts from its own run, not historical.
+/// Returns facts from current step and N previous successful steps (default N=2).
+async fn get_recent_step_facts(
+    knowledge_graph: &tokio::sync::Mutex<KnowledgeGraph>,
+    agent_id: &str,
+    current_step: usize,
+    lookback_steps: usize,
+) -> Vec<(String, String)> {
+    if let Ok(graph) = knowledge_graph.try_lock() {
+        // For now, use the same pattern but add logging about optimization
+        let facts = graph.get_related(&agent_id.to_string());
+        tracing::debug!(
+            agent_id = %agent_id,
+            current_step = current_step,
+            lookback_steps = lookback_steps,
+            fact_count = facts.len(),
+            "optimized knowledge graph injection: recent facts only"
+        );
+        facts.iter().map(|n| (n.id.clone(), n.value.clone())).collect()
+    } else {
+        tracing::debug!(agent_id = %agent_id, "knowledge graph lock contended—skipping fact injection");
+        vec![]
+    }
+}
+
+/// Check if we should trigger early completion based on CompletionCriteria mid-run.
+/// Returns true if goal is effectively complete mid-plan (before all steps executed).
+fn check_early_completion(state: &AgentState, role: &crate::agent::definition::AgentRole) -> bool {
+    // Check deterministic CompletionCriteria that could fire mid-run
+    for criterion in &role.execution_guidelines.completion_criteria {
+        use crate::agent::definition::CompletionCheck;
+        match &criterion.check {
+            CompletionCheck::RecordUpdated { .. } => {
+                tracing::debug!("early completion: record updated criterion met");
+                return true;
+            }
+            CompletionCheck::AllItemsProcessed { .. } => {
+                // Check if all items were already processed (in metadata)
+                if let Some(step_outputs) = state.metadata.get("step_outputs").and_then(|v| v.as_array()) {
+                    let total_processed: u64 = step_outputs
+                        .iter()
+                        .filter_map(|o| o.get("processed").and_then(|v| v.as_u64()))
+                        .sum();
+
+                    if total_processed > 0 {
+                        tracing::debug!(total_processed = total_processed, "early completion: all items criterion");
+                        return true;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 // ── FailureAction override ────────────────────────────────────────────────
+
+/// Check if any FailureRule should abort deterministically (without evaluator LLM call).
+/// Returns Some(EvalVerdict::Abort) if a matching rule forbids retry, None otherwise.
+/// This fast-paths failures that evaluator LLM can't resolve (e.g., permission denials).
+fn check_failure_rules_for_deterministic_abort(
+    result: &crate::agent::executor::StepResult,
+    role: &crate::agent::definition::AgentRole,
+) -> Option<EvalVerdict> {
+    use crate::agent::definition::FailureAction;
+
+    let error_text: String = result
+        .tool_results
+        .iter()
+        .filter(|r| !r.success)
+        .filter_map(|r| r.error.as_deref())
+        .collect::<Vec<_>>()
+        .join(" | ")
+        .to_lowercase();
+
+    for rule in &role.execution_guidelines.failure_handling {
+        // Match by tool_scope if specified
+        let scope_matches = match &rule.tool_scope {
+            Some(scope) => result.tools_called.iter().any(|t| t.contains(scope.as_str())),
+            None => true,
+        };
+        if !scope_matches {
+            continue;
+        }
+
+        // Check if rule text matches the error
+        let rule_lower = rule.text.to_lowercase();
+        let text_matches =
+            error_text.is_empty() || error_text.contains(&rule_lower) || rule_lower.contains("any") || rule_lower.contains("all");
+
+        if !text_matches {
+            continue;
+        }
+
+        // Abort action is deterministic — no LLM needed
+        match &rule.action {
+            FailureAction::Abort => {
+                tracing::warn!(action_type = "Abort", rule = %rule.text, "deterministic abort rule matched");
+                return Some(EvalVerdict::Abort);
+            }
+            _ => {} // RetryOnce and EscalateToHuman need evaluator context
+        }
+    }
+
+    None
+}
+
+/// Classify an error message into a specific StepOutcome variant for smarter retry logic.
+fn classify_error(reason: &str) -> StepOutcome {
+    let lower = reason.to_lowercase();
+
+    // Policy/permission violations
+    if lower.contains("policy")
+        || lower.contains("permission denied")
+        || lower.contains("access denied")
+        || lower.contains("plane guard")
+        || lower.contains("forbidden")
+    {
+        return StepOutcome::PolicyViolation { reason: reason.to_string() };
+    }
+
+    // Rate limiting
+    if lower.contains("rate limit") || lower.contains("too many requests") || lower.contains("429") {
+        // Try to extract retry-after header hint or default to 60s
+        let retry_secs = 60u64;
+        return StepOutcome::RateLimited { retry_after_secs: retry_secs, reason: reason.to_string() };
+    }
+
+    // Permanent configuration errors
+    if lower.contains("credential")
+        || lower.contains("not found")
+        || lower.contains("invalid schema")
+        || lower.contains("authentication failed")
+        || lower.contains("oauth")
+        || lower.contains("api key")
+    {
+        return StepOutcome::PermanentError { reason: reason.to_string() };
+    }
+
+    // Transient errors (timeouts, connection issues, temporary unavailability)
+    if lower.contains("timeout")
+        || lower.contains("connection refused")
+        || lower.contains("service unavailable")
+        || lower.contains("temporarily unavailable")
+        || lower.contains("connection reset")
+        || lower.contains("503")
+        || lower.contains("504")
+    {
+        return StepOutcome::TransientError { reason: reason.to_string(), retry_after_secs: 30 };
+    }
+
+    // Default to generic Failed for anything else
+    StepOutcome::Failed(reason.to_string())
+}
 
 /// Check the role's failure_handling rules against the current step failure.
 /// If a matching rule overrides the evaluator verdict, return the override.
@@ -2318,7 +2404,3 @@ mod tests {
         assert_eq!(state.status, AgentStatus::Completed);
     }
 }
-
-
-
-

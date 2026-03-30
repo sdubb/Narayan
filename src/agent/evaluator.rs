@@ -186,6 +186,45 @@ impl Evaluator for LlmEvaluator {
             });
         }
 
+        // ── Fast-path: policy or plane guard rejection — abort immediately ───
+        // If the plane guard or policy engine rejected the tool call, an LLM
+        // won't help — need explicit user approval or role revision.
+        if !result.success {
+            let policy_errors: Vec<String> = result
+                .tool_results
+                .iter()
+                .filter(|r| !r.success)
+                .filter_map(|r| r.error.as_ref())
+                .filter(|e| {
+                    let msg = e.to_ascii_lowercase();
+                    msg.contains("policy_blocked")
+                        || msg.contains("plane guard")
+                        || msg.contains("access denied")
+                        || msg.contains("policy violation")
+                })
+                .map(|e| e.to_string())
+                .collect();
+
+            if !policy_errors.is_empty() {
+                tracing::warn!(
+                    agent_id = %state.id,
+                    step = step.index,
+                    "policy/plane guard rejection — aborting without LLM call"
+                );
+                return Ok(EvalReflection {
+                    verdict: EvalVerdict::Abort,
+                    summary: format!(
+                        "step {} aborted due to policy violation: {}",
+                        step.index,
+                        policy_errors.join("; ")
+                    ),
+                    key_findings: policy_errors,
+                    should_revise: false,
+                    revision_feedback: "Role permissions or plane guard rules need updating.".into(),
+                });
+            }
+        }
+
         // ── Fast-path: repeated identical error — abort early ─────────────────
         // If the current error is the same as the previous attempt's error,
         // the LLM is unlikely to fix it on its own (e.g., missing OAuth token,

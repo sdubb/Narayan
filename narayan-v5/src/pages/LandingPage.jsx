@@ -1,28 +1,29 @@
 import { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
 import { ArrowRight, Bot, CheckCircle2, Database, FileText, Layers3, MessageSquareText, Plug, Scale, Search, ShieldCheck, Sparkles, Workflow, Zap, } from 'lucide-react';
+import BenefitsScroller from '../components/BenefitsScroller';
 
 const stats = [
   { value: 'Write', label: 'Describe the job in plain English. The agent learns the playbook.' },
-  { value: 'Validate', label: 'Test connections, verify workflows, and catch issues before deployment.' },
-  { value: 'Deploy', label: 'The agent executes 24/7. Audit trails log every decision and action.' },
+  { value: 'Check', label: 'Test connections, verify the setup, and catch issues before launch.' },
+  { value: 'Launch', label: 'The agent runs 24/7 and keeps a clear record of what happened.' },
 ];
 
 const pillars = [
   {
     icon: Workflow,
-    title: 'No salary, benefits, or overhead',
+    title: 'Scale without adding headcount',
     text: 'Pay only for work done. Agents stay on demand, not on payroll, so teams can scale without hiring delays.',
   },
   {
     icon: ShieldCheck,
-    title: 'Deterministic and auditable',
-    text: 'Every decision is recorded, replayable, and tied back to the exact inputs that produced it.',
+    title: 'Clear and traceable',
+    text: 'Every decision is recorded, replayable, and tied back to the inputs that produced it.',
   },
   {
     icon: Layers3,
-    title: 'Any role, any workflow',
-    text: 'Finance, support, legal, sales, and research all run on the same platform and the same controls.',
+    title: 'Fits many teams',
+    text: 'Finance, support, legal, sales, and research all run on the same platform and controls.',
   },
   {
     icon: Plug,
@@ -33,8 +34,8 @@ const pillars = [
 
 const steps = [
   { title: 'Write the job', text: 'Describe what you need done in plain language and define the approval rules.' },
-  { title: 'Agent learns it', text: 'Validate connectors, test permissions, and simulate the workflow before launch.' },
-  { title: 'It runs 24/7', text: 'The agent executes the job specification autonomously while logging every action.' },
+  { title: 'Check the setup', text: 'Validate connectors, test permissions, and simulate the run before launch.' },
+  { title: 'It runs 24/7', text: 'The agent executes the job on its own and keeps a full log.' },
 ];
 
 const examples = [
@@ -133,8 +134,8 @@ function CommandSurface() {
       <div className="relative">
         <div className="flex items-center justify-between gap-4 border-b border-white/10 pb-4">
           <div>
-            <p className="text-[0.7rem] uppercase tracking-[0.28em] text-white/45">Live workspace</p>
-            <p className="mt-1 text-lg font-medium">Narayan command surface</p>
+            <p className="text-[0.7rem] uppercase tracking-[0.28em] text-white/45">Live workflow</p>
+            <p className="mt-1 text-lg font-medium">Narayan operations view</p>
           </div>
           <div className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-white/75">
             {stageItems[stage].status}
@@ -143,12 +144,12 @@ function CommandSurface() {
 
         <div className="grid gap-5 py-5 lg:grid-cols-[1.05fr_0.95fr]">
           <div className="rounded-[1.5rem] border border-white/10 bg-white/[0.03] p-5">
-            <p className="text-[0.7rem] uppercase tracking-[0.28em] text-white/45">{stageItems[stage].title}</p>
+            <p className="text-[0.7rem] uppercase tracking-[0.28em] text-white/45">Current step</p>
             <p className="mt-4 text-2xl leading-tight text-white">{stageItems[stage].copy}</p>
 
             <div className="mt-6 flex items-center gap-3 text-sm text-white/70">
               <span className="size-2 rounded-full bg-emerald-400" />
-              Validation is active
+              Checks are on
               <span className="size-1.5 rounded-full bg-white/20" />
               Replay available
             </div>
@@ -167,7 +168,7 @@ function CommandSurface() {
           </div>
 
           <div className="rounded-[1.5rem] border border-white/10 bg-white/[0.03] p-5">
-            <p className="text-[0.7rem] uppercase tracking-[0.28em] text-white/45">Systems connected</p>
+            <p className="text-[0.7rem] uppercase tracking-[0.28em] text-white/45">Connected systems</p>
             <div className="mt-4 flex flex-wrap gap-2">
               {['Gmail', 'QuickBooks', 'Workspace', 'Slack'].map(item => (
                 <span key={item} className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-white/70">
@@ -206,7 +207,7 @@ function CommandSurface() {
 
         <div className="flex items-center gap-2 border-t border-white/10 pt-4 text-xs text-white/50">
           <Zap className="size-3.5 text-amber-300" />
-          Write, validate, deploy, audit
+          Plan, check, run, review
         </div>
       </div>
     </motion.div>
@@ -348,7 +349,7 @@ export default function LandingPage({ onEnterApp, onSignIn }) {
             </h1>
 
             <p className="mt-5 max-w-lg text-base leading-7 text-tx-2 sm:text-lg">
-              No salary. No benefits. No hiring cycle. Deploy agents for finance, support, legal, sales, and research.
+              Deploy agents for finance, support, legal, sales, and research without adding another person to the queue.
               Every action is logged. Every workflow stays auditable.
             </p>
 
@@ -385,7 +386,7 @@ export default function LandingPage({ onEnterApp, onSignIn }) {
           <SectionHeading
             eyebrow="Job examples"
             title="Agents at work. Real roles, real results."
-            text="Write these job specs once. Agents execute them 24/7 with full audit trails and compliance built in."
+            text="Write these job specs once. Agents execute them 24/7 with logs and approvals built in."
           />
 
           <div className="mt-8 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
@@ -405,7 +406,7 @@ export default function LandingPage({ onEnterApp, onSignIn }) {
           <SectionHeading
             eyebrow="How agents connect"
             title="Multi-role agents. Any connector. Any system."
-            text="One agent can handle multiple roles. Each role reads from incoming connectors and writes to outbound channels while staying deterministic and logged."
+            text="One agent can handle multiple tasks. Each task reads from its connectors and sends output to the right place."
           />
 
           <div className="mt-8 overflow-hidden rounded-[2rem] border border-border bg-bg-card/85">
@@ -435,7 +436,7 @@ export default function LandingPage({ onEnterApp, onSignIn }) {
                   {[
                     ['Email', 'Send approvals, escalations, and summaries'],
                     ['Slack', 'Notify the right people in real time'],
-                    ['Audit', 'Log every action for replay and review'],
+                    ['Logs', 'Keep a record for review and replay'],
                   ].map(([name, detail]) => (
                     <div key={name} className="flex items-center gap-3 rounded-2xl border border-border bg-bg px-4 py-3">
                       <div className="size-2.5 rounded-full bg-accent" />
@@ -498,6 +499,8 @@ export default function LandingPage({ onEnterApp, onSignIn }) {
           </div>
         </section>
 
+        <BenefitsScroller />
+
         <div className="my-12 flex items-center gap-4">
           <div className="h-px flex-1 bg-gradient-to-r from-transparent via-border to-transparent" />
           <ShieldCheck className="size-4 text-accent/40" />
@@ -545,7 +548,7 @@ export default function LandingPage({ onEnterApp, onSignIn }) {
                   Hire your first digital employee
                 </h2>
                 <p className="mt-4 text-base leading-7 text-tx-2">
-                  Write a job spec. Validate connections. Deploy. Your agent works 24/7, audits everything, and escalates
+                  Write a job spec. Check the connections. Launch. Your agent works 24/7, keeps a record, and escalates
                   when needed.
                 </p>
               </div>

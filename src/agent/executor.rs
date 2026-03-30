@@ -31,7 +31,14 @@ use crate::{
     state::AgentState,
     storage::PostgresStore,
     tenant::TenantStore,
-    tools::{selector::select_tools_for_step, ParameterSchema, ToolRegistry, ToolResult},
+    tools::{
+        parameters_schema_to_json,
+        selector::select_tools_for_step,
+        validate_output_against_schema,
+        ParameterSchema,
+        ToolRegistry,
+        ToolResult,
+    },
 };
 
 const WORKSPACE_TOOLS_DIR: &str = ".narayan_tools";
@@ -76,6 +83,42 @@ struct WorkspaceGeneratedTool {
     script_path: String,
     timeout_secs: u64,
     input_schema: Option<serde_json::Value>,
+}
+
+fn workspace_generated_tool_output_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "required": ["workspace_tool", "language", "script_path", "result"],
+        "properties": {
+            "workspace_tool": { "type": "string" },
+            "language": { "type": "string" },
+            "script_path": { "type": "string" },
+            "result": { "type": "object", "additionalProperties": true },
+        },
+        "additionalProperties": true,
+    })
+}
+
+fn validate_tool_output_result(tool_name: &str, result: ToolResult, schema: Option<&serde_json::Value>) -> ToolResult {
+    if !result.success {
+        return result;
+    }
+
+    let Some(schema) = schema else {
+        return result;
+    };
+
+    if let Err(err) = validate_output_against_schema(tool_name, &result.output, schema) {
+        tracing::warn!(
+            tool = %tool_name,
+            error = %err,
+            output = %truncate_for_log(&serde_json::to_string(&result.output).unwrap_or_default(), 1200),
+            "tool output schema validation failed"
+        );
+        return ToolResult::err(format!("tool '{}' returned output that does not match its schema: {}", tool_name, err));
+    }
+
+    result
 }
 
 fn sanitize_final_answer_candidate(output: &str) -> Option<String> {
@@ -301,12 +344,17 @@ fn build_workspace_tool_spec(tool: &WorkspaceGeneratedTool) -> crate::providers:
 
     crate::providers::ToolSpec {
         name: tool.name.clone(),
-        description: format!("{} (workspace custom tool, language={})", tool.description, tool.language),
+        description: format!(
+            "{} (workspace custom tool, language={}). Use when: the plan already approved this custom workspace logic. Avoid when: data_engine or existing built-in tools can express the task. Output schema: {{ workspace_tool, language, script_path, result }} where result is the JSON returned by code_run.",
+            tool.description,
+            tool.language
+        ),
         parameters: serde_json::json!({
             "type": "object",
             "properties": properties,
-            "required": Vec::<String>::new(),
+                "required": Vec::<String>::new(),
         }),
+        output_schema: Some(workspace_generated_tool_output_schema()),
     }
 }
 
@@ -843,29 +891,24 @@ fn build_tenant_connector_spec(tc: &crate::agent::definition::TenantConnector) -
 
     let ops_hint = if ops.is_empty() { format!("Custom connector at {}", tc.base_url) } else { ops.join("; ") };
 
-    let description = format!("{}. Operations: {}", tc.summary, &ops_hint[..ops_hint.len().min(500)],);
+    let description = format!(
+        "{}. Use when: the agent needs this tenant connector. Input: {{ operation, params?, auth_token? }}; tenant_id, goal_instance_id, and step_index are injected by the executor. Output: connector-specific JSON from the selected operation. The exact fields depend on the endpoint. Operations: {}",
+        tc.summary,
+        &ops_hint[..ops_hint.len().min(500)],
+    );
 
     crate::providers::ToolSpec {
         name: tc.name.clone(),
         description,
-        parameters: serde_json::json!({
+        parameters: parameters_schema_to_json(&[
+            ParameterSchema::required("operation", "string", "The operation/endpoint to call."),
+            ParameterSchema::optional("params", "object", "Operation parameters as a JSON object."),
+            ParameterSchema::optional("auth_token", "string", "Optional override bearer token."),
+        ]),
+        output_schema: Some(serde_json::json!({
             "type": "object",
-            "properties": {
-                "operation": {
-                    "type": "string",
-                    "description": "The operation/endpoint to call."
-                },
-                "params": {
-                    "type": "object",
-                    "description": "Operation parameters as a JSON object."
-                },
-                "auth_token": {
-                    "type": "string",
-                    "description": "Optional override bearer token."
-                }
-            },
-            "required": ["operation"]
-        }),
+            "additionalProperties": true,
+        })),
     }
 }
 
@@ -1174,27 +1217,7 @@ impl LlmExecutor {
                     if let Some(name) = connector_json["name"].as_str() {
                         if !current_names.contains(name) {
                             if let Some(spec) = self.tools.get(name) {
-                                tool_specs.push(crate::providers::ToolSpec {
-                                    name: spec.name().to_string(),
-                                    description: spec.description().to_string(),
-                                    parameters: serde_json::json!({
-                                        "type": "object",
-                                        "properties": spec.parameters_schema().iter().fold(
-                                            serde_json::Map::new(),
-                                            |mut acc, p| {
-                                                acc.insert(p.name.clone(), serde_json::json!({
-                                                    "type":        p.param_type,
-                                                    "description": p.description,
-                                                }));
-                                                acc
-                                            }
-                                        ),
-                                        "required": spec.parameters_schema().iter()
-                                            .filter(|p| p.required)
-                                            .map(|p| p.name.clone())
-                                            .collect::<Vec<_>>(),
-                                    }),
-                                });
+                                tool_specs.push(crate::tools::tool_spec_from_tool(spec.as_ref()));
                             }
                         }
                     }
@@ -1923,9 +1946,9 @@ impl Executor for LlmExecutor {
             }
 
             // ── 4. Execute ───────────────────────────────────────────────────────
-            let execution = if let Some(workspace_tool) = workspace_tool {
-                self.execute_workspace_generated_tool(&workspace_tool, clean_args, state).await
-            } else if let Some(tool) = builtin_tool {
+            let execution = if let Some(ref workspace_tool) = workspace_tool {
+                self.execute_workspace_generated_tool(workspace_tool, clean_args, state).await
+            } else if let Some(ref tool) = builtin_tool {
                 tool.execute(clean_args).await
             } else {
                 Ok(ToolResult::err(format!("tool '{}' is unavailable", tool_call.name)))
@@ -1933,7 +1956,13 @@ impl Executor for LlmExecutor {
 
             match execution {
                 Ok(result) => {
-                    let filtered_result = apply_result_relevance_filter(&tool_call.name, result, state, step);
+                    let result = apply_result_relevance_filter(&tool_call.name, result, state, step);
+                    let schema = if workspace_tool.is_some() {
+                        Some(workspace_generated_tool_output_schema())
+                    } else {
+                        builtin_tool.as_ref().and_then(|tool| tool.output_schema())
+                    };
+                    let filtered_result = validate_tool_output_result(&tool_call.name, result, schema.as_ref());
                     tracing::info!(
                         agent_id = %state.id,
                         tool     = %tool_call.name,

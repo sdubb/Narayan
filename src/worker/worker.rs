@@ -166,7 +166,7 @@ impl Worker {
             }
         });
 
-        let outcome = match self.agent_loop.run_step(&mut state, &mut plan, &mut history, task_cancel_token.clone()).await {
+        let outcome = match self.agent_loop.run_step(&mut state, &mut plan, &mut history).await {
             Ok(outcome) => {
                 task_cancel_token.cancel();
                 let _ = heartbeat_handle.await;

@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import LandingPage from './pages/LandingPage';
 import AuthPage     from './pages/AuthPage';
+import DashboardPage from './pages/DashboardPage';
 import ChatPage     from './pages/ChatPage';
 import SettingsPage from './pages/SettingsPage';
 import { health }   from './api';
@@ -63,6 +64,7 @@ export default function App() {
 
   if (page === 'landing')  return <LandingPage onEnterApp={() => setPage('auth')} onSignIn={() => setPage('auth')} />;
   if (page === 'auth')     return <AuthPage onAuth={onAuth} onBack={() => setPage('landing')} />;
+  if (page === 'dashboard') return <DashboardPage onNavigate={onNavigate} />;
   if (page === 'settings') return <SettingsPage onBack={() => setPage('chat')} />;
   return <ChatPage onNavigate={onNavigate} />;
 }

@@ -317,6 +317,8 @@ export const agentDefs = {
     req('GET', `/agent-definitions/${agentId}/goal-instances?limit=${limit}`),
   listRoleInstances: (agentId, roleId, limit = 50) =>
     req('GET', `/agent-definitions/${agentId}/roles/${roleId}/goal-instances?limit=${limit}`),
+  summary: (agentId) =>
+    req('GET', `/agent-definitions/${agentId}/summary`),
   chat: (agentId, message, conversation = []) =>
     req('POST', `/agent-definitions/${agentId}/chat`, { message, conversation }),
   exportSummaryPdf: (agentId) =>
