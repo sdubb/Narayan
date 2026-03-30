@@ -54,6 +54,7 @@ pub trait Tool: Send + Sync {
     fn description(&self) -> &str;
     fn parameters_schema(&self) -> Vec<ParameterSchema>;
     async fn execute(&self, args: serde_json::Value) -> Result<ToolResult>;
+    
     fn output_schema(&self) -> Option<serde_json::Value> {
         default_output_schema(self)
     }
@@ -404,7 +405,7 @@ fn any_json_schema() -> serde_json::Value {
     })
 }
 
-pub fn default_output_schema(tool: &dyn Tool) -> Option<serde_json::Value> {
+pub fn default_output_schema<T: Tool + ?Sized>(tool: &T) -> Option<serde_json::Value> {
     if tool.category().starts_with("connector/") {
         return Some(any_json_schema());
     }
@@ -2370,7 +2371,7 @@ pub fn parameter_summary(parameters: &[ParameterSchema]) -> String {
         .join(", ")
 }
 
-fn default_when_to_use(tool: &dyn Tool) -> String {
+fn default_when_to_use<T: Tool + ?Sized>(tool: &T) -> String {
     match tool.name() {
         "shell" => "Use for workspace-local shell commands, repository inspection, and build or test commands.".into(),
         "file_read" => "Use to read existing workspace files or inspect file contents.".into(),
@@ -2445,7 +2446,7 @@ fn default_when_to_use(tool: &dyn Tool) -> String {
     }
 }
 
-fn default_input_contract(tool: &dyn Tool) -> String {
+fn default_input_contract<T: Tool + ?Sized>(tool: &T) -> String {
     match tool.name() {
         "api_call" => "Request shape: { url, credential_key, method?, auth_type?, auth_header_name?, body?, headers? }. Use a stored credential key and send JSON request data only when needed.".into(),
         "mcp_session" => "Request shape: { server_url, action, tool_name?, tool_args?, auth_token? }. action must be connect, list_tools, or call_tool; call_tool requires tool_name and tool_args.".into(),
@@ -2469,7 +2470,7 @@ fn default_input_contract(tool: &dyn Tool) -> String {
     }
 }
 
-fn default_output_contract(tool: &dyn Tool) -> String {
+fn default_output_contract<T: Tool + ?Sized>(tool: &T) -> String {
     match tool.name() {
         "api_call" => "Output: { status, body }. body is the HTTP response body as text (truncated if needed). On non-2xx responses, success is false and error explains the HTTP status.".into(),
         "mcp_session" => {
@@ -2493,7 +2494,7 @@ fn default_output_contract(tool: &dyn Tool) -> String {
     }
 }
 
-fn default_when_not_to_use(tool: &dyn Tool) -> String {
+fn default_when_not_to_use<T: Tool + ?Sized>(tool: &T) -> String {
     match tool.name() {
         "shell" => "Avoid for destructive system-wide commands, long-running daemons, and tasks better expressed as structured code or data transforms.".into(),
         "file_read" => "Avoid when you need to write or edit files, or when the target is not a workspace file.".into(),
