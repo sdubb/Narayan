@@ -33,7 +33,7 @@ const TAB_COMPONENTS = {
   billing: BillingTab,
 };
 
-export default function SettingsPage({ onBack }) {
+export default function SettingsPage({ onBack, canCreateAgents = true, onProvidersChanged }) {
   const [tab, setTab] = useState('credentials');
   const [error, setError] = useState('');
   const [ok, setOk] = useState('');
@@ -54,11 +54,17 @@ export default function SettingsPage({ onBack }) {
       <div className="sticky top-0 z-10 border-b border-border bg-bg-card/88 backdrop-blur">
         <div className="mx-auto flex max-w-5xl items-center gap-4 px-6 py-4">
           <button onClick={onBack} className="flex items-center gap-1.5 text-sm text-tx-3 transition-colors hover:text-tx-1">
-            <ChevronLeft size={15} /> Back
+            <ChevronLeft size={15} /> {canCreateAgents ? 'Back' : 'Go to workspace'}
           </button>
           <div className="min-w-0 flex-1">
-            <p className="font-serif text-2xl text-tx-1">Settings</p>
-            <p className="text-[11px] uppercase tracking-[0.22em] text-tx-4">Credentials, routing, reviews, and billing</p>
+            <p className="font-serif text-2xl text-tx-1">
+              {canCreateAgents ? 'Settings' : 'Connect your first AI provider'}
+            </p>
+            <p className="text-[11px] uppercase tracking-[0.22em] text-tx-4">
+              {canCreateAgents
+                ? 'Credentials, routing, reviews, and billing'
+                : 'Add one provider to unlock agent creation'}
+            </p>
           </div>
         </div>
         <div className="mx-auto max-w-5xl overflow-x-auto px-4 pb-0">
@@ -89,6 +95,22 @@ export default function SettingsPage({ onBack }) {
       </div>
 
       <div className="mx-auto max-w-5xl px-6 py-8">
+        {!canCreateAgents && (
+          <div className="mb-6 rounded-[1.5rem] border border-accent/20 bg-accent-soft/60 px-5 py-4 shadow-card">
+            <div className="flex items-start gap-3">
+              <div className="mt-0.5 flex size-10 items-center justify-center rounded-2xl border border-accent/20 bg-bg-card text-accent">
+                <Key size={16} />
+              </div>
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-semibold text-tx-1">Add one AI provider to continue</p>
+                <p className="mt-1 text-sm leading-6 text-tx-2">
+                  Agent creation stays paused until you save a provider API key. The rest of the workspace remains open,
+                  and we will take you back as soon as setup is done.
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
         <div className="space-y-4">
           {error && (
             <div className="flex items-start gap-2 rounded-2xl border border-err/20 bg-err-soft px-4 py-3 text-sm text-err">
@@ -110,7 +132,7 @@ export default function SettingsPage({ onBack }) {
             <h1 className="mt-2 font-serif text-2xl text-tx-1">{TABS.find(t => t.id === tab)?.label}</h1>
           </div>
           <div className="p-6">
-            {ActiveTab && <ActiveTab onFlash={flash} setError={setError} flash={flash} />}
+            {ActiveTab && <ActiveTab onFlash={flash} setError={setError} flash={flash} onProvidersChanged={onProvidersChanged} />}
           </div>
         </div>
       </div>

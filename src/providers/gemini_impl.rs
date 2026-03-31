@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use crate::providers::{ChatResponse, Message, Provider, Role, ToolSpec};
+use crate::providers::{ChatResponse, Message, Provider, Role, ToolCall, ToolSpec};
 
 pub struct GeminiProviderAdapter {
     api_key: String,
@@ -19,7 +19,7 @@ impl Provider for GeminiProviderAdapter {
         "gemini"
     }
 
-    async fn chat(&self, messages: Vec<Message>, _tools: Vec<ToolSpec>) -> anyhow::Result<ChatResponse> {
+    async fn chat(&self, messages: Vec<Message>, tools: Vec<ToolSpec>) -> anyhow::Result<ChatResponse> {
         let system = messages.iter().find(|m| matches!(m.role, Role::System)).map(|m| m.content.clone());
 
         let mut contents: Vec<serde_json::Value> = Vec::new();
@@ -41,6 +41,24 @@ impl Provider for GeminiProviderAdapter {
             });
         }
 
+        // Add tools in Gemini format (functionDeclarations)
+        if !tools.is_empty() {
+            let function_decls: Vec<serde_json::Value> = tools
+                .iter()
+                .map(|t| {
+                    serde_json::json!({
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": t.parameters,
+                    })
+                })
+                .collect();
+            
+            payload["tools"] = serde_json::json!([{
+                "functionDeclarations": function_decls
+            }]);
+        }
+
         let url = format!(
             "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
             self.model, self.api_key
@@ -50,8 +68,39 @@ impl Provider for GeminiProviderAdapter {
 
         let resp = client.post(&url).json(&payload).send().await?.json::<serde_json::Value>().await?;
 
-        let content = resp["candidates"][0]["content"]["parts"][0]["text"].as_str().map(String::from);
+        // Extract text content from parts array
+        let content = resp["candidates"][0]["content"]["parts"]
+            .as_array()
+            .and_then(|parts| {
+                parts.iter()
+                    .find(|p| p.get("text").is_some())
+                    .and_then(|text_part| text_part["text"].as_str())
+                    .map(String::from)
+            });
 
-        Ok(ChatResponse { content, tool_calls: vec![], input_tokens: 0, output_tokens: 0 })
+        // Extract tool calls from functionCalls
+        let tool_calls = resp["candidates"][0]["content"]["parts"]
+            .as_array()
+            .unwrap_or(&vec![])
+            .iter()
+            .filter_map(|part| {
+                let func_call = &part["functionCall"];
+                if func_call.is_object() {
+                    let name = func_call["name"].as_str()?.to_string();
+                    let arguments = func_call["args"].clone();
+                    // Generate a unique ID for this tool call
+                    let id = format!("gemini-fc-{}", std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_nanos());
+                    Some(ToolCall { id, name, arguments })
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Gemini doesn't provide token count directly in response
+        Ok(ChatResponse { content, tool_calls, input_tokens: 0, output_tokens: 0 })
     }
 }

@@ -99,6 +99,13 @@ export const credentials = {
   delete: (provider) => req('DELETE', `/credentials/${provider}`),
 };
 
+export const databaseConnections = {
+  test: (connection_string) =>
+    req('POST', '/connections/db/test', { connection_string }),
+  register: (name, connection_string, allow_writes = false) =>
+    req('POST', '/connections/db', { name, connection_string, allow_writes }),
+};
+
 export const providers = {
   list: () => req('GET', '/providers'),
 };

@@ -9,10 +9,11 @@ import {
   X,
   AlertCircle,
   RefreshCw,
+  Loader2,
 } from 'lucide-react';
-import { connectors } from '../../api';
+import { connectors, credentials as credentialsApi } from '../../api';
 
-const BUILT_IN_CONNECTORS = [
+export const BUILT_IN_CONNECTORS = [
   // OAuth
   { id: 'github', name: 'GitHub', type: 'oauth', icon: '🐙', category: 'devops' },
   { id: 'slack', name: 'Slack', type: 'oauth', icon: '💬', category: 'communication' },
@@ -37,25 +38,46 @@ const BUILT_IN_CONNECTORS = [
   { id: 'dbt_cloud', name: 'dbt Cloud', type: 'apikey', icon: '🔄', category: 'data' },
 ];
 
+function normalizeConnectorText(text) {
+  return String(text || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .replace(/\s+/g, ' ');
+}
+
+export function extractConnectorIdsFromText(text) {
+  const haystack = normalizeConnectorText(text);
+  return BUILT_IN_CONNECTORS
+    .filter(connector => {
+      const idNeedle = normalizeConnectorText(connector.id);
+      const nameNeedle = normalizeConnectorText(connector.name);
+      return (idNeedle && haystack.includes(idNeedle)) || (nameNeedle && haystack.includes(nameNeedle));
+    })
+    .map(connector => connector.id);
+}
+
 export function ConnectorSetupModal({ requiredConnectors = [], onClose, onVerified, mode = 'modal' }) {
   const [connectorStates, setConnectorStates] = useState({});
   const [verifying, setVerifying] = useState(false);
   const [allVerified, setAllVerified] = useState(false);
   const [error, setError] = useState(null);
+  const [apiKeys, setApiKeys] = useState({});
+  const [savingApiKeyFor, setSavingApiKeyFor] = useState(null);
 
   // Initial load: check which connectors are installed
   useEffect(() => {
     verifyConnectors();
   }, []);
 
-  // Auto-close on modal mode when all verified
+  // Auto-close/continue when all required connectors are verified
   useEffect(() => {
-    if (allVerified && mode === 'modal' && requiredConnectors.length > 0) {
+    if (allVerified && requiredConnectors.length > 0) {
       setTimeout(() => {
         if (onVerified) onVerified(true);
       }, 500);
     }
-  }, [allVerified, mode, requiredConnectors, onVerified]);
+  }, [allVerified, requiredConnectors, onVerified]);
 
   const verifyConnectors = async () => {
     try {
@@ -143,11 +165,41 @@ export function ConnectorSetupModal({ requiredConnectors = [], onClose, onVerifi
   };
 
   const handleConnectApiKey = (connectorId) => {
+    if (mode === 'inline') {
+      setApiKeys(prev => (prev[connectorId] ? prev : { ...prev, [connectorId]: '' }));
+      return;
+    }
+
     // Open settings tab for API key entry
     window.open(`/settings?tab=connectors&setup=${connectorId}`, '_blank');
-    
+
     // Re-verify after delay
     setTimeout(() => verifyConnectors(), 2000);
+  };
+
+  const handleSaveApiKey = async (connectorId, connectorLabel) => {
+    const apiKey = (apiKeys[connectorId] || '').trim();
+    if (!apiKey) return;
+
+    try {
+      setSavingApiKeyFor(connectorId);
+      setError(null);
+
+      try {
+        await connectors.installApiKey(connectorId, apiKey);
+      } catch {
+        await credentialsApi.set(connectorId, apiKey, '', connectorLabel);
+      }
+
+      setConnectorStates(prev => ({ ...prev, [connectorId]: 'connected' }));
+      setApiKeys(prev => ({ ...prev, [connectorId]: '' }));
+      setTimeout(() => verifyConnectors(), 250);
+    } catch (err) {
+      setError(`Failed to save ${connectorId}: ${err.message}`);
+      setConnectorStates(prev => ({ ...prev, [connectorId]: 'error' }));
+    } finally {
+      setSavingApiKeyFor(null);
+    }
   };
 
   const getConnectorDef = (id) => BUILT_IN_CONNECTORS.find(c => c.id === id);
@@ -227,18 +279,19 @@ export function ConnectorSetupModal({ requiredConnectors = [], onClose, onVerifi
                 initial={{ opacity: 0, x: -10 }}
                 animate={{ opacity: 1, x: 0 }}
                 transition={{ delay: idx * 0.05 }}
-                className="flex items-center justify-between gap-3 rounded-lg border border-border/50 bg-bg-card/50 p-4 backdrop-blur-sm"
+                className="space-y-3 rounded-lg border border-border/50 bg-bg-card/50 p-4 backdrop-blur-sm"
               >
-                <div className="flex items-center gap-3 flex-1">
-                  <span className="text-2xl">{def.icon}</span>
-                  <div className="flex-1">
-                    <p className="font-medium text-tx-1">{def.name}</p>
-                    <p className="text-xs text-tx-4 capitalize">{def.category}</p>
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-3 flex-1 min-w-0">
+                    <span className="text-2xl">{def.icon}</span>
+                    <div className="flex-1 min-w-0">
+                      <p className="font-medium text-tx-1">{def.name}</p>
+                      <p className="text-xs text-tx-4 capitalize">{def.category}</p>
+                    </div>
                   </div>
-                </div>
 
-                {/* Status + Button */}
-                <div className="flex items-center gap-2">
+                  {/* Status + Button */}
+                  <div className="flex items-center gap-2 shrink-0">
                   {state === 'connected' && (
                     <motion.div
                       initial={{ scale: 0 }}
@@ -251,27 +304,32 @@ export function ConnectorSetupModal({ requiredConnectors = [], onClose, onVerifi
                   )}
 
                   {state === 'pending' && (
-                    <motion.button
-                      whileHover={{ scale: 1.05 }}
-                      whileTap={{ scale: 0.95 }}
-                      onClick={() =>
-                        def.type === 'oauth'
-                          ? handleConnectOAuth(connectorId)
-                          : handleConnectApiKey(connectorId)
-                      }
-                      disabled={verifying}
-                      className="inline-flex items-center gap-2 rounded-lg bg-accent-soft/40 px-3 py-1.5 text-xs font-medium text-accent hover:bg-accent-soft/60 disabled:opacity-50 disabled:cursor-wait transition"
-                    >
-                      {def.type === 'oauth' ? (
-                        <>
-                          Connect <ExternalLink className="size-3.5" />
-                        </>
-                      ) : (
-                        <>
-                          Setup <Lock className="size-3.5" />
-                        </>
-                      )}
-                    </motion.button>
+                    def.type === 'oauth' ? (
+                      <motion.button
+                        whileHover={{ scale: 1.05 }}
+                        whileTap={{ scale: 0.95 }}
+                        onClick={() => handleConnectOAuth(connectorId)}
+                        disabled={verifying}
+                        className="inline-flex items-center gap-2 rounded-lg bg-accent-soft/40 px-3 py-1.5 text-xs font-medium text-accent hover:bg-accent-soft/60 disabled:opacity-50 disabled:cursor-wait transition"
+                      >
+                        Connect <ExternalLink className="size-3.5" />
+                      </motion.button>
+                    ) : mode === 'inline' ? (
+                      <span className="inline-flex items-center gap-2 rounded-lg border border-border bg-bg px-3 py-1.5 text-xs font-medium text-tx-3">
+                        <Lock className="size-3.5" />
+                        Paste the key below
+                      </span>
+                    ) : (
+                      <motion.button
+                        whileHover={{ scale: 1.05 }}
+                        whileTap={{ scale: 0.95 }}
+                        onClick={() => handleConnectApiKey(connectorId)}
+                        disabled={verifying}
+                        className="inline-flex items-center gap-2 rounded-lg bg-accent-soft/40 px-3 py-1.5 text-xs font-medium text-accent hover:bg-accent-soft/60 disabled:opacity-50 disabled:cursor-wait transition"
+                      >
+                        Setup <Lock className="size-3.5" />
+                      </motion.button>
+                    )
                   )}
 
                   {state === 'connecting' && (
@@ -287,7 +345,35 @@ export function ConnectorSetupModal({ requiredConnectors = [], onClose, onVerifi
                       <span className="text-xs font-medium text-err">Invalid</span>
                     </div>
                   )}
+                  </div>
                 </div>
+
+                {mode === 'inline' && def.type === 'apikey' && state === 'pending' && (
+                  <div className="space-y-2 rounded-lg border border-border/60 bg-bg px-3 py-3">
+                    <p className="text-xs text-tx-3">
+                      Paste the API key here. We’ll save it securely and continue the plan.
+                    </p>
+                    <div className="flex flex-col gap-2 sm:flex-row">
+                      <input
+                        type="password"
+                        value={apiKeys[connectorId] || ''}
+                        onChange={e => setApiKeys(prev => ({ ...prev, [connectorId]: e.target.value }))}
+                        placeholder={`${def.name} API key`}
+                        className="input-field flex-1"
+                        autoComplete="off"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => handleSaveApiKey(connectorId, def.name)}
+                        disabled={savingApiKeyFor === connectorId || !(apiKeys[connectorId] || '').trim()}
+                        className="btn-primary inline-flex items-center justify-center gap-2 disabled:opacity-50"
+                      >
+                        {savingApiKeyFor === connectorId ? <Loader2 size={12} className="animate-spin" /> : <Check className="size-3.5" />}
+                        Save & continue
+                      </button>
+                    </div>
+                  </div>
+                )}
               </motion.div>
             );
           })}

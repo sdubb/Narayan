@@ -1,8 +1,10 @@
 //! Plan mode — the agent configuration conversation.
 //!
 //! Plan mode is the one-time setup phase where a user describes what an agent
-//! should do in plain business language.  The system internally figures out
-//! which connectors, tools, triggers, and constraints are needed.
+//! should do in plain business language. The LLM infers the workflow, and the
+//! plan-mode flow either asks the next missing question or turns structured
+//! setup needs into inline cards. There is no separate planner the user has
+//! to interact with.
 //! The user never sees tool names or connector IDs.
 //!
 //! ## Flow
@@ -14,7 +16,7 @@
 //! ## Phases
 //!
 //!   CapturingIntent        → "What should this agent do?"
-//!   ResolvingConnectors    → system resolves internally, maybe one clarifying Q
+//!   ResolvingConnectors    → structured setup gate (DB / MCP / REST API / API key)
 //!   CapturingClarifications → combined: trigger confirm + output questions + multi-role suggestion
 //!   CapturingConstraints   → domain skill mandatory questions + user constraints
 //!   Reviewing              → show the full config for user confirmation
@@ -36,8 +38,7 @@ use crate::{
     agent::definition::{
         AgentDefinition, AgentDefinitionStatus, AgentRole, PlanModeMessage, PlanModePhase, PlanModePreflightResult,
         PlanModeSandboxResult, PlanModeSession, PlanModeTestCheck, PlanModeTestConfidence, PlanModeTestResult,
-        PlanModeTestStatus, PlanModeTestStepResult, RoleCategory, RoleStatus, TenantConnector,
-        TriggerDef, TriggerType,
+        PlanModeTestStatus, PlanModeTestStepResult, RoleCategory, RoleStatus, TenantConnector, TriggerDef, TriggerType,
     },
     connectors::ConnectorInstallStore,
     gateway::{GatewayRequest, LlmGateway, TaskComplexity},
@@ -100,7 +101,7 @@ Respond ONLY with valid JSON. Schema:
   "candidate_connectors": ["exact installed or built-in connector names if likely"],
   "missing_capabilities": ["custom_db|custom_api|connector/<category>|tool/<category>"],
   "workflow_outline": ["short ordered workflow hints, e.g. fetch records, enrich them, update CRM, notify Slack"],
-  "uses_external_db": "registered database name or null",
+  "uses_external_db": "registered database name, true if a database is needed but no registered name is known yet, or null",
   "uses_external_api": "registered API name or null",
   "trigger_hint": "schedule|webhook|user_message|manual",
   "trigger_cron": "best-guess cron expression if schedule, else null",
@@ -262,10 +263,14 @@ impl ConnectorResolver {
             .unwrap_or_default();
 
         // ── Tool overrides for external_db and external_api ─────────────
+        let explicit_db_name = intent_named_external_db(intent);
+        let needs_db_connection = intent_needs_database_connection(intent);
         let mut tool_overrides: Vec<String> = Vec::new();
+        let database_connectors: Vec<&TenantConnector> =
+            tenant_connectors.iter().filter(|tc| tc.category == "connector/database").collect();
 
         // If the intent explicitly named an external_db
-        if let Some(db_name) = intent["uses_external_db"].as_str() {
+        if let Some(db_name) = explicit_db_name.as_ref() {
             if !db_name.is_empty() && db_name != "null" {
                 tool_overrides.push(format!("external_db:{}", db_name));
             }
@@ -277,14 +282,21 @@ impl ConnectorResolver {
             }
         }
 
-        // Detect database mentions in tenant_connectors (category = connector/database)
-        for tc in tenant_connectors {
-            if tc.category == "connector/database" {
-                if !tool_overrides.iter().any(|t| t.contains(&tc.name)) {
-                    // Check if any intent term matches the db name or summary
-                    if terms_match_connector(&all_terms, tc) {
-                        tool_overrides.push(format!("external_db:{}", tc.name));
-                    }
+        // If the workflow needs a database and the tenant has multiple saved databases,
+        // ask the user to choose one instead of silently enabling both.
+        if explicit_db_name.is_none() && needs_db_connection {
+            match database_connectors.as_slice() {
+                [] => {}
+                [only_db] => {
+                    tool_overrides.push(format!("external_db:{}", only_db.name));
+                }
+                multiple => {
+                    let names = multiple.iter().map(|tc| tc.name.clone()).collect::<Vec<_>>();
+                    let question = format!(
+                        "You have multiple database connections installed: {}. Which one should this agent use?",
+                        names.join(", ")
+                    );
+                    return (Vec::new(), Vec::new(), Some(question));
                 }
             }
         }
@@ -362,6 +374,15 @@ impl ConnectorResolver {
                 )
             })
             .or_else(|| {
+                if explicit_db_name.is_none() && needs_db_connection && tool_overrides.iter().all(|spec| !spec.starts_with("external_db:")) {
+                    Some(
+                        "I think this workflow needs a database connection. Use the inline connection card to add it, or tell me the exact saved database name to use.".into(),
+                    )
+                } else {
+                    None
+                }
+            })
+            .or_else(|| {
                 build_missing_connector_question(
                     &needed_connector_categories,
                     &missing_capabilities,
@@ -418,12 +439,17 @@ fn build_missing_connector_question(
 
     if missing_capabilities.iter().any(|value| value == "custom_db") {
         return Some(
-            "This may need a custom database connection. If you already have one registered, tell me its name; otherwise add it as a custom DB connector.".into()
+            "This may need a database connection. Use the inline connection card to add it, or tell me the exact saved database name if it already exists.".into()
         );
     }
     if missing_capabilities.iter().any(|value| value == "custom_api") {
         return Some(
-            "This may need a custom API connection. If you already have one registered, tell me its name; otherwise add it as a custom API connector.".into()
+            "This may need a custom REST API connection. Use the inline connection card to add it, or tell me the exact saved API name if it already exists.".into()
+        );
+    }
+    if missing_capabilities.iter().any(|value| value == "connector/mcp") {
+        return Some(
+            "This may need an MCP server connection. Use the inline connection card to add it, or tell me the exact saved MCP server name if it already exists.".into()
         );
     }
 
@@ -467,6 +493,124 @@ fn intent_prefers_local_document_workflow(intent: &serde_json::Value) -> bool {
     write_targets_empty && local_output_hint && text_mentions_local_document_workflow(&text)
 }
 
+fn intent_contains_database_terms(intent: &serde_json::Value) -> bool {
+    let mut text = String::new();
+    for key in ["data_sources", "write_targets", "actions", "workflow_outline"] {
+        if let Some(values) = intent[key].as_array() {
+            for value in values {
+                if let Some(text_value) = value.as_str() {
+                    text.push_str(text_value);
+                    text.push(' ');
+                }
+            }
+        }
+    }
+
+    let lower = text.to_lowercase();
+    [
+        "database",
+        "postgres",
+        "mysql",
+        "sqlite",
+        "sql",
+        "schema",
+        "table",
+        "tables",
+        "row",
+        "rows",
+        "connection string",
+        "db connection",
+    ]
+    .iter()
+    .any(|term| lower.contains(term))
+}
+
+fn intent_contains_api_terms(intent: &serde_json::Value) -> bool {
+    let mut text = String::new();
+    for key in ["data_sources", "write_targets", "actions", "workflow_outline"] {
+        if let Some(values) = intent[key].as_array() {
+            for value in values {
+                if let Some(text_value) = value.as_str() {
+                    text.push_str(text_value);
+                    text.push(' ');
+                }
+            }
+        }
+    }
+
+    let lower = text.to_lowercase();
+    ["rest api", "api", "endpoint", "endpoints", "backend", "http", "web service", "service api", "internal api"]
+        .iter()
+        .any(|term| lower.contains(term))
+}
+
+fn intent_contains_mcp_terms(intent: &serde_json::Value) -> bool {
+    let mut text = String::new();
+    for key in ["data_sources", "write_targets", "actions", "workflow_outline"] {
+        if let Some(values) = intent[key].as_array() {
+            for value in values {
+                if let Some(text_value) = value.as_str() {
+                    text.push_str(text_value);
+                    text.push(' ');
+                }
+            }
+        }
+    }
+
+    let lower = text.to_lowercase();
+    ["mcp", "model context protocol", "tools/list", "tools/call", "json-rpc", "json rpc", "mcp server"]
+        .iter()
+        .any(|term| lower.contains(term))
+}
+
+pub(crate) fn intent_named_external_db(intent: &serde_json::Value) -> Option<String> {
+    if let Some(db_name) = intent["uses_external_db"].as_str() {
+        let trimmed = db_name.trim();
+        if !trimmed.is_empty() && trimmed != "null" {
+            return Some(trimmed.to_string());
+        }
+    }
+
+    None
+}
+
+pub(crate) fn intent_needs_database_connection(intent: &serde_json::Value) -> bool {
+    intent["missing_capabilities"]
+        .as_array()
+        .map(|arr| arr.iter().any(|value| value.as_str() == Some("custom_db")))
+        .unwrap_or(false)
+        || intent["uses_external_db"].as_bool().unwrap_or(false)
+        || intent_contains_database_terms(intent)
+}
+
+pub(crate) fn intent_needs_api_connection(intent: &serde_json::Value) -> bool {
+    intent["missing_capabilities"]
+        .as_array()
+        .map(|arr| arr.iter().any(|value| value.as_str() == Some("custom_api")))
+        .unwrap_or(false)
+        || intent["uses_external_api"].as_bool().unwrap_or(false)
+        || intent["uses_external_api"]
+            .as_str()
+            .map(|value| {
+                let trimmed = value.trim();
+                !trimmed.is_empty() && trimmed != "null"
+            })
+            .unwrap_or(false)
+        || intent_contains_api_terms(intent)
+}
+
+pub(crate) fn intent_needs_mcp_connection(intent: &serde_json::Value) -> bool {
+    intent["missing_capabilities"]
+        .as_array()
+        .map(|arr| arr.iter().any(|value| value.as_str() == Some("connector/mcp")))
+        .unwrap_or(false)
+        || intent["needed_connector_categories"]
+            .as_array()
+            .map(|arr| arr.iter().any(|value| value.as_str() == Some("mcp")))
+            .unwrap_or(false)
+        || intent_contains_mcp_terms(intent)
+}
+
 #[cfg(test)]
 fn text_prefers_local_document_workflow(text: &str) -> bool {
     let lower = text.to_lowercase();
@@ -502,6 +646,30 @@ fn answer_declines_external_connector(answer_lower: &str) -> bool {
     ]
     .iter()
     .any(|phrase| answer_lower.contains(phrase))
+}
+
+fn answer_mentions_tenant_database(answer_lower: &str, tenant_connectors: &[TenantConnector]) -> Option<String> {
+    tenant_connectors
+        .iter()
+        .filter(|tc| tc.category == "connector/database")
+        .find(|tc| contains_connector_name(answer_lower, &tc.name))
+        .map(|tc| tc.name.clone())
+}
+
+fn answer_mentions_tenant_api(answer_lower: &str, tenant_connectors: &[TenantConnector]) -> Option<String> {
+    tenant_connectors
+        .iter()
+        .filter(|tc| tc.category != "connector/database" && !tc.category.contains("mcp"))
+        .find(|tc| contains_connector_name(answer_lower, &tc.name))
+        .map(|tc| tc.name.clone())
+}
+
+fn answer_mentions_tenant_mcp(answer_lower: &str, tenant_connectors: &[TenantConnector]) -> Option<String> {
+    tenant_connectors
+        .iter()
+        .filter(|tc| tc.category.contains("mcp"))
+        .find(|tc| contains_connector_name(answer_lower, &tc.name))
+        .map(|tc| tc.name.clone())
 }
 
 /// Returns true if any intent term meaningfully matches the connector's name/summary.
@@ -624,14 +792,15 @@ impl PlanModeManager {
                 "connectors: {}",
                 if role.connectors.is_empty() { "none".into() } else { role.connectors.join(", ") }
             ));
-            parts.push(format!(
-                "tools: {}",
-                if role.tools.is_empty() { "none".into() } else { role.tools.join(", ") }
-            ));
+            parts.push(format!("tools: {}", if role.tools.is_empty() { "none".into() } else { role.tools.join(", ") }));
             parts.push(format!("trigger: {}", crate::agent::agent_chat::trigger_summary(&role.trigger)));
             parts.push(format!(
                 "constraints: {}",
-                if session.draft_agent.constraints.is_empty() { "none".into() } else { session.draft_agent.constraints.join("; ") }
+                if session.draft_agent.constraints.is_empty() {
+                    "none".into()
+                } else {
+                    session.draft_agent.constraints.join("; ")
+                }
             ));
         }
 
@@ -639,7 +808,9 @@ impl PlanModeManager {
             let step_summaries: Vec<String> = session
                 .pending_steps
                 .iter()
-                .filter_map(|value| serde_json::from_value::<crate::agent::plan_mode_steps::ClarificationStep>(value.clone()).ok())
+                .filter_map(|value| {
+                    serde_json::from_value::<crate::agent::plan_mode_steps::ClarificationStep>(value.clone()).ok()
+                })
                 .map(|step| format!("{} -> {}", step.id, step.question))
                 .collect();
             if !step_summaries.is_empty() {
@@ -1122,18 +1293,13 @@ impl PlanModeManager {
 
         let tenant_connectors: Vec<TenantConnector> =
             self.store.list_tenant_connectors(&session.tenant_id).await.unwrap_or_default();
-        let capability_directory =
-            build_capability_directory(&self.tools, &installed, &tenant_connectors);
+        let capability_directory = build_capability_directory(&self.tools, &installed, &tenant_connectors);
         let initial_intent = self
             .extractor
             .extract_initial(&session.id, &session.tenant_id, &description, &capability_directory)
             .await?;
-        let detail_context = build_detailed_capability_context(
-            &self.tools,
-            &initial_intent,
-            &installed,
-            &tenant_connectors,
-        );
+        let detail_context =
+            build_detailed_capability_context(&self.tools, &initial_intent, &installed, &tenant_connectors);
         let intent = if detail_context.trim().is_empty() {
             initial_intent
         } else {
@@ -1295,6 +1461,7 @@ impl PlanModeManager {
         let answer_lower = answer.to_lowercase();
         let mut pending_connector_resolution = false;
         let mut pending_custom_tool_categories: Vec<String> = Vec::new();
+        let tenant_connectors = self.store.list_tenant_connectors(&session.tenant_id).await.unwrap_or_default();
         if let Some(intent) = session.intent_cache.as_ref() {
             pending_connector_resolution = intent["_pending_connector_resolution"].as_bool().unwrap_or(false);
             pending_custom_tool_categories = intent["_pending_custom_tool_categories"]
@@ -1304,6 +1471,7 @@ impl PlanModeManager {
         }
         let local_document_workflow =
             session.intent_cache.as_ref().map(intent_prefers_local_document_workflow).unwrap_or(false);
+        let needs_db_connection = session.intent_cache.as_ref().map(intent_needs_database_connection).unwrap_or(false);
 
         if let Some(role) = session.draft_role.as_mut() {
             if !pending_custom_tool_categories.is_empty() {
@@ -1323,8 +1491,13 @@ impl PlanModeManager {
                     .iter()
                     .filter(|entry| contains_connector_name(&answer_lower, entry.name))
                     .collect();
+                let matched_db_name = answer_mentions_tenant_database(&answer_lower, &tenant_connectors);
+                let matched_api_name = answer_mentions_tenant_api(&answer_lower, &tenant_connectors);
+                let matched_mcp_name = answer_mentions_tenant_mcp(&answer_lower, &tenant_connectors);
 
-                if answer_declines_external_connector(&answer_lower) || (local_document_workflow && matched.is_empty())
+                if !needs_db_connection
+                    && (answer_declines_external_connector(&answer_lower)
+                        || (local_document_workflow && matched.is_empty()))
                 {
                     if let Some(intent) = session.intent_cache.as_mut().and_then(|value| value.as_object_mut()) {
                         intent.remove("_pending_connector_resolution");
@@ -1358,6 +1531,58 @@ impl PlanModeManager {
                             intent.remove("_pending_connector_resolution");
                         }
                         pending_connector_resolution = false;
+                    } else if let Some(db_name) = matched_db_name {
+                        if !role.connectors.iter().any(|connector_name| connector_name == &db_name) {
+                            role.connectors.push(db_name.clone());
+                            role.connectors.sort();
+                            role.connectors.dedup();
+                            session.draft_agent.connectors = role.connectors.clone();
+                        }
+                        if !role.tools.iter().any(|tool| tool == &format!("external_db:{}", db_name)) {
+                            role.tools.push(format!("external_db:{}", db_name));
+                            role.tools.sort();
+                            role.tools.dedup();
+                        }
+                        if let Some(intent) = session.intent_cache.as_mut().and_then(|value| value.as_object_mut()) {
+                            intent.remove("_pending_connector_resolution");
+                        }
+                        pending_connector_resolution = false;
+                    } else if let Some(api_name) = matched_api_name {
+                        if !role.connectors.iter().any(|connector_name| connector_name == &api_name) {
+                            role.connectors.push(api_name.clone());
+                            role.connectors.sort();
+                            role.connectors.dedup();
+                            session.draft_agent.connectors = role.connectors.clone();
+                        }
+                        if !role.tools.iter().any(|tool| tool == &format!("external_api:{}", api_name)) {
+                            role.tools.push(format!("external_api:{}", api_name));
+                            role.tools.sort();
+                            role.tools.dedup();
+                        }
+                        if let Some(intent) = session.intent_cache.as_mut().and_then(|value| value.as_object_mut()) {
+                            intent.remove("_pending_connector_resolution");
+                        }
+                        pending_connector_resolution = false;
+                    } else if let Some(mcp_name) = matched_mcp_name {
+                        if !role.connectors.iter().any(|connector_name| connector_name == &mcp_name) {
+                            role.connectors.push(mcp_name.clone());
+                            role.connectors.sort();
+                            role.connectors.dedup();
+                            session.draft_agent.connectors = role.connectors.clone();
+                        }
+                        if let Some(intent) = session.intent_cache.as_mut().and_then(|value| value.as_object_mut()) {
+                            intent.remove("_pending_connector_resolution");
+                        }
+                        pending_connector_resolution = false;
+                    } else if needs_db_connection {
+                        if let Some(intent) = session.intent_cache.as_mut().and_then(|value| value.as_object_mut()) {
+                            intent.remove("_pending_connector_resolution");
+                        }
+                        pending_connector_resolution = false;
+                        session.phase = PlanModePhase::ResolvingConnectors;
+                        return Ok(
+                            "Please add the database using the inline connection card, then reply with the saved database name so I can continue.".into(),
+                        );
                     } else if local_document_workflow {
                         if let Some(intent) = session.intent_cache.as_mut().and_then(|value| value.as_object_mut()) {
                             intent.remove("_pending_connector_resolution");
@@ -1376,6 +1601,9 @@ impl PlanModeManager {
 
         if !pending_custom_tool_categories.is_empty() || pending_connector_resolution {
             session.phase = PlanModePhase::ResolvingConnectors;
+            if needs_db_connection {
+                return Ok("Please add the database using the inline connection card, then reply with the saved database name so I can continue.".into());
+            }
             return Ok("Please confirm the pending connector/custom-tool setup first.".into());
         }
 
@@ -1751,7 +1979,13 @@ impl PlanModeManager {
                     };
 
                     let mut args = step.tool_args.clone().unwrap_or_else(|| serde_json::json!({}));
-                    materialize_validation_tool_args(tool_name, &mut args, &self.workspace_root);
+                    materialize_validation_tool_args(
+                        tool_name,
+                        &step.description,
+                        &mut args,
+                        &self.workspace_root,
+                        role,
+                    );
                     if value_contains_placeholder(&args) {
                         has_failure = true;
                         checks.push(PlanModeTestCheck {
@@ -1875,7 +2109,7 @@ impl PlanModeManager {
         };
 
         let mut args = step.tool_args.clone().unwrap_or_else(|| serde_json::json!({}));
-        materialize_validation_tool_args(tool_name, &mut args, workspace_root);
+        materialize_validation_tool_args(tool_name, &step.description, &mut args, workspace_root, role);
         match sandbox_tool_policy(tool_name, &args) {
             SandboxPolicy::NoOp(reason) => {
                 return PlanModeTestStepResult {
@@ -2012,7 +2246,13 @@ fn materialize_workflow_outline(role: &mut AgentRole, intent: &serde_json::Value
     }
 }
 
-fn materialize_validation_tool_args(tool_name: &str, args: &mut serde_json::Value, workspace_root: &Path) {
+fn materialize_validation_tool_args(
+    tool_name: &str,
+    step_description: &str,
+    args: &mut serde_json::Value,
+    workspace_root: &Path,
+    role: &AgentRole,
+) {
     let Some(object) = args.as_object_mut() else {
         return;
     };
@@ -2055,11 +2295,68 @@ fn materialize_validation_tool_args(tool_name: &str, args: &mut serde_json::Valu
                 serde_json::json!("Sandbox document content. Key points: summarize uploaded documents, highlight action items, and surface risks."),
             );
         }
+        "schedule" => {
+            set_if_missing(object, "goal", serde_json::json!(step_description.trim()));
+            set_if_missing(
+                object,
+                "run_at",
+                serde_json::json!((chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339()),
+            );
+        }
+        "external_db" => {
+            let selected_db = role
+                .tools
+                .iter()
+                .find_map(|tool| tool.strip_prefix("external_db:").map(String::from))
+                .unwrap_or_else(|| "sandbox_db".into());
+            let operation = infer_external_db_operation(step_description);
+            set_if_missing(object, "db", serde_json::json!(selected_db));
+            set_if_missing(object, "operation", serde_json::json!(operation));
+            if matches!(operation, "query" | "explain" | "execute") {
+                set_if_missing(object, "sql", serde_json::json!("SELECT 1 AS sandbox_check"));
+            }
+            if operation == "table_preview" {
+                set_if_missing(object, "table", serde_json::json!("users"));
+            }
+        }
+        "data_engine" => {
+            set_if_missing(
+                object,
+                "records",
+                serde_json::json!([
+                    {
+                        "id": "sandbox-user-1",
+                        "email": "user@example.com",
+                        "processed": false,
+                        "created_at": "2026-03-31T00:00:00Z"
+                    }
+                ]),
+            );
+        }
         _ => {}
     }
 
     if object.get("path").is_none() && object.get("root").is_none() && tool_name == "content_search" {
         object.insert("path".into(), serde_json::json!(workspace_files));
+    }
+}
+
+fn infer_external_db_operation(step_description: &str) -> &'static str {
+    let lower = step_description.to_lowercase();
+    if lower.contains("schema") || lower.contains("inspect") || lower.contains("discover") {
+        "schema"
+    } else if lower.contains("update")
+        || lower.contains("write")
+        || lower.contains("insert")
+        || lower.contains("delete")
+    {
+        "execute"
+    } else if lower.contains("preview") {
+        "table_preview"
+    } else if lower.contains("explain") {
+        "explain"
+    } else {
+        "query"
     }
 }
 
@@ -2610,13 +2907,11 @@ fn build_detailed_capability_context(
         }
         lines.push(format!("Detailed tools for category '{}':", category));
         for spec in specs.into_iter().take(8) {
-            let param_summary = spec
-                .parameters["properties"]
+            let param_summary = spec.parameters["properties"]
                 .as_object()
                 .map(|properties| {
                     let mut parameters = Vec::new();
-                    let required_names = spec
-                        .parameters["required"]
+                    let required_names = spec.parameters["required"]
                         .as_array()
                         .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect::<std::collections::HashSet<_>>())
                         .unwrap_or_default();
@@ -2639,10 +2934,7 @@ fn build_detailed_capability_context(
                 .unwrap_or_default();
             lines.push(format!(
                 "  - {}:\n    {}\n    parameters: {}{}",
-                spec.name,
-                spec.description,
-                param_summary,
-                output_schema
+                spec.name, spec.description, param_summary, output_schema
             ));
         }
     }
@@ -2876,6 +3168,10 @@ fn resolve_tool_for_hint(
 ) -> (Option<String>, Option<serde_json::Value>) {
     let lower = hint.to_lowercase();
 
+    if is_schedule_trigger_hint(&lower) {
+        return (None, None);
+    }
+
     // 1. Check for exact connector name match first
     for conn in connectors {
         if lower.contains(&conn.to_lowercase()) {
@@ -2999,6 +3295,44 @@ fn resolve_tool_for_hint(
 
     // 5. No tool match — pure LLM reasoning step
     (None, None)
+}
+
+fn is_schedule_trigger_hint(lower: &str) -> bool {
+    let schedule_terms = [
+        "every ",
+        "daily",
+        "weekly",
+        "monthly",
+        "hourly",
+        "monday",
+        "tuesday",
+        "wednesday",
+        "thursday",
+        "friday",
+        "saturday",
+        "sunday",
+        "midnight",
+        "noon",
+        "morning",
+        "evening",
+        "at ",
+        "am",
+        "pm",
+        "cron",
+    ];
+
+    let trigger_terms = [
+        "trigger",
+        "schedule",
+        "runs on schedule",
+        "run on schedule",
+        "scheduled run",
+        "recurring",
+        "hourly agent",
+        "daily agent",
+    ];
+
+    schedule_terms.iter().any(|kw| lower.contains(kw)) && trigger_terms.iter().any(|kw| lower.contains(kw))
 }
 
 fn resolve_data_extractor_args(lower: &str) -> Option<serde_json::Value> {
@@ -3582,6 +3916,132 @@ mod tests {
     }
 
     #[test]
+    fn test_db_connector_prompts_for_registration_when_name_is_unknown() {
+        let intent = serde_json::json!({
+            "data_sources": ["monitor new users activity"],
+            "uses_external_db": true,
+            "write_targets": [],
+            "actions": ["watch for new rows"],
+        });
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (_resolved, _tools, clarifying) = rt.block_on(ConnectorResolver::resolve(&intent, &[], &[]));
+        let question = clarifying.expect("should ask to connect a database");
+        let lower = question.to_lowercase();
+        assert!(lower.contains("settings") || lower.contains("database connection"));
+    }
+
+    #[test]
+    fn test_db_connector_prompts_for_selection_when_multiple_databases_exist() {
+        let intent = serde_json::json!({
+            "data_sources": ["monitor new users activity"],
+            "uses_external_db": true,
+            "write_targets": [],
+            "actions": ["watch for new rows"],
+        });
+        let tenant_connectors = vec![
+            TenantConnector {
+                id: "db-1".into(),
+                tenant_id: "t-1".into(),
+                name: "mainnarayan".into(),
+                category: "connector/database".into(),
+                base_url: String::new(),
+                auth_type: ConnectorAuthType::ConnectionString,
+                auth_credential_key: None,
+                source: crate::agent::definition::ConnectorSource::Manual,
+                source_docs: None,
+                endpoints: Vec::new(),
+                summary: "Primary database".into(),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            },
+            TenantConnector {
+                id: "db-2".into(),
+                tenant_id: "t-1".into(),
+                name: "analytics".into(),
+                category: "connector/database".into(),
+                base_url: String::new(),
+                auth_type: ConnectorAuthType::ConnectionString,
+                auth_credential_key: None,
+                source: crate::agent::definition::ConnectorSource::Manual,
+                source_docs: None,
+                endpoints: Vec::new(),
+                summary: "Analytics database".into(),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            },
+        ];
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (_resolved, _tools, clarifying) = rt.block_on(ConnectorResolver::resolve(&intent, &[], &tenant_connectors));
+        let question = clarifying.expect("should ask which database to use");
+        let lower = question.to_lowercase();
+        assert!(lower.contains("multiple database connections installed"));
+        assert!(lower.contains("mainnarayan"));
+        assert!(lower.contains("analytics"));
+    }
+
+    #[test]
+    fn test_api_detection_triggers_on_workflow_language() {
+        let intent = serde_json::json!({
+            "data_sources": ["internal rest api"],
+            "write_targets": [],
+            "actions": ["enrich user records via backend"],
+        });
+        assert!(intent_needs_api_connection(&intent));
+    }
+
+    #[test]
+    fn test_mcp_detection_triggers_on_workflow_language() {
+        let intent = serde_json::json!({
+            "data_sources": ["mcp server"],
+            "write_targets": [],
+            "actions": ["update records through tools/call"],
+        });
+        assert!(intent_needs_mcp_connection(&intent));
+    }
+
+    #[test]
+    fn test_custom_connector_answer_matching_handles_api_and_mcp() {
+        let tenant_connectors = vec![
+            TenantConnector {
+                id: "api-1".into(),
+                tenant_id: "t-1".into(),
+                name: "acme_backend".into(),
+                category: "connector/custom".into(),
+                base_url: "https://api.acme.com".into(),
+                auth_type: ConnectorAuthType::Bearer,
+                auth_credential_key: None,
+                source: crate::agent::definition::ConnectorSource::Manual,
+                source_docs: None,
+                endpoints: Vec::new(),
+                summary: "Acme backend REST API".into(),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            },
+            TenantConnector {
+                id: "mcp-1".into(),
+                tenant_id: "t-1".into(),
+                name: "ops_mcp".into(),
+                category: "connector/mcp".into(),
+                base_url: "https://mcp.example.com".into(),
+                auth_type: ConnectorAuthType::Bearer,
+                auth_credential_key: None,
+                source: crate::agent::definition::ConnectorSource::Manual,
+                source_docs: None,
+                endpoints: Vec::new(),
+                summary: "Ops MCP server".into(),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            },
+        ];
+
+        assert_eq!(
+            answer_mentions_tenant_api("Connected acme_backend", &tenant_connectors),
+            Some("acme_backend".into())
+        );
+        assert_eq!(answer_mentions_tenant_mcp("Connected ops_mcp", &tenant_connectors), Some("ops_mcp".into()));
+    }
+
+    #[test]
     fn test_connector_resolver_uses_candidate_connector_hint() {
         let intent = serde_json::json!({
             "data_sources": ["customer data"],
@@ -3694,6 +4154,17 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_tool_for_hint_keeps_schedule_trigger_conceptual() {
+        let (tool, args) = resolve_tool_for_hint(
+            "Schedule an hourly trigger for this agent",
+            &["schedule".into()],
+            &["schedule".into()],
+        );
+        assert!(tool.is_none());
+        assert!(args.is_none());
+    }
+
+    #[test]
     fn test_resolve_tool_for_hint_builds_data_extractor_args_for_emails() {
         let (tool, args) = resolve_tool_for_hint("Extract emails from the HTML", &[], &[]);
         assert_eq!(tool.as_deref(), Some("data_extractor"));
@@ -3705,12 +4176,40 @@ mod tests {
     #[test]
     fn test_materialize_validation_tool_args_fills_missing_file_read_path() {
         let tmp = std::env::temp_dir().join("narayan-plan-mode-test");
+        let role = AgentRole::new("role-1".into(), "agent-1".into(), "tenant-1".into(), "Primary".into());
         let mut args = serde_json::json!({});
-        materialize_validation_tool_args("file_read", &mut args, &tmp);
+        materialize_validation_tool_args("file_read", "read the uploaded file", &mut args, &tmp, &role);
         assert_eq!(
             args["path"],
             serde_json::json!(tmp.join("artifacts").join("sandbox_input.txt").display().to_string())
         );
+    }
+
+    #[test]
+    fn test_materialize_validation_tool_args_fills_schedule_db_and_data_engine_defaults() {
+        let tmp = std::env::temp_dir().join("narayan-plan-mode-test");
+        let mut role = AgentRole::new("role-1".into(), "agent-1".into(), "tenant-1".into(), "Primary".into());
+        role.tools.push("external_db:mainnarayan".into());
+
+        let mut schedule_args = serde_json::json!({});
+        materialize_validation_tool_args("schedule", "Schedule an hourly trigger", &mut schedule_args, &tmp, &role);
+        assert!(schedule_args["goal"].as_str().unwrap_or_default().contains("Schedule an hourly trigger"));
+        assert!(schedule_args["run_at"].as_str().is_some());
+
+        let mut db_args = serde_json::json!({});
+        materialize_validation_tool_args("external_db", "Query the database for new users", &mut db_args, &tmp, &role);
+        assert_eq!(db_args["db"], serde_json::json!("mainnarayan"));
+        assert_eq!(db_args["operation"], serde_json::json!("query"));
+
+        let mut data_engine_args = serde_json::json!({});
+        materialize_validation_tool_args(
+            "data_engine",
+            "Filter records before processing",
+            &mut data_engine_args,
+            &tmp,
+            &role,
+        );
+        assert!(data_engine_args["records"].as_array().map(|arr| !arr.is_empty()).unwrap_or(false));
     }
 
     #[test]

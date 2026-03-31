@@ -7,7 +7,13 @@ import PlanModeChat from '../components/agent/PlanModeChat';
 import AgentPage from './AgentPage';
 import SavingsCard from '../components/cards/SavingsCard';
 
-function EmptyState({ onNew }) {
+function EmptyState({ onNew, canCreateAgents }) {
+  const title = canCreateAgents ? 'Build your first agent' : 'Add an AI provider first';
+  const body = canCreateAgents
+    ? 'Agents automate your workflows. Each agent can have multiple roles, scheduled, triggered, or on-demand.'
+    : 'Connect one AI provider to unlock agent creation. We will keep you in the workspace and guide you back here once setup is complete.';
+  const cta = canCreateAgents ? 'Create an agent' : 'Go to settings';
+
   return (
     <div className="flex flex-1 flex-col items-center justify-center px-8 text-center">
       <motion.div
@@ -19,14 +25,17 @@ function EmptyState({ onNew }) {
         <div className="mb-5 flex size-16 items-center justify-center rounded-[1.5rem] border border-accent/20 bg-accent-soft shadow-card">
           <Zap size={24} className="text-accent" />
         </div>
-        <p className="mb-2 font-serif text-3xl text-tx-1">Build your first agent</p>
-        <p className="mb-6 max-w-sm text-sm leading-7 text-tx-3">
-          Agents automate your workflows. Each agent can have multiple roles, scheduled, triggered, or on-demand.
-        </p>
+        <p className="mb-2 font-serif text-3xl text-tx-1">{title}</p>
+        <p className="mb-6 max-w-sm text-sm leading-7 text-tx-3">{body}</p>
         <button onClick={onNew} className="btn-primary flex items-center gap-2 px-4 py-2.5">
           <Zap size={14} />
-          Create an agent
+          {cta}
         </button>
+        {!canCreateAgents && (
+          <p className="mt-3 max-w-sm text-xs leading-6 text-tx-4">
+            Once you add a provider, the agent planner will be ready immediately.
+          </p>
+        )}
         <div className="mt-8 grid w-full max-w-md grid-cols-3 gap-3 text-left">
           {[
             ['Connect', 'Bring in the tools you already use'],
@@ -44,7 +53,7 @@ function EmptyState({ onNew }) {
   );
 }
 
-export default function ChatPage({ onNavigate }) {
+export default function ChatPage({ onNavigate, canCreateAgents = true }) {
   const [agents, setAgents] = useState([]);
   const [selectedAgentId, setSelectedAgentId] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -84,6 +93,10 @@ export default function ChatPage({ onNavigate }) {
   }, []);
 
   function handleNewAgent() {
+    if (!canCreateAgents) {
+      onNavigate('settings');
+      return;
+    }
     setPlanModeFor('new');
   }
 
@@ -101,15 +114,16 @@ export default function ChatPage({ onNavigate }) {
 
   return (
     <div className="relative flex h-screen overflow-hidden bg-[radial-gradient(circle_at_top_left,_rgba(201,106,46,0.08),_transparent_24%),linear-gradient(180deg,_#f7f4ef_0%,_#f4efe8_100%)]">
-      <Sidebar
-        agents={agents}
-        selectedAgentId={selectedAgentId}
-        onSelectAgent={id => setSelectedAgentId(id)}
-        onNewAgent={handleNewAgent}
-        onNavigate={handleNavigate}
-        pendingReviews={pendingReviews}
-        loading={loading}
-      />
+        <Sidebar
+          agents={agents}
+          selectedAgentId={selectedAgentId}
+          onSelectAgent={id => setSelectedAgentId(id)}
+          onNewAgent={handleNewAgent}
+          onNavigate={handleNavigate}
+          pendingReviews={pendingReviews}
+          loading={loading}
+          canCreateAgents={canCreateAgents}
+        />
 
       <main className="relative flex min-w-0 flex-1 flex-col">
         <div className="flex shrink-0 items-center justify-between border-b border-border bg-bg-card/85 px-6 py-3 backdrop-blur">
@@ -147,7 +161,7 @@ export default function ChatPage({ onNavigate }) {
           ) : (
             <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-5 px-6 py-8">
               <SavingsCard />
-              <EmptyState onNew={handleNewAgent} />
+              <EmptyState onNew={handleNewAgent} canCreateAgents={canCreateAgents} />
             </div>
           )}
         </div>

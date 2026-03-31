@@ -259,7 +259,7 @@ function ListLine({ title, detail, tone = 'text-tx-1', meta }) {
   );
 }
 
-export default function DashboardPage({ onNavigate }) {
+export default function DashboardPage({ onNavigate, canCreateAgents = true }) {
   const [agents, setAgents] = useState([]);
   const [summary, setSummary] = useState(null);
   const [reviews, setReviews] = useState([]);
@@ -464,10 +464,11 @@ export default function DashboardPage({ onNavigate }) {
         agents={agents}
         selectedAgentId={selectedAgentId}
         onSelectAgent={setSelectedAgentId}
-        onNewAgent={() => onNavigate('chat')}
+        onNewAgent={() => onNavigate(canCreateAgents ? 'chat' : 'settings')}
         onNavigate={onNavigate}
         pendingReviews={pendingReviews}
         loading={refreshing && agents.length === 0}
+        canCreateAgents={canCreateAgents}
       />
 
       <main className="flex min-w-0 flex-1 flex-col overflow-hidden">

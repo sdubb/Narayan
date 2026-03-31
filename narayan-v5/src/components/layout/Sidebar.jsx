@@ -103,7 +103,7 @@ function AgentItem({ agent, selected, expanded, onToggleExpand, onClick }) {
 // ── Main Sidebar ───────────────────────────────────────────────────────────
 export default function Sidebar({
   agents, selectedAgentId, onSelectAgent, onNewAgent,
-  onNavigate, pendingReviews = [], loading,
+  onNavigate, pendingReviews = [], loading, canCreateAgents = true,
 }) {
   // Expanded set lives here so it survives parent re-renders
   const [expandedIds, setExpandedIds] = useState(() => new Set());
@@ -158,12 +158,23 @@ export default function Sidebar({
       {/* New agent button */}
       <div className="px-3 pt-3 pb-2">
         <button
-          onClick={onNewAgent}
+          onClick={() => {
+            if (!canCreateAgents) {
+              onNavigate('settings');
+              return;
+            }
+            onNewAgent();
+          }}
           className="flex w-full items-center gap-2 rounded-2xl border border-accent/20 bg-gradient-to-r from-accent to-accent-text px-4 py-3 text-left text-sm font-medium text-white shadow-[0_12px_30px_rgba(201,106,46,0.2)] transition-all hover:translate-y-[-1px] active:scale-[0.99]"
         >
           <Plus size={13} />
-          New agent
+          {canCreateAgents ? 'New agent' : 'Add AI provider'}
         </button>
+        {!canCreateAgents && (
+          <p className="mt-2 px-1 text-[11px] leading-5 text-tx-4">
+            Add one provider in Settings to unlock agent creation.
+          </p>
+        )}
       </div>
 
       {/* Agent list */}

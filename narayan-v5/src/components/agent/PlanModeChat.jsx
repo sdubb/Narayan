@@ -6,7 +6,12 @@ import {
   Bot, User, AlertCircle, Search, Zap, Paperclip, FileText, Trash2,
 } from 'lucide-react';
 import { planMode as planModeApi } from '../../api';
-import { ConnectorSetupModal, useConnectorVerification } from '../connectors/ConnectorSetupModal';
+import {
+  ConnectorSetupModal,
+  extractConnectorIdsFromText,
+} from '../connectors/ConnectorSetupModal';
+import DatabaseConnectionCard from '../cards/DatabaseConnectionCard';
+import CustomConnectionCard from '../cards/CustomConnectionCard';
 
 // Phase labels shown in the progress strip
 const PHASE_LABELS = {
@@ -454,7 +459,9 @@ export default function PlanModeChat({ agentName = 'New Agent', existingAgentId 
   const [showConnectorModal, setShowConnectorModal] = useState(false);
   const [requiredConnectors, setRequiredConnectors] = useState([]);
   const [connectorVerified, setConnectorVerified] = useState(false);
-  const connectorVerification = useConnectorVerification(requiredConnectors);
+  const [inlineConnectorIds, setInlineConnectorIds] = useState([]);
+  const [inlineConnectionKinds, setInlineConnectionKinds] = useState([]);
+  const [showDatabaseCard, setShowDatabaseCard] = useState(false);
   const bottomRef = useRef(null);
   const inputRef  = useRef(null);
   const fileInputRef = useRef(null);
@@ -489,6 +496,7 @@ export default function PlanModeChat({ agentName = 'New Agent', existingAgentId 
       setActiveAgentId(res.agent_id || agentIdOverride || activeAgentId);
       setMessages([{ role: 'assistant', content: res.message || 'What should this agent do?', isNew: true }]);
       setPhase(res.phase || 'capturing_intent');
+      syncInlineSetupFromTurn(res);
       setTestResult(null);
       setSelectedTemplate(template);
       setStep('chat');
@@ -570,13 +578,11 @@ export default function PlanModeChat({ agentName = 'New Agent', existingAgentId 
 
     try {
       const res = await planModeApi.turn(sessionId, userMsg, attachments);
-      const newPhase = res.phase || phase;
-      setPhase(newPhase);
-      setMessages(prev => [...prev, { role: 'assistant', content: res.reply, isNew: true }]);
+      appendAssistantReply(res);
       setPendingAttachments([]);
       setTestResult(null);
 
-      if (res.complete || newPhase === 'complete') {
+      if (res.complete || res.phase === 'complete') {
         setComplete(true);
       }
     } catch (e) {
@@ -586,9 +592,97 @@ export default function PlanModeChat({ agentName = 'New Agent', existingAgentId 
     } finally {
       setSending(false);
     }
-  }, [sessionId, sending, phase, pendingAttachments, attachmentsBusy]);
+  }, [sessionId, sending, pendingAttachments, attachmentsBusy]);
 
   // ── Save and deploy ────────────────────────────────────────────────────
+  const syncInlineSetupFromTurn = useCallback((turn = {}) => {
+    const reply = String(turn.reply || turn.message || '');
+    const lower = reply.toLowerCase();
+    const inlineSetup = turn.inline_setup || {};
+    const connectionKinds = [
+      ...(Array.isArray(inlineSetup.connection_kinds) ? inlineSetup.connection_kinds : []),
+      ...(Array.isArray(turn.connection_kinds) ? turn.connection_kinds : []),
+    ];
+    const requiredConnectors = [
+      ...(Array.isArray(inlineSetup.required_connectors) ? inlineSetup.required_connectors : []),
+      ...(Array.isArray(turn.required_connectors) ? turn.required_connectors : []),
+      ...extractConnectorIdsFromText(reply),
+    ];
+    const uniqueConnectors = [...new Set(requiredConnectors.filter(Boolean))];
+    const uniqueKinds = [...new Set(connectionKinds.filter(kind => ['db', 'api', 'mcp'].includes(kind)))];
+    const pendingInlineSetup =
+      typeof inlineSetup.pending === 'boolean'
+        ? inlineSetup.pending
+        : typeof turn.inline_setup_pending === 'boolean'
+          ? turn.inline_setup_pending
+          : (
+            uniqueConnectors.length > 0
+            || uniqueKinds.length > 0
+            || Boolean(inlineSetup.needs_database_connection ?? turn.needs_database_connection)
+            || lower.includes('database connection')
+            || lower.includes('inline connection card')
+            || lower.includes('database card')
+            || lower.includes('connect your db')
+            || lower.includes('database using the inline connection card')
+          );
+
+    if (!pendingInlineSetup) {
+      setInlineConnectorIds([]);
+      setInlineConnectionKinds([]);
+      setShowDatabaseCard(false);
+      return;
+    }
+
+    setInlineConnectorIds(uniqueConnectors);
+    setInlineConnectionKinds(uniqueKinds);
+    setShowDatabaseCard(
+      uniqueKinds.includes('db')
+      || Boolean(inlineSetup.needs_database_connection ?? turn.needs_database_connection)
+      || lower.includes('database connection')
+      || lower.includes('inline connection card')
+      || lower.includes('database card')
+      || lower.includes('connect your db')
+      || lower.includes('database using the inline connection card')
+    );
+  }, []);
+
+  const appendAssistantReply = useCallback((turn) => {
+    const reply = String(turn?.reply || turn?.message || '');
+    const phaseToSet = turn?.phase || phase;
+    setPhase(phaseToSet);
+    setMessages(prev => [...prev, { role: 'assistant', content: reply, isNew: true }]);
+    syncInlineSetupFromTurn(turn);
+    setTestResult(null);
+    if (phaseToSet === 'complete') {
+      setComplete(true);
+    }
+  }, [phase, syncInlineSetupFromTurn]);
+
+  const resumeWithInlineSetup = useCallback(async (answer, userLabel = answer) => {
+    if (!sessionId || sending) return;
+    setError('');
+    setSending(true);
+    setMessages(prev => [...prev, {
+      role: 'user',
+      content: `Connected ${userLabel}`,
+      isNew: true,
+    }]);
+
+    try {
+      const res = await planModeApi.turn(sessionId, answer);
+      appendAssistantReply(res);
+      setPendingAttachments([]);
+      if (res.complete || res.phase === 'complete') {
+        setComplete(true);
+      }
+    } catch (e) {
+      setError(e.message || 'Something went wrong. Try again.');
+      setMessages(prev => prev.slice(0, -1));
+    } finally {
+      setSending(false);
+    }
+  }, [sessionId, sending, appendAssistantReply]);
+
   const runTest = useCallback(async () => {
     if (!sessionId || testing) return;
     setTesting(true);
@@ -614,18 +708,16 @@ export default function PlanModeChat({ agentName = 'New Agent', existingAgentId 
     }]);
     try {
       const res = await planModeApi.revise(sessionId, testResult);
-      const newPhase = res.phase || phase;
-      setPhase(newPhase);
-      setMessages(prev => [...prev, { role: 'assistant', content: res.reply, isNew: true }]);
+      appendAssistantReply(res);
       setTestResult(null);
-      setComplete(newPhase === 'complete');
+      setComplete((res.phase || phase) === 'complete');
     } catch (e) {
       setError(e.message || 'Failed to revise plan');
       setMessages(prev => prev.slice(0, -1));
     } finally {
       setRevising(false);
     }
-  }, [sessionId, revising, testResult, phase]);
+  }, [sessionId, revising, testResult, phase, appendAssistantReply]);
 
   const continueOrComplete = useCallback(async (res) => {
     if (res?.has_more_roles) {
@@ -791,6 +883,30 @@ export default function PlanModeChat({ agentName = 'New Agent', existingAgentId 
                       isNew={msg.isNew}
                     />
                   ))}
+                  {showDatabaseCard && (
+                    <DatabaseConnectionCard
+                      onConnected={({ name }) => resumeWithInlineSetup(name, name)}
+                    />
+                  )}
+                  {inlineConnectionKinds.includes('mcp') && (
+                    <CustomConnectionCard
+                      kind="mcp"
+                      onConnected={({ name }) => resumeWithInlineSetup(name, name)}
+                    />
+                  )}
+                  {inlineConnectionKinds.includes('api') && (
+                    <CustomConnectionCard
+                      kind="api"
+                      onConnected={({ name }) => resumeWithInlineSetup(name, name)}
+                    />
+                  )}
+                  {inlineConnectorIds.length > 0 && (
+                    <ConnectorSetupModal
+                      requiredConnectors={inlineConnectorIds}
+                      onVerified={() => resumeWithInlineSetup(inlineConnectorIds.join(', '), inlineConnectorIds.join(', '))}
+                      mode="inline"
+                    />
+                  )}
                   {sending && <TypingDots />}
                 </>
               )}

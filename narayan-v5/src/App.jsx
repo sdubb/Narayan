@@ -1,21 +1,53 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import LandingPage from './pages/LandingPage';
 import AuthPage     from './pages/AuthPage';
 import DashboardPage from './pages/DashboardPage';
 import ChatPage     from './pages/ChatPage';
 import SettingsPage from './pages/SettingsPage';
-import { health }   from './api';
+import { credentials } from './api';
 
 export default function App() {
   const [page, setPage] = useState('loading');
+  const [canCreateAgents, setCanCreateAgents] = useState(false);
+
+  const refreshProviderState = useCallback(async () => {
+    const res = await credentials.list();
+    const hasProviders = (res.credentials || []).length > 0;
+    setCanCreateAgents(hasProviders);
+    return hasProviders;
+  }, []);
 
   useEffect(() => {
     const token = localStorage.getItem('narayan_token');
-    if (!token) { setPage('landing'); return; }
-    health.check()
-      .then(() => setPage('chat'))
-      .catch(() => setPage('chat'));
-  }, []);
+    if (!token) {
+      setCanCreateAgents(false);
+      setPage('landing');
+      return;
+    }
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const hasProviders = await refreshProviderState();
+        if (!cancelled) setPage(hasProviders ? 'chat' : 'settings');
+      } catch (error) {
+        if (cancelled) return;
+        const message = error?.message || '';
+        if (message.includes('Not authenticated') || message.includes('Session expired') || message.includes('sign in again')) {
+          localStorage.removeItem('narayan_token');
+          localStorage.removeItem('narayan_tenant_id');
+          localStorage.removeItem('narayan_session_started_at');
+          setCanCreateAgents(false);
+          setPage('auth');
+          return;
+        }
+        setCanCreateAgents(false);
+        setPage('settings');
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [refreshProviderState]);
 
   // Listen for 401 events emitted by the API client when JWT expires
   useEffect(() => {
@@ -42,7 +74,9 @@ export default function App() {
     if (token)     localStorage.setItem('narayan_token',     token);
     if (tenant_id) localStorage.setItem('narayan_tenant_id', tenant_id);
     localStorage.setItem('narayan_session_started_at', String(Date.now()));
-    setPage('chat');
+    refreshProviderState()
+      .then(hasProviders => setPage(hasProviders ? 'chat' : 'settings'))
+      .catch(() => setPage('settings'));
   }
 
   function onNavigate(dest) {
@@ -64,7 +98,7 @@ export default function App() {
 
   if (page === 'landing')  return <LandingPage onEnterApp={() => setPage('auth')} onSignIn={() => setPage('auth')} />;
   if (page === 'auth')     return <AuthPage onAuth={onAuth} onBack={() => setPage('landing')} />;
-  if (page === 'dashboard') return <DashboardPage onNavigate={onNavigate} />;
-  if (page === 'settings') return <SettingsPage onBack={() => setPage('chat')} />;
-  return <ChatPage onNavigate={onNavigate} />;
+  if (page === 'dashboard') return <DashboardPage onNavigate={onNavigate} canCreateAgents={canCreateAgents} />;
+  if (page === 'settings') return <SettingsPage onBack={() => setPage('chat')} canCreateAgents={canCreateAgents} onProvidersChanged={refreshProviderState} />;
+  return <ChatPage onNavigate={onNavigate} canCreateAgents={canCreateAgents} />;
 }

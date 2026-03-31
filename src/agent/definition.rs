@@ -130,8 +130,8 @@ pub struct AgentRole {
     #[serde(default)]
     pub role_category: RoleCategory,
 
-    /// Structured guidelines for the planner — happy path AND failure handling.
-    /// The planner injects these verbatim into its system prompt.
+    /// Structured guidelines used by plan mode and runtime — happy path AND failure handling.
+    /// These are injected verbatim into the system prompt that drives execution.
     ///
     /// Example:
     ///   - Always attempt company inference if company name is missing
@@ -139,12 +139,12 @@ pub struct AgentRole {
     ///   - If Salesforce update fails, save result to workspace and notify Slack
     ///   - Skip leads with no valid email address
     /// Structured execution guidelines — rules, failure handling, and priorities.
-    /// Stored as JSON in the DB and injected verbatim into the planner prompt.
+    /// Stored as JSON in the DB and injected verbatim into the execution prompt.
     #[serde(default)]
     pub execution_guidelines: ExecutionGuidelines,
 
     /// Connectors this role uses — must be a subset of AgentDefinition.connectors.
-    /// Only these connectors are shown to the planner and executor.
+    /// Only these connectors are shown to plan mode and executor flows.
     pub connectors: Vec<String>,
 
     /// Specific non-connector tools this role uses.

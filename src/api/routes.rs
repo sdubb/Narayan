@@ -3542,6 +3542,44 @@ pub async fn list_plan_mode_templates(_tenant: AuthenticatedTenant) -> impl Into
     Json(serde_json::json!({ "templates": list })).into_response()
 }
 
+fn plan_mode_inline_setup_payload(
+    session: &crate::agent::definition::PlanModeSession,
+    pending: bool,
+) -> serde_json::Value {
+    let connection_kinds = session
+        .intent_cache
+        .as_ref()
+        .map(|intent| {
+            let mut kinds = Vec::new();
+            if crate::agent::plan_mode::intent_needs_database_connection(intent) {
+                kinds.push("db");
+            }
+            if crate::agent::plan_mode::intent_needs_api_connection(intent) {
+                kinds.push("api");
+            }
+            if crate::agent::plan_mode::intent_needs_mcp_connection(intent) {
+                kinds.push("mcp");
+            }
+            kinds
+        })
+        .unwrap_or_default();
+
+    serde_json::json!({
+        "pending": pending,
+        "connection_kinds": connection_kinds,
+        "required_connectors": session
+            .draft_role
+            .as_ref()
+            .map(|role| role.connectors.clone())
+            .unwrap_or_default(),
+        "needs_database_connection": session
+            .intent_cache
+            .as_ref()
+            .map(crate::agent::plan_mode::intent_needs_database_connection)
+            .unwrap_or(false),
+    })
+}
+
 fn template_persona(group: &str, category: &crate::agent::definition::RoleCategory) -> String {
     match group {
         "founders" =>
@@ -3578,6 +3616,7 @@ pub async fn start_plan_mode_session(
     // Pre-populate intent_cache, draft_role, connectors from the template.
     // BUT: run through the FULL clarification pipeline to ask all questions.
     // Only skip questions that the template explicitly pre-answered (in ask_steps exclusion).
+    let mut pending_inline_setup = false;
     let first_message = if let Some(template_id) = body["template_id"].as_str() {
         if let Some(tmpl) = find_template(template_id) {
             // Build the pre-configured role
@@ -3617,11 +3656,12 @@ pub async fn start_plan_mode_session(
             if !missing.is_empty() {
                 // Missing required connectors — ask user to install them first
                 let connector_list = missing.join(", ");
-                session.phase = crate::agent::definition::PlanModePhase::CapturingIntent;
+                session.phase = crate::agent::definition::PlanModePhase::ResolvingConnectors;
+                pending_inline_setup = true;
                 format!(
                     "I've configured your **{}** agent. Before we continue, you'll need to connect: **{}**.\n\n\
-                     Head to **Settings → Connectors** to connect them, then come back and we'll \
-                     finish the setup.",
+                     Use the inline connection cards below to add them now, or head to **Settings → Connectors** \
+                     if you'd rather do it there.",
                     tmpl.name,
                     connector_list
                 )
@@ -3701,6 +3741,7 @@ pub async fn start_plan_mode_session(
             "phase":       serde_json::to_value(&session.phase).unwrap_or_default(),
             "message":     first_message,
             "from_template": body["template_id"].as_str().is_some(),
+            "inline_setup": plan_mode_inline_setup_payload(&session, pending_inline_setup),
             "attachments": session.attachments.len(),
             "goal_fingerprint": session.goal_fingerprint,
             "repair_version": session.repair_version,
@@ -3755,6 +3796,20 @@ pub async fn plan_mode_turn(
                 "phase":    serde_json::to_value(&updated_session.phase).unwrap_or_default(),
                 "agent_id": agent_id,
                 "complete": updated_session.phase == crate::agent::definition::PlanModePhase::Complete,
+                "inline_setup": plan_mode_inline_setup_payload(
+                    &updated_session,
+                    updated_session.phase == crate::agent::definition::PlanModePhase::ResolvingConnectors,
+                ),
+                "required_connectors": updated_session
+                    .draft_role
+                    .as_ref()
+                    .map(|role| role.connectors.clone())
+                    .unwrap_or_default(),
+                "needs_database_connection": updated_session
+                    .intent_cache
+                    .as_ref()
+                    .map(crate::agent::plan_mode::intent_needs_database_connection)
+                    .unwrap_or(false),
                 "attachments": updated_session.attachments.len(),
                 "goal_fingerprint": updated_session.goal_fingerprint,
                 "repair_version": updated_session.repair_version,
@@ -3881,6 +3936,20 @@ pub async fn revise_plan_mode_session(
                 "phase":    serde_json::to_value(&updated_session.phase).unwrap_or_default(),
                 "agent_id": updated_session.draft_agent.id,
                 "complete": updated_session.phase == crate::agent::definition::PlanModePhase::Complete,
+                "inline_setup": plan_mode_inline_setup_payload(
+                    &updated_session,
+                    updated_session.phase == crate::agent::definition::PlanModePhase::ResolvingConnectors,
+                ),
+                "required_connectors": updated_session
+                    .draft_role
+                    .as_ref()
+                    .map(|role| role.connectors.clone())
+                    .unwrap_or_default(),
+                "needs_database_connection": updated_session
+                    .intent_cache
+                    .as_ref()
+                    .map(crate::agent::plan_mode::intent_needs_database_connection)
+                    .unwrap_or(false),
                 "attachments": updated_session.attachments.len(),
                 "goal_fingerprint": updated_session.goal_fingerprint,
                 "repair_version": updated_session.repair_version,

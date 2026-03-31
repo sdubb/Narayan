@@ -108,10 +108,22 @@ impl Provider for AnthropicProvider {
         "anthropic"
     }
 
-    async fn chat(&self, messages: Vec<Message>, _tools: Vec<ToolSpec>) -> Result<ChatResponse> {
+    async fn chat(&self, messages: Vec<Message>, tools: Vec<ToolSpec>) -> Result<ChatResponse> {
         let client = reqwest::Client::new();
 
-        let payload = serde_json::json!({
+        // Convert tools to Anthropic format
+        let anthropic_tools: Vec<serde_json::Value> = tools
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "name": t.name,
+                    "description": t.description,
+                    "input_schema": t.parameters,
+                })
+            })
+            .collect();
+
+        let mut payload = serde_json::json!({
             "model": self.model,
             "max_tokens": 4096,
             "messages": messages
@@ -125,6 +137,10 @@ impl Provider for AnthropicProvider {
                 .map(|m| m.content.clone())
                 .unwrap_or_default(),
         });
+
+        if !anthropic_tools.is_empty() {
+            payload["tools"] = serde_json::json!(anthropic_tools);
+        }
 
         tracing::info!(
             "provider request payload provider=anthropic model={} payload={}",
@@ -149,12 +165,37 @@ impl Provider for AnthropicProvider {
             truncate_for_log(&resp.to_string(), 4000)
         );
 
-        let content = resp["content"][0]["text"].as_str().map(String::from);
+        // Parse tool calls from Anthropic's tool_use content blocks
+        let tool_calls = resp["content"]
+            .as_array()
+            .unwrap_or(&vec![])
+            .iter()
+            .filter_map(|content| {
+                if content["type"].as_str() == Some("tool_use") {
+                    let id = content["id"].as_str()?.to_string();
+                    let name = content["name"].as_str()?.to_string();
+                    let input = content["input"].clone();
+                    Some(ToolCall { id, name, arguments: input })
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Extract text content, skip tool_use blocks
+        let content = resp["content"]
+            .as_array()
+            .and_then(|arr| {
+                arr.iter()
+                    .find(|item| item["type"].as_str() == Some("text"))
+                    .and_then(|text_block| text_block["text"].as_str())
+                    .map(String::from)
+            });
 
         let input_tokens = resp["usage"]["input_tokens"].as_u64().unwrap_or(0) as u32;
         let output_tokens = resp["usage"]["output_tokens"].as_u64().unwrap_or(0) as u32;
 
-        Ok(ChatResponse { content, tool_calls: vec![], input_tokens, output_tokens })
+        Ok(ChatResponse { content, tool_calls, input_tokens, output_tokens })
     }
 }
 
@@ -330,6 +371,7 @@ mod compatible_impl;
 mod copilot_impl;
 mod gemini_impl;
 mod glm_impl;
+mod groq_impl;
 mod novita_impl;
 mod openrouter_impl;
 mod sglang_impl;
@@ -338,6 +380,7 @@ pub use compatible_impl::CompatibleProviderAdapter;
 pub use copilot_impl::CopilotProviderAdapter;
 pub use gemini_impl::GeminiProviderAdapter;
 pub use glm_impl::GlmProviderAdapter;
+pub use groq_impl::GroqProviderAdapter;
 pub use novita_impl::NovitaProviderAdapter;
 pub use openrouter_impl::OpenRouterProviderAdapter;
 pub use sglang_impl::SglangProviderAdapter;
@@ -392,9 +435,7 @@ pub fn build_provider(name: &str, api_key: String, model: String) -> Option<Arc<
     match name {
         "anthropic" => Some(Arc::new(AnthropicProvider::new(api_key, model))),
         "openai" => Some(Arc::new(OpenAiProvider::new(api_key, model))),
-        "groq" => {
-            Some(Arc::new(OpenAiProvider::new(api_key, model).with_base_url("https://api.groq.com/openai".into())))
-        }
+        "groq" => Some(Arc::new(GroqProviderAdapter::new(api_key, model))),
         "ollama" => Some(Arc::new(OllamaProvider::new(api_key, model))),
         "gemini" => Some(Arc::new(GeminiProviderAdapter::new(api_key, model))),
         "nvidia" => {
