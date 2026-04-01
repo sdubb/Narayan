@@ -87,15 +87,4 @@ pub fn plugin(deps: &SharedDeps, tenant_id: &str) -> SegmentPlugin {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
 
-    #[test]
-    fn test_brand_protection_plugin_exists() {
-        // Create a mock SharedDeps structure for testing
-        // This would require building actual dependencies, which is complex
-        // A basic smoke test to ensure the plugin compiles and has the right structure
-        println!("Brand protection segment plugin is properly structured");
-    }
-}

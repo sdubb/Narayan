@@ -37,7 +37,7 @@ mod webhooks;
 mod worker;
 mod workspace;
 
-use agent::{AgentLoop, AgentManager, LlmClarifier, LlmEvaluator, LlmExecutor, LlmPreflight, LlmReflector};
+use agent::{AgentLoop, AgentManager, LlmClarifier, LlmEvaluator, LlmExecutor, LlmPlanner, LlmPreflight, LlmReflector};
 use api::{routes::AppState, server::serve};
 use audit::AuditLog;
 use billing::{paypal::PayPalProvider, stripe::StripeProvider, BillingStore};
@@ -47,7 +47,7 @@ use connectors::{ConnectorInstallStore, ConnectorPoller};
 use events::EventBus;
 use gateway::{CostTracker, LlmGateway, NarayanGateway, ProviderLimits, RateLimiter, ResponseCache};
 use knowledge::KnowledgeGraph;
-use memory::{build_embedding_model, store::RedisMemoryStore, DistanceMetric, PgVectorStore};
+use memory::{build_embedding_model, store::RedisMemoryStore, DistanceMetric, MemoryConsolidator, PgVectorStore, VectorStore};
 use metrics::Metrics;
 use scheduler::{DbPollingScheduler, InMemoryQueue, Queue, RedisBackedQueue, ScheduleTicker, Scheduler};
 use skill_marketplace::SkillMarketplace;
@@ -301,6 +301,12 @@ async fn main() -> Result<()> {
         .with_event_bus(event_bus.clone()),
     );
     tracing::info!("LLM gateway ready (BYOK)");
+    let memory_consolidator = MemoryConsolidator::new(
+        gateway.clone(),
+        vector_store.clone() as Arc<dyn VectorStore>,
+        embedder.clone(),
+    )
+    .with_store(store.clone());
 
     // ── Browser Pool ───────────────────────────────────────────────────────
     // Shared Chromium instances — all browser tools borrow from here.
@@ -334,8 +340,21 @@ async fn main() -> Result<()> {
     // DelegateTool gets the swarm so child agents are enqueued via Arc<Swarm>
     // instead of the old global crate::swarm::push() free function.
     tool_registry.register(Arc::new(DelegateTool::new(store.clone(), workspace_manager.clone(), swarm.clone())));
+    tool_registry.register(Arc::new(tools::send_message::SendMessageTool::new(store.clone(), event_bus.clone())));
+    tool_registry
+        .register(Arc::new(tools::message_inbox::MessageInboxTool::new(store.clone(), swarm.clone(), event_bus.clone())));
+    tool_registry.register(Arc::new(tools::session_tasks::TaskCreateTool::new(store.clone())));
+    tool_registry.register(Arc::new(tools::session_tasks::TaskGetTool::new(store.clone())));
+    tool_registry.register(Arc::new(tools::session_tasks::TaskListTool::new(store.clone())));
+    tool_registry.register(Arc::new(tools::session_tasks::TaskUpdateTool::new(store.clone())));
+    tool_registry.register(Arc::new(tools::session_tasks::TaskStopTool::new(store.clone())));
+    tool_registry.register(Arc::new(tools::session_tasks::TaskOutputTool::new(store.clone())));
     // Memory tools use the durable Redis-backed store
     tool_registry.register(Arc::new(tools::memory_store::MemoryStoreTool));
+    tool_registry.register(Arc::new(tools::memory_consolidate::MemoryConsolidateTool::new(
+        store.clone(),
+        memory_consolidator.clone(),
+    )));
     tool_registry.register(Arc::new(tools::memory_recall::MemoryRecallTool));
     tool_registry.register(Arc::new(tools::memory_forget::MemoryForgetTool));
     // Register vector tools
@@ -399,6 +418,7 @@ async fn main() -> Result<()> {
             .with_event_bus(event_bus.clone())
             .with_store(store.clone()),
     );
+    let planner = Arc::new(LlmPlanner::new(gateway.clone()).with_store(store.clone()));
     let evaluator = Arc::new(LlmEvaluator::new(gateway.clone()));
     let reflector = Arc::new(LlmReflector::new(gateway.clone()));
     let preflight = Arc::new(LlmPreflight::new(gateway.clone()));
@@ -406,6 +426,7 @@ async fn main() -> Result<()> {
 
     let agent_loop = Arc::new(
         AgentLoop::new(
+            planner,
             executor,
             evaluator,
             reflector,
@@ -420,6 +441,7 @@ async fn main() -> Result<()> {
             agent_services.clone(),
         )
         .with_store(Arc::clone(&store))
+        .with_memory_consolidator(memory_consolidator.clone())
         .with_limits(100, 3_600),
     );
 
@@ -508,7 +530,7 @@ async fn main() -> Result<()> {
     {
         let _store = store.clone();
         let _event_bus = event_bus.clone();
-        
+
         // For now, the dispatcher is called directly when role completes.
         // No separate background task needed—the event is published and can be handled
         // by subscribers. In a future enhancement, could add a proper event subscription

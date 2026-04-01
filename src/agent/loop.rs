@@ -8,7 +8,7 @@ use crate::{
         clarifier::{ClarificationResult, Clarifier},
         evaluator::{check_completion_criteria, EvalVerdict, Evaluator},
         executor::Executor,
-        planner::Plan,
+        planner::{Plan, Planner},
         preflight::{Preflight, PreflightResult},
         prompts::{is_direct_response_goal, StepHistory},
         reflector::Reflector,
@@ -24,7 +24,10 @@ use crate::{
     segments::AgentServices,
     skill_evolution::evolution::evolve_skill,
     skills::registry::SkillRegistry,
-    state::{AgentState, AgentStatus},
+    state::{
+        AgentMessage, AgentMessageKind, AgentState, AgentStatus, SessionTask, SessionTaskOutput,
+        SessionTaskResultStatus, SessionTaskStatus,
+    },
     tools::ToolRegistry,
     util::next_run_after,
 };
@@ -161,12 +164,8 @@ impl StepStateTransaction {
         }
 
         if let Some(ref entry) = self.step_outputs_entry {
-            let mut outputs = state
-                .metadata
-                .get("step_outputs")
-                .and_then(|v| v.as_array())
-                .cloned()
-                .unwrap_or_default();
+            let mut outputs =
+                state.metadata.get("step_outputs").and_then(|v| v.as_array()).cloned().unwrap_or_default();
             outputs.push(entry.clone());
             state.metadata["step_outputs"] = serde_json::Value::Array(outputs);
         }
@@ -376,6 +375,7 @@ fn is_missing_provider_credentials_error(error: &anyhow::Error) -> bool {
 fn provider_credentials_questions() -> Vec<crate::agent::clarifier::ClarificationQuestion> {
     vec![crate::agent::clarifier::ClarificationQuestion {
         id: "llm_provider_credentials".into(),
+        question_type: Some("approval".into()),
         prompt: "Add an LLM provider API key to continue.".into(),
         placeholder: Some("After adding credentials in Settings, click Submit to retry.".into()),
         helper_text: Some(
@@ -383,6 +383,9 @@ fn provider_credentials_questions() -> Vec<crate::agent::clarifier::Clarificatio
                 .into(),
         ),
         options: Vec::new(),
+        multi_select: false,
+        recommended: Vec::new(),
+        preview: None,
         required: false,
         secret: false,
         store_as_credential: None,
@@ -394,6 +397,7 @@ fn provider_credentials_questions() -> Vec<crate::agent::clarifier::Clarificatio
 // ── AgentLoop ──────────────────────────────────────────────────────────────
 
 pub struct AgentLoop {
+    planner: Arc<dyn Planner>,
     executor: Arc<dyn Executor>,
     evaluator: Arc<dyn Evaluator>,
     reflector: Arc<dyn Reflector>,
@@ -403,8 +407,9 @@ pub struct AgentLoop {
     event_bus: Arc<EventBus>,
     skill_registry: Arc<RwLock<SkillRegistry>>,
     knowledge_graph: Arc<Mutex<KnowledgeGraph>>,
-    vector_store: Arc<crate::memory::PgVectorStore>,
+    vector_store: Arc<dyn crate::memory::VectorStore>,
     embedder: Arc<dyn crate::memory::EmbeddingModel>,
+    memory_consolidator: Option<Arc<crate::memory::MemoryConsolidator>>,
     services: Arc<AgentServices>,
     store: Option<Arc<crate::storage::PostgresStore>>,
     max_steps: usize,
@@ -414,6 +419,7 @@ pub struct AgentLoop {
 impl AgentLoop {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
+        planner: Arc<dyn Planner>,
         executor: Arc<dyn Executor>,
         evaluator: Arc<dyn Evaluator>,
         reflector: Arc<dyn Reflector>,
@@ -423,11 +429,12 @@ impl AgentLoop {
         event_bus: Arc<EventBus>,
         skill_registry: Arc<RwLock<SkillRegistry>>,
         knowledge_graph: Arc<Mutex<KnowledgeGraph>>,
-        vector_store: Arc<crate::memory::PgVectorStore>,
+        vector_store: Arc<dyn crate::memory::VectorStore>,
         embedder: Arc<dyn crate::memory::EmbeddingModel>,
         services: Arc<AgentServices>,
     ) -> Self {
         Self {
+            planner,
             executor,
             evaluator,
             reflector,
@@ -439,6 +446,7 @@ impl AgentLoop {
             knowledge_graph,
             vector_store,
             embedder,
+            memory_consolidator: None,
             services,
             store: None,
             max_steps: 50,
@@ -451,10 +459,129 @@ impl AgentLoop {
         self
     }
 
+    pub fn with_memory_consolidator(mut self, consolidator: Arc<crate::memory::MemoryConsolidator>) -> Self {
+        self.memory_consolidator = Some(consolidator);
+        self
+    }
+
     pub fn with_limits(mut self, max_steps: usize, timeout_secs: u64) -> Self {
         self.max_steps = max_steps;
         self.timeout_secs = timeout_secs;
         self
+    }
+
+    async fn send_agent_message(&self, message: AgentMessage) {
+        let Some(store) = self.store.as_ref() else {
+            return;
+        };
+        if let Err(error) = store.create_agent_message(&message).await {
+            tracing::warn!(
+                sender = %message.sender_agent_id,
+                recipient = %message.recipient_agent_id,
+                error = %error,
+                "failed to persist agent message"
+            );
+            return;
+        }
+
+        self.event_bus.publish(AgentEvent::AgentMessageSent {
+            agent_id: message.sender_agent_id.clone(),
+            recipient_agent_id: message.recipient_agent_id.clone(),
+            message_kind: format!("{:?}", message.message_kind).to_ascii_lowercase(),
+            task_id: message.task_id.clone(),
+            has_result_contract: message.has_result_contract(),
+        });
+        self.event_bus.publish(AgentEvent::AgentMessageReceived {
+            agent_id: message.recipient_agent_id.clone(),
+            sender_agent_id: message.sender_agent_id.clone(),
+            message_kind: format!("{:?}", message.message_kind).to_ascii_lowercase(),
+            task_id: message.task_id.clone(),
+            has_result_contract: message.has_result_contract(),
+        });
+    }
+
+    async fn notify_parent_of_terminal_result(
+        &self,
+        state: &AgentState,
+        status: SessionTaskResultStatus,
+        note: impl Into<String>,
+        findings: Vec<String>,
+        confidence: f64,
+    ) {
+        let Some(parent_agent_id) = state.parent_agent_id.clone() else {
+            return;
+        };
+
+        let note = note.into();
+        let task_id = state
+            .metadata
+            .get("delegation_context")
+            .and_then(|value| value.get("task_id"))
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+            .or_else(|| state.current_task.clone());
+        let artifacts = if state.workspace_path.trim().is_empty() {
+            Vec::new()
+        } else {
+            vec![state.workspace_path.clone()]
+        };
+
+        let mut message = AgentMessage::new(
+            uuid::Uuid::new_v4().to_string(),
+            state.tenant_id.clone(),
+            state.id.clone(),
+            parent_agent_id,
+            AgentMessageKind::Result,
+            "worker_result",
+            note.clone(),
+        );
+        message.task_id = task_id;
+        message.step_index = Some(state.current_step);
+        message.metadata = serde_json::json!({
+            "auto_generated": true,
+            "worker_type": state
+                .metadata
+                .get("delegation_context")
+                .and_then(|value| value.get("worker_type"))
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+            "write_scope": state
+                .metadata
+                .get("delegation_context")
+                .and_then(|value| value.get("write_scope"))
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!([])),
+        });
+        message.result_contract = Some(SessionTaskOutput {
+            status,
+            artifacts,
+            findings,
+            confidence: confidence.clamp(0.0, 1.0),
+            note: Some(note),
+        });
+        self.send_agent_message(message).await;
+    }
+
+    async fn maybe_consolidate_memory(&self, state: &mut AgentState) {
+        let Some(consolidator) = self.memory_consolidator.as_ref() else {
+            return;
+        };
+        match consolidator.consolidate_agent(state, false).await {
+            Ok(result) => {
+                crate::memory::apply_consolidation_metadata(state, &result);
+                tracing::debug!(
+                    agent_id = %state.id,
+                    changed = result.changed,
+                    skipped = result.skipped,
+                    topics_saved = result.topics_saved.len(),
+                    pruned_topics = result.pruned_topics.len(),
+                    "memory consolidation completed"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(agent_id = %state.id, error = %error, "memory consolidation failed");
+            }
+        }
     }
 
     /// Execute exactly one step of the agent state machine.
@@ -483,6 +610,14 @@ impl AgentLoop {
             );
             tracing::error!(agent_id = %state.id, reason = %reason, "cognitive control limit hit");
             state.mark_failed();
+            self.notify_parent_of_terminal_result(
+                state,
+                SessionTaskResultStatus::Failed,
+                reason.clone(),
+                vec![reason.clone()],
+                1.0,
+            )
+            .await;
             self.event_bus.publish(AgentEvent::GoalFailed { agent_id: state.id.clone(), reason: reason.clone() });
             self.event_bus.close(&state.id);
             return Ok(StepOutcome::Failed(reason));
@@ -598,6 +733,14 @@ impl AgentLoop {
                 );
                 state.goal = orig;
                 state.mark_failed();
+                self.notify_parent_of_terminal_result(
+                    state,
+                    SessionTaskResultStatus::Failed,
+                    reason.clone(),
+                    vec![reason.clone()],
+                    1.0,
+                )
+                .await;
                 self.event_bus.publish(AgentEvent::GoalFailed { agent_id: state.id.clone(), reason: reason.clone() });
                 self.event_bus.close(&state.id);
                 return Ok(StepOutcome::Failed(reason));
@@ -617,6 +760,7 @@ impl AgentLoop {
                 steps = new_plan.steps.len(),
                 "auto-approving deterministic plan — skipping approval gate"
             );
+            self.sync_session_tasks_for_plan(state, &new_plan).await;
             *plan = Some(new_plan);
         }
 
@@ -631,7 +775,25 @@ impl AgentLoop {
                 "agent loop reached plan completion"
             );
             state.mark_completed();
-            
+            self.maybe_consolidate_memory(state).await;
+            self.notify_parent_of_terminal_result(
+                state,
+                SessionTaskResultStatus::Complete,
+                summary.clone(),
+                state
+                    .metadata
+                    .get("key_findings")
+                    .and_then(|value| value.as_array())
+                    .map(|items| {
+                        items.iter()
+                            .filter_map(|value| value.as_str().map(str::to_string))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_else(|| vec![summary.clone()]),
+                1.0,
+            )
+            .await;
+
             // Emit RoleCompleted if this agent is executing a specific role
             if let (Some(agent_def_id), Some(role_id), Some(role_name)) = (
                 state.metadata.get("agent_definition_id").and_then(|v| v.as_str()),
@@ -652,7 +814,7 @@ impl AgentLoop {
                     "RoleCompleted event emitted for workforce event subscriptions"
                 );
             }
-            
+
             self.event_bus.publish(AgentEvent::GoalComplete { agent_id: state.id.clone(), summary: summary.clone() });
             self.event_bus.close(&state.id);
             return Ok(StepOutcome::Complete);
@@ -669,6 +831,19 @@ impl AgentLoop {
             history.push(step.index, step.description.clone(), true, &summary);
             state.advance_step();
             state.mark_waiting(next_run_after(0));
+            self.mark_step_task_finished(
+                state,
+                &step,
+                SessionTaskStatus::Completed,
+                Some(SessionTaskOutput {
+                    status: SessionTaskResultStatus::Complete,
+                    artifacts: Vec::new(),
+                    findings: vec![summary.clone()],
+                    confidence: 1.0,
+                    note: Some("step skipped by deterministic condition".into()),
+                }),
+            )
+            .await;
             self.event_bus.publish(AgentEvent::StepCompleted {
                 agent_id: state.id.clone(),
                 step_index: step.index,
@@ -695,6 +870,7 @@ impl AgentLoop {
             "agent loop executing step"
         );
         state.mark_running();
+        self.mark_step_task_in_progress(state, &step).await;
 
         // ── 5a. Inject knowledge graph facts into history ───────────────────
         // OPTIMIZATION: Only inject recent facts (from this agent's run) not all related facts
@@ -825,6 +1001,15 @@ impl AgentLoop {
             state.metadata["key_findings"] = serde_json::json!([]);
             history.push(step.index, step.description.clone(), true, &answer);
             state.mark_completed();
+            self.maybe_consolidate_memory(state).await;
+            self.notify_parent_of_terminal_result(
+                state,
+                SessionTaskResultStatus::Complete,
+                answer.clone(),
+                vec![answer.clone()],
+                1.0,
+            )
+            .await;
             self.event_bus.publish(AgentEvent::StepCompleted {
                 agent_id: state.id.clone(),
                 step_index: step.index,
@@ -839,7 +1024,7 @@ impl AgentLoop {
 
         // ── 9. Check FailureRules BEFORE evaluator (skip LLM if deterministic match) ─
         let retry_count = state.metadata.get("retry_count").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-        
+
         // Try to get a deterministic verdict from FailureRules before calling evaluator
         if !result.success {
             let role_id = state.metadata.get("role_id").and_then(|v| v.as_str()).map(String::from);
@@ -851,11 +1036,21 @@ impl AgentLoop {
                             step = step.index,
                             "FailureRule matched deterministic abort — skipping evaluator LLM call"
                         );
-                        state.metadata["last_reflection"] = serde_json::Value::String("Aborted by deterministic FailureRule".into());
+                        state.metadata["last_reflection"] =
+                            serde_json::Value::String("Aborted by deterministic FailureRule".into());
                         state.metadata["key_findings"] = serde_json::json!([]);
                         state.mark_failed();
                         let reason = format!("Step {} blocked by policy/permission rule", step.index);
-                        self.event_bus.publish(AgentEvent::GoalFailed { agent_id: state.id.clone(), reason: reason.clone() });
+                        self.notify_parent_of_terminal_result(
+                            state,
+                            SessionTaskResultStatus::Failed,
+                            reason.clone(),
+                            vec![reason.clone()],
+                            1.0,
+                        )
+                        .await;
+                        self.event_bus
+                            .publish(AgentEvent::GoalFailed { agent_id: state.id.clone(), reason: reason.clone() });
                         self.event_bus.close(&state.id);
                         return Ok(StepOutcome::PermanentError { reason });
                     }
@@ -866,7 +1061,7 @@ impl AgentLoop {
         // ── 9b. Evaluate + Reflect (one combined LLM call) ───────────────────
         // Evaluator is only called if no deterministic FailureRule matched
         let eval = self.evaluator.evaluate_and_reflect(state, current_plan, &step, &result, retry_count, 3).await?;
-        
+
         tracing::info!(
             agent_id = %state.id,
             step_index = step.index,
@@ -1153,6 +1348,28 @@ impl AgentLoop {
                         state.set_final_answer(eval.summary.clone());
                     }
                     state.mark_completed();
+                    self.maybe_consolidate_memory(state).await;
+                    self.notify_parent_of_terminal_result(
+                        state,
+                        SessionTaskResultStatus::Complete,
+                        eval.summary.clone(),
+                        vec![eval.summary.clone()],
+                        1.0,
+                    )
+                    .await;
+                    self.mark_step_task_finished(
+                        state,
+                        &step,
+                        SessionTaskStatus::Completed,
+                        Some(SessionTaskOutput {
+                            status: SessionTaskResultStatus::Complete,
+                            artifacts: Vec::new(),
+                            findings: vec![eval.summary.clone()],
+                            confidence: 1.0,
+                            note: Some("completion criteria satisfied early".into()),
+                        }),
+                    )
+                    .await;
                     self.event_bus.publish(AgentEvent::GoalComplete {
                         agent_id: state.id.clone(),
                         summary: "Goal achieved (early completion by criteria)".into(),
@@ -1163,6 +1380,19 @@ impl AgentLoop {
 
                 state.advance_step();
                 state.mark_waiting(next_run_after(0));
+                self.mark_step_task_finished(
+                    state,
+                    &step,
+                    SessionTaskStatus::Completed,
+                    Some(SessionTaskOutput {
+                        status: SessionTaskResultStatus::Complete,
+                        artifacts: Vec::new(),
+                        findings: vec![eval.summary.clone()],
+                        confidence: 1.0,
+                        note: Some("step completed successfully".into()),
+                    }),
+                )
+                .await;
                 self.event_bus.publish(AgentEvent::StepCompleted {
                     agent_id: state.id.clone(),
                     step_index: step.index,
@@ -1204,6 +1434,28 @@ impl AgentLoop {
 
                 if all_satisfied {
                     state.mark_completed();
+                    self.maybe_consolidate_memory(state).await;
+                    self.notify_parent_of_terminal_result(
+                        state,
+                        SessionTaskResultStatus::Complete,
+                        summary.clone(),
+                        vec![summary.clone()],
+                        1.0,
+                    )
+                    .await;
+                    self.mark_step_task_finished(
+                        state,
+                        &step,
+                        SessionTaskStatus::Completed,
+                        Some(SessionTaskOutput {
+                            status: SessionTaskResultStatus::Complete,
+                            artifacts: Vec::new(),
+                            findings: vec![summary.clone()],
+                            confidence: 1.0,
+                            note: Some("goal completed and criteria satisfied".into()),
+                        }),
+                    )
+                    .await;
                     // Write criteria results before persisting
                     if let Some(ref store) = self.store {
                         if let Some(gi_id) = state.metadata.get("goal_instance_id").and_then(|v| v.as_str()) {
@@ -1219,6 +1471,27 @@ impl AgentLoop {
                     let note = format!("{} criteria not met: {}", failed.len(), failed.join("; "));
                     tracing::warn!(agent_id = %state.id, note = %note, "goal partially complete");
                     state.mark_partially_complete(note.clone(), enriched_result.clone());
+                    self.notify_parent_of_terminal_result(
+                        state,
+                        SessionTaskResultStatus::Partial,
+                        note.clone(),
+                        failed.iter().map(|value| value.to_string()).collect(),
+                        1.0,
+                    )
+                    .await;
+                    self.mark_step_task_finished(
+                        state,
+                        &step,
+                        SessionTaskStatus::Blocked,
+                        Some(SessionTaskOutput {
+                            status: SessionTaskResultStatus::Partial,
+                            artifacts: Vec::new(),
+                            findings: failed.iter().map(|value| value.to_string()).collect(),
+                            confidence: 1.0,
+                            note: Some(note.clone()),
+                        }),
+                    )
+                    .await;
                     if let Some(ref store) = self.store {
                         if let Some(gi_id) = state.metadata.get("goal_instance_id").and_then(|v| v.as_str()) {
                             let _ = store.update_goal_instance_result(&state.tenant_id, gi_id, enriched_result).await;
@@ -1251,6 +1524,19 @@ impl AgentLoop {
                     .join(" | ");
                 state.metadata["last_step_error"] =
                     serde_json::Value::String(if last_error.is_empty() { eval.summary.clone() } else { last_error });
+                self.mark_step_task_finished(
+                    state,
+                    &step,
+                    SessionTaskStatus::Blocked,
+                    Some(SessionTaskOutput {
+                        status: SessionTaskResultStatus::Partial,
+                        artifacts: Vec::new(),
+                        findings: vec![eval.summary.clone()],
+                        confidence: 0.5,
+                        note: Some(format!("retry scheduled after {} seconds", delay)),
+                    }),
+                )
+                .await;
 
                 self.event_bus.publish(AgentEvent::StepRetrying {
                     agent_id: state.id.clone(),
@@ -1272,6 +1558,27 @@ impl AgentLoop {
             EvalVerdict::Abort => {
                 state.mark_failed();
                 let reason = format!("step {} aborted: {}", step.index, eval.summary);
+                self.notify_parent_of_terminal_result(
+                    state,
+                    SessionTaskResultStatus::Failed,
+                    reason.clone(),
+                    vec![reason.clone()],
+                    1.0,
+                )
+                .await;
+                self.mark_step_task_finished(
+                    state,
+                    &step,
+                    SessionTaskStatus::Failed,
+                    Some(SessionTaskOutput {
+                        status: SessionTaskResultStatus::Failed,
+                        artifacts: Vec::new(),
+                        findings: vec![reason.clone()],
+                        confidence: 1.0,
+                        note: Some(eval.summary.clone()),
+                    }),
+                )
+                .await;
                 self.event_bus.publish(AgentEvent::GoalFailed { agent_id: state.id.clone(), reason: reason.clone() });
                 self.event_bus.close(&state.id);
                 // Classify the error for smarter retry/escalation logic
@@ -1329,6 +1636,14 @@ impl AgentLoop {
                     reason,
                     if missing_tools.is_empty() { "none".into() } else { missing_tools.join(", ") }
                 );
+                self.notify_parent_of_terminal_result(
+                    state,
+                    SessionTaskResultStatus::Failed,
+                    msg.clone(),
+                    vec![msg.clone()],
+                    1.0,
+                )
+                .await;
                 self.event_bus.publish(AgentEvent::PreflightFailed { agent_id: state.id.clone(), reason: msg.clone() });
                 self.event_bus.close(&state.id);
                 Ok(StepOutcome::Infeasible { reason: msg })
@@ -1339,10 +1654,93 @@ impl AgentLoop {
     /// Try to build a deterministic Plan from the role's enriched workflow outline.
     /// Returns None if no role is found or the workflow outline is empty, causing
     /// the caller to fail fast and let plan mode repair the role.
-    async fn try_plan_from_workflow_outline(&self, state: &AgentState) -> Option<Plan> {
+    async fn try_plan_from_workflow_outline(&self, state: &mut AgentState) -> Option<Plan> {
+        // Fallback for tests and legacy execution contexts where the workflow outline is embedded in the agent's state metadata 
+        // to bypass the requirement of a Postgres DB and AgentRole.
+        if let Some(outline_val) = state.metadata.get("workflow_outline") {
+            if let Some(steps_val) = outline_val.get("steps").and_then(|v| v.as_array()) {
+                let mut steps = Vec::new();
+                for (i, step_val) in steps_val.iter().enumerate() {
+                    if let Some(desc) = step_val.get("description").and_then(|v| v.as_str()) {
+                        steps.push(crate::agent::planner::PlannedStep {
+                            index: i,
+                            description: desc.to_string(),
+                            tool: step_val.get("tool").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                            tool_args: step_val.get("tool_args").cloned(),
+                            success_criteria: step_val
+                                .get("success_criteria")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string(),
+                            condition: None, // Simplified for legacy fallback
+                        });
+                    }
+                }
+                if !steps.is_empty() {
+                    return Some(Plan {
+                        goal: state.goal.clone(),
+                        job_type: Some("deterministic".into()),
+                        steps,
+                        rationale: "deterministic plan from legacy embedded workflow outline".into(),
+                    });
+                }
+            }
+        }
+
         let store = self.store.as_ref()?;
         let role_id = state.metadata.get("role_id").and_then(|v| v.as_str())?;
-        let role = store.get_agent_role(&state.tenant_id, role_id).await.ok()??;
+        let mut role = store.get_agent_role(&state.tenant_id, role_id).await.ok()??;
+
+        if role.execution_guidelines.needs_adaptive_compilation() {
+            let available_tools = crate::tools::selector::tool_names_for_pool(
+                &self.tools,
+                crate::agent::definition::ToolPool::Coordinator,
+            );
+            let tool_refs = available_tools.iter().map(String::as_str).collect::<Vec<_>>();
+            let planning_context = format!(
+                "Compile this work into a deterministic workflow outline. Do not execute the work now.\nReturn steps that can be converted directly into workflow_outline.\nInput data:\n{}",
+                serde_json::to_string_pretty(
+                    &state.metadata.get("input_data").cloned().unwrap_or_else(|| serde_json::json!({}))
+                )
+                .unwrap_or_else(|_| "{}".into())
+            );
+
+            match self.planner.create_plan(state, &planning_context, &tool_refs).await {
+                Ok(compiled_plan) if !compiled_plan.steps.is_empty() => {
+                    tracing::info!(
+                        agent_id = %state.id,
+                        role_id = %role_id,
+                        steps = compiled_plan.steps.len(),
+                        "adaptive planning compiled into workflow outline"
+                    );
+                    role.bump_version();
+                    role.execution_guidelines.compile_plan_to_workflow_outline(&compiled_plan);
+                    if let Err(error) = store.upsert_agent_role(&role).await {
+                        tracing::warn!(
+                            agent_id = %state.id,
+                            role_id = %role_id,
+                            error = %error,
+                            "failed to persist compiled workflow outline"
+                        );
+                    }
+                    state.metadata["adaptive_planning"] = serde_json::json!({
+                        "compiled_at": chrono::Utc::now().to_rfc3339(),
+                        "source": "runtime_adaptive_planner",
+                        "steps": compiled_plan.steps.len(),
+                    });
+                }
+                Ok(_) => return None,
+                Err(error) => {
+                    tracing::warn!(
+                        agent_id = %state.id,
+                        role_id = %role_id,
+                        error = %error,
+                        "adaptive planning compilation failed"
+                    );
+                    return None;
+                }
+            }
+        }
 
         if !role.execution_guidelines.has_workflow_outline() {
             return None;
@@ -1351,6 +1749,91 @@ impl AgentLoop {
         let input_data = state.metadata.get("input_data").cloned().unwrap_or_else(|| serde_json::json!({}));
 
         Some(Plan::from_workflow_outline(&role, &input_data))
+    }
+
+    async fn sync_session_tasks_for_plan(&self, state: &mut AgentState, plan: &Plan) {
+        let Some(store) = self.store.as_ref() else {
+            return;
+        };
+
+        for step in &plan.steps {
+            let task_id = self.step_task_id(state, step.index);
+            let mut task =
+                store.get_session_task(&state.tenant_id, &task_id).await.ok().flatten().unwrap_or_else(|| {
+                    SessionTask::new(
+                        task_id.clone(),
+                        state.tenant_id.clone(),
+                        state.id.clone(),
+                        format!("Step {}: {}", step.index + 1, step.description),
+                        step.success_criteria.clone(),
+                    )
+                });
+
+            task.subject = format!("Step {}: {}", step.index + 1, step.description);
+            task.description = step.success_criteria.clone();
+            task.metadata["step_index"] = serde_json::json!(step.index);
+            task.metadata["planner_hint"] = serde_json::json!(step.tool);
+            task.metadata["execution_contract"] = serde_json::json!("workflow_step");
+            if step.index < state.current_step as usize {
+                task.set_status(SessionTaskStatus::Completed);
+            } else if step.index == state.current_step as usize {
+                task.set_status(SessionTaskStatus::Pending);
+            } else if !matches!(
+                task.status,
+                SessionTaskStatus::Completed | SessionTaskStatus::Failed | SessionTaskStatus::Stopped
+            ) {
+                task.set_status(SessionTaskStatus::Pending);
+            }
+            let _ = store.upsert_session_task(&task).await;
+        }
+    }
+
+    fn step_task_id(&self, state: &AgentState, step_index: usize) -> String {
+        format!("{}:workflow_step:{}", state.id, step_index)
+    }
+
+    async fn mark_step_task_in_progress(&self, state: &mut AgentState, step: &crate::agent::planner::PlannedStep) {
+        let Some(store) = self.store.as_ref() else {
+            return;
+        };
+        let task_id = self.step_task_id(state, step.index);
+        let mut task = store.get_session_task(&state.tenant_id, &task_id).await.ok().flatten().unwrap_or_else(|| {
+            SessionTask::new(
+                task_id.clone(),
+                state.tenant_id.clone(),
+                state.id.clone(),
+                format!("Step {}: {}", step.index + 1, step.description),
+                step.success_criteria.clone(),
+            )
+        });
+        task.set_status(SessionTaskStatus::InProgress);
+        task.metadata["step_index"] = serde_json::json!(step.index);
+        let _ = store.upsert_session_task(&task).await;
+        state.current_task = Some(task_id);
+    }
+
+    async fn mark_step_task_finished(
+        &self,
+        state: &mut AgentState,
+        step: &crate::agent::planner::PlannedStep,
+        status: SessionTaskStatus,
+        output: Option<SessionTaskOutput>,
+    ) {
+        let Some(store) = self.store.as_ref() else {
+            return;
+        };
+        let task_id = self.step_task_id(state, step.index);
+        let Some(mut task) = store.get_session_task(&state.tenant_id, &task_id).await.ok().flatten() else {
+            return;
+        };
+        task.set_status(status);
+        if let Some(output) = output {
+            task.set_output(output);
+        }
+        let _ = store.upsert_session_task(&task).await;
+        if state.current_task.as_deref() == Some(task_id.as_str()) {
+            state.current_task = None;
+        }
     }
 
     fn prompt_for_provider_credentials(&self, state: &mut AgentState) -> Result<StepOutcome> {
@@ -1371,6 +1854,16 @@ impl AgentLoop {
         let needs_ctx = matches!(
             step.tool.as_deref(),
             Some("delegate")
+                | Some("send_message")
+                | Some("message_inbox")
+                | Some("task_create")
+                | Some("task_get")
+                | Some("task_list")
+                | Some("task_update")
+                | Some("task_stop")
+                | Some("task_output")
+                | Some("enter_worktree")
+                | Some("exit_worktree")
                 | Some("vector_store")
                 | Some("vector_search")
                 | Some("vector_delete")
@@ -1384,6 +1877,17 @@ impl AgentLoop {
             args["agent_id"] = serde_json::json!(state.id);
             if step.tool.as_deref() == Some("delegate") {
                 args["parent_agent_id"] = serde_json::json!(state.id);
+            }
+            if matches!(step.tool.as_deref(), Some("send_message") | Some("message_inbox")) {
+                if let Some(parent_agent_id) = state.parent_agent_id.as_ref() {
+                    args["parent_agent_id"] = serde_json::json!(parent_agent_id);
+                }
+                if let Some(current_task) = state.current_task.as_ref() {
+                    args["task_id"] = serde_json::json!(current_task);
+                }
+            }
+            if matches!(step.tool.as_deref(), Some("enter_worktree") | Some("exit_worktree")) {
+                args["workspace_path"] = serde_json::json!(state.workspace_path);
             }
             s.tool_args = Some(args);
             s
@@ -1543,10 +2047,8 @@ fn check_early_completion(state: &AgentState, role: &crate::agent::definition::A
             CompletionCheck::AllItemsProcessed { .. } => {
                 // Check if all items were already processed (in metadata)
                 if let Some(step_outputs) = state.metadata.get("step_outputs").and_then(|v| v.as_array()) {
-                    let total_processed: u64 = step_outputs
-                        .iter()
-                        .filter_map(|o| o.get("processed").and_then(|v| v.as_u64()))
-                        .sum();
+                    let total_processed: u64 =
+                        step_outputs.iter().filter_map(|o| o.get("processed").and_then(|v| v.as_u64())).sum();
 
                     if total_processed > 0 {
                         tracing::debug!(total_processed = total_processed, "early completion: all items criterion");
@@ -1592,8 +2094,10 @@ fn check_failure_rules_for_deterministic_abort(
 
         // Check if rule text matches the error
         let rule_lower = rule.text.to_lowercase();
-        let text_matches =
-            error_text.is_empty() || error_text.contains(&rule_lower) || rule_lower.contains("any") || rule_lower.contains("all");
+        let text_matches = error_text.is_empty()
+            || error_text.contains(&rule_lower)
+            || rule_lower.contains("any")
+            || rule_lower.contains("all");
 
         if !text_matches {
             continue;
@@ -1874,6 +2378,7 @@ mod tests {
             Arc::new(crate::memory::embeddings::StubEmbeddingModel::new(4));
 
         AgentLoop::new(
+            _planner,
             executor,
             evaluator,
             reflector,
@@ -2361,7 +2866,7 @@ mod tests {
             loop_runtime.run_step(&mut state, &mut plan, &mut history).await.expect("abort path should succeed");
 
         match outcome {
-            StepOutcome::Failed(reason) => assert!(reason.contains("permission denied")),
+            StepOutcome::PolicyViolation { reason } => assert!(reason.contains("permission denied")),
             other => panic!("expected failed outcome, got {other:?}"),
         }
         assert_eq!(state.status, AgentStatus::Failed);

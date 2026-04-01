@@ -11,7 +11,7 @@ use tokio::{sync::RwLock, time::sleep};
 
 use crate::{
     agent::{
-        PlanModeManager, PlanModePhase, PlanModeSession, PlanModeTestResult, PlanModeTestStatus,
+        PlanModeManager, PlanModePhase, PlanModeSession, PlanModeTestStatus,
     },
     connectors::ConnectorInstallStore,
     gateway::{GatewayRequest, LlmGateway},

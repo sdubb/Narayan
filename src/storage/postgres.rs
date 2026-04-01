@@ -10,7 +10,10 @@ use crate::{
         ExecutionLimits, MemoryScope, OutputSpec, RoleStatus, TenantConnector, TenantWasmTool, TriggerDef,
         WasmToolPermissions, WasmToolResourceLimits, WasmToolRunAudit, WorkforceEventSubscription,
     },
-    state::{AgentState, AgentStatus, GoalInstance, GoalInstanceStatus, GoalState, GoalStatus, TriggerSource},
+    state::{
+        AgentMessage, AgentMessageKind, AgentState, AgentStatus, GoalInstance, GoalInstanceStatus, GoalState,
+        GoalStatus, SessionTask, SessionTaskOutput, SessionTaskStatus, TriggerSource,
+    },
     workspace::{manager::WorkspaceInfo, resolver::WorkspaceMode},
 };
 
@@ -38,35 +41,35 @@ impl PostgresStore {
     }
 
     /// Start a new transaction. Use for multi-step operations that must be atomic.
-    /// 
+    ///
     /// # Transaction Pattern
-    /// 
+    ///
     /// Use transactions to ensure consistency when multiple database operations must succeed or fail as one unit.
     /// This is critical for compliance segments (Finance, Legal) and workflow consistency.
-    /// 
+    ///
     /// # Example
     /// ```ignore
     /// let mut tx = store.begin_transaction().await?;
-    /// 
+    ///
     /// // Multiple operations share the same transaction
     /// store.create_agent_tx(&mut tx, &agent_state).await?;
     /// store.create_goal_tx(&mut tx, &goal_state).await?;
     /// store.record_audit_entry_tx(&mut tx, &audit_entry).await?;
-    /// 
+    ///
     /// // If any step fails, none are committed
     /// tx.commit().await?;
     /// ```
-    /// 
+    ///
     /// # Current Limitations
-    /// 
+    ///
     /// Most `upsert_*` methods do not yet accept `&mut Transaction` parameters.
     /// To migrate existing code, create transaction-aware `_tx` variants alongside non-tx methods:
     /// - `upsert_agent()` → `upsert_agent_tx(tx, state)`
     /// - `upsert_goal()` → `upsert_goal_tx(tx, state)`
     /// - etc.
-    /// 
+    ///
     /// # Best Practices
-    /// 
+    ///
     /// - Keep transaction scope small (ideally <1ms DB time)
     /// - Hold locks for the shortest time possible
     /// - Avoid calling external APIs or LLM endpoints inside transactions
@@ -181,13 +184,21 @@ impl PostgresStore {
         sqlx::query("CREATE INDEX IF NOT EXISTS costs_tenant_period ON costs (tenant_id, period_start)")
             .execute(&self.pool)
             .await?;
-        
+
         // --- Migrations for Distributed Execution ---
         sqlx::query("ALTER TABLE agents ADD COLUMN IF NOT EXISTS claimed_by TEXT").execute(&self.pool).await?;
-        sqlx::query("ALTER TABLE agents ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ").execute(&self.pool).await?;
-        sqlx::query("ALTER TABLE goal_instances ADD COLUMN IF NOT EXISTS current_step INTEGER NOT NULL DEFAULT 0").execute(&self.pool).await?;
-        sqlx::query("ALTER TABLE goal_instances ADD COLUMN IF NOT EXISTS total_steps INTEGER NOT NULL DEFAULT 0").execute(&self.pool).await?;
-        sqlx::query("ALTER TABLE goal_instances ADD COLUMN IF NOT EXISTS last_message TEXT").execute(&self.pool).await?;
+        sqlx::query("ALTER TABLE agents ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("ALTER TABLE goal_instances ADD COLUMN IF NOT EXISTS current_step INTEGER NOT NULL DEFAULT 0")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("ALTER TABLE goal_instances ADD COLUMN IF NOT EXISTS total_steps INTEGER NOT NULL DEFAULT 0")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("ALTER TABLE goal_instances ADD COLUMN IF NOT EXISTS last_message TEXT")
+            .execute(&self.pool)
+            .await?;
 
         // ── Conversations ────────────────────────────────────────────────
         sqlx::query(
@@ -510,6 +521,66 @@ impl PostgresStore {
         sqlx::query("ALTER TABLE agent_roles ADD COLUMN IF NOT EXISTS next_run_at TIMESTAMPTZ")
             .execute(&self.pool)
             .await?;
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS session_tasks (
+                id           TEXT PRIMARY KEY,
+                tenant_id    TEXT NOT NULL,
+                agent_id     TEXT NOT NULL,
+                subject      TEXT NOT NULL,
+                description  TEXT NOT NULL DEFAULT '',
+                status       TEXT NOT NULL DEFAULT 'pending',
+                owner        TEXT,
+                blocked_by   JSONB NOT NULL DEFAULT '[]',
+                blocks       JSONB NOT NULL DEFAULT '[]',
+                metadata     JSONB NOT NULL DEFAULT '{}',
+                output       JSONB,
+                created_at   TIMESTAMPTZ NOT NULL,
+                updated_at   TIMESTAMPTZ NOT NULL,
+                completed_at TIMESTAMPTZ
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS session_tasks_agent ON session_tasks (tenant_id, agent_id, updated_at DESC)",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS session_tasks_status ON session_tasks (tenant_id, status, updated_at DESC)",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS agent_messages (
+                id                 TEXT PRIMARY KEY,
+                tenant_id          TEXT NOT NULL,
+                sender_agent_id    TEXT NOT NULL,
+                recipient_agent_id TEXT NOT NULL,
+                message_kind       TEXT NOT NULL DEFAULT 'update',
+                subject            TEXT NOT NULL DEFAULT '',
+                body               TEXT NOT NULL DEFAULT '',
+                task_id            TEXT,
+                step_index         INTEGER,
+                result_contract    JSONB,
+                metadata           JSONB NOT NULL DEFAULT '{}',
+                created_at         TIMESTAMPTZ NOT NULL,
+                delivered_at       TIMESTAMPTZ
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS agent_messages_recipient ON agent_messages (tenant_id, recipient_agent_id, created_at DESC)",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS agent_messages_undelivered ON agent_messages (tenant_id, recipient_agent_id, delivered_at, created_at DESC)",
+        )
+        .execute(&self.pool)
+        .await?;
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_roles_next_run
              ON agent_roles (next_run_at)
@@ -607,7 +678,12 @@ impl PostgresStore {
     }
 
     /// Claim due agents (pending/waiting OR stale running) using FOR UPDATE SKIP LOCKED.
-    pub async fn claim_due_agents(&self, worker_id: &str, lease_duration_secs: i64, limit: i64) -> Result<Vec<AgentState>> {
+    pub async fn claim_due_agents(
+        &self,
+        worker_id: &str,
+        lease_duration_secs: i64,
+        limit: i64,
+    ) -> Result<Vec<AgentState>> {
         let rows = sqlx::query(
             r#"
             UPDATE agents
@@ -642,7 +718,7 @@ impl PostgresStore {
             "UPDATE agents 
              SET    lease_expires_at = NOW() + ($1 || ' seconds')::interval,
                     updated_at = NOW()
-             WHERE  id = $2 AND claimed_by = $3"
+             WHERE  id = $2 AND claimed_by = $3",
         )
         .bind(lease_duration_secs.to_string())
         .bind(agent_id)
@@ -658,7 +734,7 @@ impl PostgresStore {
              SET    claimed_by = NULL, 
                     lease_expires_at = NULL,
                     updated_at = NOW()
-             WHERE  id = $1 AND claimed_by = $2"
+             WHERE  id = $1 AND claimed_by = $2",
         )
         .bind(agent_id)
         .bind(worker_id)
@@ -1309,6 +1385,252 @@ impl PostgresStore {
         sqlx::query("DELETE FROM agent_roles WHERE id = $1 AND tenant_id = $2")
             .bind(id)
             .bind(tenant_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn upsert_session_task(&self, task: &SessionTask) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO session_tasks
+                (id, tenant_id, agent_id, subject, description, status, owner,
+                 blocked_by, blocks, metadata, output, created_at, updated_at, completed_at)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+            ON CONFLICT (id) DO UPDATE SET
+                subject      = EXCLUDED.subject,
+                description  = EXCLUDED.description,
+                status       = EXCLUDED.status,
+                owner        = EXCLUDED.owner,
+                blocked_by   = EXCLUDED.blocked_by,
+                blocks       = EXCLUDED.blocks,
+                metadata     = EXCLUDED.metadata,
+                output       = EXCLUDED.output,
+                updated_at   = EXCLUDED.updated_at,
+                completed_at = EXCLUDED.completed_at
+            "#,
+        )
+        .bind(&task.id)
+        .bind(&task.tenant_id)
+        .bind(&task.agent_id)
+        .bind(&task.subject)
+        .bind(&task.description)
+        .bind(session_task_status_to_str(&task.status))
+        .bind(&task.owner)
+        .bind(serde_json::json!(task.blocked_by))
+        .bind(serde_json::json!(task.blocks))
+        .bind(&task.metadata)
+        .bind(task.output.as_ref().map(|output| serde_json::to_value(output).unwrap_or_default()))
+        .bind(task.created_at)
+        .bind(task.updated_at)
+        .bind(task.completed_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn get_session_task(&self, tenant_id: &str, id: &str) -> Result<Option<SessionTask>> {
+        let row = sqlx::query("SELECT * FROM session_tasks WHERE tenant_id = $1 AND id = $2")
+            .bind(tenant_id)
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.as_ref().map(row_to_session_task))
+    }
+
+    pub async fn list_session_tasks_for_agent(&self, tenant_id: &str, agent_id: &str) -> Result<Vec<SessionTask>> {
+        let rows = sqlx::query(
+            "SELECT * FROM session_tasks WHERE tenant_id = $1 AND agent_id = $2 ORDER BY created_at ASC, updated_at ASC",
+        )
+        .bind(tenant_id)
+        .bind(agent_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(row_to_session_task).collect())
+    }
+
+    pub async fn create_agent_message(&self, message: &AgentMessage) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO agent_messages
+                (id, tenant_id, sender_agent_id, recipient_agent_id, message_kind, subject, body,
+                 task_id, step_index, result_contract, metadata, created_at, delivered_at)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+            ON CONFLICT (id) DO UPDATE SET
+                message_kind    = EXCLUDED.message_kind,
+                subject         = EXCLUDED.subject,
+                body            = EXCLUDED.body,
+                task_id         = EXCLUDED.task_id,
+                step_index      = EXCLUDED.step_index,
+                result_contract = EXCLUDED.result_contract,
+                metadata        = EXCLUDED.metadata,
+                delivered_at    = EXCLUDED.delivered_at
+            "#,
+        )
+        .bind(&message.id)
+        .bind(&message.tenant_id)
+        .bind(&message.sender_agent_id)
+        .bind(&message.recipient_agent_id)
+        .bind(agent_message_kind_to_str(&message.message_kind))
+        .bind(&message.subject)
+        .bind(&message.body)
+        .bind(&message.task_id)
+        .bind(message.step_index.map(|value| value as i32))
+        .bind(message.result_contract.as_ref().map(|value| serde_json::to_value(value).unwrap_or_default()))
+        .bind(&message.metadata)
+        .bind(message.created_at)
+        .bind(message.delivered_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn list_undelivered_agent_messages(
+        &self,
+        tenant_id: &str,
+        recipient_agent_id: &str,
+    ) -> Result<Vec<AgentMessage>> {
+        let rows = sqlx::query(
+            "SELECT * FROM agent_messages
+             WHERE tenant_id = $1 AND recipient_agent_id = $2 AND delivered_at IS NULL
+             ORDER BY created_at ASC",
+        )
+        .bind(tenant_id)
+        .bind(recipient_agent_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(row_to_agent_message).collect())
+    }
+
+    pub async fn list_agent_inbox_messages(
+        &self,
+        tenant_id: &str,
+        recipient_agent_id: &str,
+        undelivered_only: bool,
+        limit: i64,
+    ) -> Result<Vec<AgentMessage>> {
+        let rows = if undelivered_only {
+            sqlx::query(
+                "SELECT * FROM agent_messages
+                 WHERE tenant_id = $1 AND recipient_agent_id = $2 AND delivered_at IS NULL
+                 ORDER BY created_at DESC
+                 LIMIT $3",
+            )
+            .bind(tenant_id)
+            .bind(recipient_agent_id)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query(
+                "SELECT * FROM agent_messages
+                 WHERE tenant_id = $1 AND recipient_agent_id = $2
+                 ORDER BY created_at DESC
+                 LIMIT $3",
+            )
+            .bind(tenant_id)
+            .bind(recipient_agent_id)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?
+        };
+        Ok(rows.iter().map(row_to_agent_message).collect())
+    }
+
+    pub async fn list_agent_sent_messages(
+        &self,
+        tenant_id: &str,
+        sender_agent_id: &str,
+        limit: i64,
+    ) -> Result<Vec<AgentMessage>> {
+        let rows = sqlx::query(
+            "SELECT * FROM agent_messages
+             WHERE tenant_id = $1 AND sender_agent_id = $2
+             ORDER BY created_at DESC
+             LIMIT $3",
+        )
+        .bind(tenant_id)
+        .bind(sender_agent_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(row_to_agent_message).collect())
+    }
+
+    pub async fn list_agent_messages_for_agent(
+        &self,
+        tenant_id: &str,
+        agent_id: &str,
+        limit: i64,
+    ) -> Result<Vec<AgentMessage>> {
+        let rows = sqlx::query(
+            "SELECT * FROM agent_messages
+             WHERE tenant_id = $1 AND (recipient_agent_id = $2 OR sender_agent_id = $2)
+             ORDER BY created_at DESC
+             LIMIT $3",
+        )
+        .bind(tenant_id)
+        .bind(agent_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(row_to_agent_message).collect())
+    }
+
+    pub async fn get_agent_message_for_agent(
+        &self,
+        tenant_id: &str,
+        agent_id: &str,
+        message_id: &str,
+    ) -> Result<Option<AgentMessage>> {
+        let row = sqlx::query(
+            "SELECT * FROM agent_messages
+             WHERE tenant_id = $1 AND id = $2 AND (recipient_agent_id = $3 OR sender_agent_id = $3)",
+        )
+        .bind(tenant_id)
+        .bind(message_id)
+        .bind(agent_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.as_ref().map(row_to_agent_message))
+    }
+
+    pub async fn mark_agent_message_delivered_for_recipient(
+        &self,
+        tenant_id: &str,
+        recipient_agent_id: &str,
+        id: &str,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            "UPDATE agent_messages
+             SET delivered_at = NOW()
+             WHERE tenant_id = $1 AND id = $2 AND recipient_agent_id = $3",
+        )
+        .bind(tenant_id)
+        .bind(id)
+        .bind(recipient_agent_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    pub async fn count_undelivered_agent_messages(&self, tenant_id: &str, recipient_agent_id: &str) -> Result<i64> {
+        let row = sqlx::query(
+            "SELECT COUNT(*) AS count
+             FROM agent_messages
+             WHERE tenant_id = $1 AND recipient_agent_id = $2 AND delivered_at IS NULL",
+        )
+        .bind(tenant_id)
+        .bind(recipient_agent_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.get::<i64, _>("count"))
+    }
+
+    pub async fn mark_agent_message_delivered(&self, tenant_id: &str, id: &str) -> Result<()> {
+        sqlx::query("UPDATE agent_messages SET delivered_at = NOW() WHERE tenant_id = $1 AND id = $2")
+            .bind(tenant_id)
+            .bind(id)
             .execute(&self.pool)
             .await?;
         Ok(())
@@ -2123,6 +2445,46 @@ fn str_to_role_category(s: &str) -> crate::agent::definition::RoleCategory {
     crate::agent::definition::RoleCategory::from_slug(s)
 }
 
+fn session_task_status_to_str(status: &SessionTaskStatus) -> &'static str {
+    match status {
+        SessionTaskStatus::Pending => "pending",
+        SessionTaskStatus::InProgress => "in_progress",
+        SessionTaskStatus::Blocked => "blocked",
+        SessionTaskStatus::Completed => "completed",
+        SessionTaskStatus::Failed => "failed",
+        SessionTaskStatus::Stopped => "stopped",
+    }
+}
+
+fn str_to_session_task_status(status: &str) -> SessionTaskStatus {
+    match status {
+        "in_progress" => SessionTaskStatus::InProgress,
+        "blocked" => SessionTaskStatus::Blocked,
+        "completed" => SessionTaskStatus::Completed,
+        "failed" => SessionTaskStatus::Failed,
+        "stopped" => SessionTaskStatus::Stopped,
+        _ => SessionTaskStatus::Pending,
+    }
+}
+
+fn agent_message_kind_to_str(kind: &AgentMessageKind) -> &'static str {
+    match kind {
+        AgentMessageKind::Update => "update",
+        AgentMessageKind::Result => "result",
+        AgentMessageKind::Question => "question",
+        AgentMessageKind::Instruction => "instruction",
+    }
+}
+
+fn str_to_agent_message_kind(kind: &str) -> AgentMessageKind {
+    match kind {
+        "result" => AgentMessageKind::Result,
+        "question" => AgentMessageKind::Question,
+        "instruction" => AgentMessageKind::Instruction,
+        _ => AgentMessageKind::Update,
+    }
+}
+
 fn row_to_agent_role(row: &PgRow) -> AgentRole {
     let connectors: Vec<String> = row
         .try_get::<serde_json::Value, _>("connectors")
@@ -2177,7 +2539,65 @@ fn row_to_agent_role(row: &PgRow) -> AgentRole {
     }
 }
 
+fn row_to_session_task(row: &PgRow) -> SessionTask {
+    let blocked_by: Vec<String> = row
+        .try_get::<serde_json::Value, _>("blocked_by")
+        .ok()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default();
+    let blocks: Vec<String> = row
+        .try_get::<serde_json::Value, _>("blocks")
+        .ok()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default();
+    let metadata = row.try_get::<serde_json::Value, _>("metadata").unwrap_or_else(|_| serde_json::json!({}));
+    let output: Option<SessionTaskOutput> = row
+        .try_get::<Option<serde_json::Value>, _>("output")
+        .ok()
+        .flatten()
+        .and_then(|value| serde_json::from_value(value).ok());
+
+    SessionTask {
+        id: row.get("id"),
+        tenant_id: row.get("tenant_id"),
+        agent_id: row.get("agent_id"),
+        subject: row.get("subject"),
+        description: row.get("description"),
+        status: str_to_session_task_status(&row.get::<String, _>("status")),
+        owner: row.try_get("owner").ok(),
+        blocked_by,
+        blocks,
+        metadata,
+        output,
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+        completed_at: row.try_get("completed_at").ok(),
+    }
+}
+
 // ── GoalInstance helpers ───────────────────────────────────────────────────
+
+fn row_to_agent_message(row: &PgRow) -> AgentMessage {
+    AgentMessage {
+        id: row.get("id"),
+        tenant_id: row.get("tenant_id"),
+        sender_agent_id: row.get("sender_agent_id"),
+        recipient_agent_id: row.get("recipient_agent_id"),
+        message_kind: str_to_agent_message_kind(&row.get::<String, _>("message_kind")),
+        subject: row.get("subject"),
+        body: row.get("body"),
+        task_id: row.try_get("task_id").ok(),
+        step_index: row.try_get::<Option<i32>, _>("step_index").ok().flatten().map(|value| value as u32),
+        result_contract: row
+            .try_get::<Option<serde_json::Value>, _>("result_contract")
+            .ok()
+            .flatten()
+            .and_then(|value| serde_json::from_value(value).ok()),
+        metadata: row.try_get::<serde_json::Value, _>("metadata").unwrap_or_else(|_| serde_json::json!({})),
+        created_at: row.get("created_at"),
+        delivered_at: row.try_get("delivered_at").ok(),
+    }
+}
 
 fn goal_instance_status_to_str(s: &GoalInstanceStatus) -> &'static str {
     match s {

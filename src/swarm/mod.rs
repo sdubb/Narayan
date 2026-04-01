@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
-use crate::scheduler::queue::{Queue, Task};
+use crate::scheduler::queue::{ExecutionTask, Queue};
 
 /// Swarm coordinator — thin wrapper around the shared Queue.
 /// Inject at startup from main.rs using the same Arc<dyn Queue> as WorkerPool.
@@ -31,11 +31,11 @@ impl Swarm {
 
     /// Enqueue a swarm task (agent) for execution.
     pub async fn push(&self, agent_id: String) -> Result<()> {
-        self.queue.enqueue(Task::new(agent_id)).await
+        self.queue.enqueue(ExecutionTask::new(agent_id)).await
     }
 
     /// Pop the next swarm task — used by swarm-aware workers.
-    pub async fn next(&self) -> Result<Option<Task>> {
+    pub async fn next(&self) -> Result<Option<ExecutionTask>> {
         self.queue.dequeue().await
     }
 

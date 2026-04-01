@@ -10,7 +10,7 @@ use crate::{
     },
     events::{AgentEvent, EventBus},
     metrics::Metrics,
-    scheduler::queue::{Queue, Task},
+    scheduler::queue::{ExecutionTask, Queue},
     segments::AgentServices,
     storage::PostgresStore,
     workspace::manager::WorkspaceManager,
@@ -51,7 +51,7 @@ fn is_retryable_worker_error(error: &anyhow::Error) -> bool {
         || text.contains("504")
 }
 
-fn should_retry_task(task: &Task, error: &anyhow::Error) -> bool {
+fn should_retry_task(task: &ExecutionTask, error: &anyhow::Error) -> bool {
     task.attempt < 3 && is_retryable_worker_error(error)
 }
 
@@ -98,7 +98,7 @@ impl Worker {
                     "task failed"
                 );
                 if should_retry_task(&task, e) {
-                    self.queue.retry(Task { attempt: task.attempt + 1, ..task.clone() }).await?;
+                    self.queue.retry(ExecutionTask { attempt: task.attempt + 1, ..task.clone() }).await?;
                 } else {
                     self.queue.ack(&task).await?;
                     self.mark_failed_async(&task.agent_id);
@@ -109,7 +109,7 @@ impl Worker {
         Ok(true)
     }
 
-    async fn run_task(&self, task: &Task, cancel_token: tokio_util::sync::CancellationToken) -> Result<()> {
+    async fn run_task(&self, task: &ExecutionTask, cancel_token: tokio_util::sync::CancellationToken) -> Result<()> {
         let mut state = self
             .store
             .get_agent_internal(&task.agent_id)
@@ -129,7 +129,7 @@ impl Worker {
         }
         state.mark_running();
         state.set_execution_checkpoint(&task.id, task.attempt, state.current_step, "running");
-        
+
         // --- Distributed Execution: Take Ownership & Start Heartbeat ---
         let lease_duration = 30; // seconds
         state.claimed_by = Some(self.name.clone());
@@ -188,7 +188,7 @@ impl Worker {
         state.metadata["step_history"] = serde_json::to_value(&history).unwrap_or_default();
         state.clear_execution_checkpoint();
         state.current_task = None;
-        
+
         // Release ownership
         state.claimed_by = None;
         state.lease_expires_at = None;
@@ -226,12 +226,14 @@ impl Worker {
                     let tenant = state.tenant_id.clone();
                     spawn_savings_estimation(store, tenant, goal_instance_id);
                 }
-                
+
                 // Trigger workforce event dispatcher for role completion
                 let role_id = state.metadata.get("role_id").and_then(|v| v.as_str()).map(str::to_string);
                 let role_name = state.metadata.get("role_name").and_then(|v| v.as_str()).map(str::to_string);
-                let agent_def_id = state.metadata.get("agent_definition_id").and_then(|v| v.as_str()).map(str::to_string);
-                let goal_instance_id = state.metadata.get("goal_instance_id").and_then(|v| v.as_str()).map(str::to_string);
+                let agent_def_id =
+                    state.metadata.get("agent_definition_id").and_then(|v| v.as_str()).map(str::to_string);
+                let goal_instance_id =
+                    state.metadata.get("goal_instance_id").and_then(|v| v.as_str()).map(str::to_string);
 
                 if let (Some(role_id), Some(role_name), Some(agent_def_id), Some(goal_instance_id)) =
                     (role_id, role_name, agent_def_id, goal_instance_id)
@@ -239,7 +241,12 @@ impl Worker {
                     let payload = crate::agent::definition::WorkforceEventPayload {
                         tenant_id: state.tenant_id.clone(),
                         agent_id: agent_def_id.clone(),
-                        agent_name: state.metadata.get("agent_name").and_then(|v| v.as_str()).unwrap_or("agent").to_string(),
+                        agent_name: state
+                            .metadata
+                            .get("agent_name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("agent")
+                            .to_string(),
                         role_id: role_id.clone(),
                         role_name: role_name.clone(),
                         goal_instance_id: goal_instance_id.clone(),
@@ -248,7 +255,7 @@ impl Worker {
                         failure_reason: None,
                         emitted_at: chrono::Utc::now(),
                     };
-                    
+
                     let store = Arc::clone(&self.store);
                     tokio::spawn(async move {
                         match crate::events::workforce::dispatch(&payload, &store).await {
@@ -398,8 +405,8 @@ fn spawn_savings_estimation(store: Arc<crate::storage::PostgresStore>, tenant_id
 mod tests {
     use super::*;
 
-    fn sample_task(attempt: u32) -> Task {
-        Task::new("agent-1".into()).with_attempt(attempt)
+    fn sample_task(attempt: u32) -> ExecutionTask {
+        ExecutionTask::new("agent-1".into()).with_attempt(attempt)
     }
 
     fn sample_plan() -> Plan {

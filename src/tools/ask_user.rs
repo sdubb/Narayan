@@ -19,9 +19,29 @@ impl Tool for AskUserTool {
             ParameterSchema::optional(
                 "questions",
                 "array",
-                "Optional list of structured questions. Each item may include: id, prompt, placeholder, helper_text, options, required, secret, store_as_credential, connector_type, action_label.",
+                "Optional list of structured questions. Each item may include: id, type, prompt, placeholder, helper_text, options, multi_select, recommended, preview, required, secret, store_as_credential, connector_type, action_label.",
             ),
             ParameterSchema::optional("options", "array", "Optional list of answer options to present."),
+            ParameterSchema::optional(
+                "type",
+                "string",
+                "Question type: clarification | approval | decision. Defaults to clarification.",
+            ),
+            ParameterSchema::optional(
+                "multi_select",
+                "boolean",
+                "Whether multiple options may be selected.",
+            ),
+            ParameterSchema::optional(
+                "recommended",
+                "array",
+                "Optional ordered list of recommended option values or labels.",
+            ),
+            ParameterSchema::optional(
+                "preview",
+                "object",
+                "Optional preview payload for code/UI comparisons or examples.",
+            ),
             ParameterSchema::optional(
                 "required",
                 "boolean",
@@ -64,10 +84,24 @@ impl Tool for AskUserTool {
                     .or_else(|| args["connector_type"].as_str())
                     .map(str::to_string)
                     .unwrap_or_default(),
+                question_type: args
+                    .get("type")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string)
+                    .or_else(|| Some("clarification".into())),
                 prompt: question.to_string(),
                 placeholder: args["placeholder"].as_str().map(str::to_string),
                 helper_text: args["helper_text"].as_str().map(str::to_string),
                 options,
+                multi_select: args["multi_select"].as_bool().unwrap_or(false),
+                recommended: args["recommended"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|value| value.as_str().map(str::to_string))
+                    .collect(),
+                preview: args.get("preview").cloned(),
                 required: args["required"].as_bool().unwrap_or(true),
                 secret: args["secret"].as_bool().unwrap_or(false),
                 store_as_credential: args["store_as_credential"].as_str().map(str::to_string),

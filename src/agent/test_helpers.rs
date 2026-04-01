@@ -13,13 +13,12 @@ use crate::{
         clarifier::{ClarificationAnswers, ClarificationResult, Clarifier},
         evaluator::{EvalReflection, EvalVerdict, Evaluator},
         executor::{Executor, StepResult},
-        planner::{Plan, PlannedStep, Planner},
+        planner::{AdaptiveResearchMemo, Plan, PlannedStep, Planner},
         preflight::{Preflight, PreflightResult},
         prompts::StepHistory,
         reflector::{Reflection, Reflector},
     },
     state::AgentState,
-    tools::ToolResult,
 };
 
 // ---------------------------------------------------------------------------
@@ -29,19 +28,32 @@ use crate::{
 pub struct MockPlanner {
     create_responses: Mutex<Vec<Plan>>,
     revise_responses: Mutex<Vec<Plan>>,
+    research_responses: Mutex<Vec<AdaptiveResearchMemo>>,
 }
 
 impl MockPlanner {
     pub fn new() -> Self {
-        Self { create_responses: Mutex::new(Vec::new()), revise_responses: Mutex::new(Vec::new()) }
+        Self {
+            create_responses: Mutex::new(Vec::new()),
+            revise_responses: Mutex::new(Vec::new()),
+            research_responses: Mutex::new(Vec::new()),
+        }
     }
 
     pub fn from_create_responses(responses: Vec<Plan>) -> Self {
-        Self { create_responses: Mutex::new(responses), revise_responses: Mutex::new(Vec::new()) }
+        Self {
+            create_responses: Mutex::new(responses),
+            revise_responses: Mutex::new(Vec::new()),
+            research_responses: Mutex::new(Vec::new()),
+        }
     }
 
     pub fn from_revise_responses(responses: Vec<Plan>) -> Self {
-        Self { create_responses: Mutex::new(Vec::new()), revise_responses: Mutex::new(responses) }
+        Self {
+            create_responses: Mutex::new(Vec::new()),
+            revise_responses: Mutex::new(responses),
+            research_responses: Mutex::new(Vec::new()),
+        }
     }
 
     pub async fn push_create(&self, plan: Plan) {
@@ -50,6 +62,10 @@ impl MockPlanner {
 
     pub async fn push_revise(&self, plan: Plan) {
         self.revise_responses.lock().await.push(plan);
+    }
+
+    pub async fn push_research(&self, memo: AdaptiveResearchMemo) {
+        self.research_responses.lock().await.push(memo);
     }
 }
 
@@ -68,6 +84,26 @@ impl Planner for MockPlanner {
         let mut queue = self.revise_responses.lock().await;
         if queue.is_empty() {
             Ok(plan.clone())
+        } else {
+            Ok(queue.remove(0))
+        }
+    }
+
+    async fn research_for_workflow(
+        &self,
+        _state: &AgentState,
+        _context: &str,
+        _available_tools: &[&str],
+    ) -> Result<AdaptiveResearchMemo> {
+        let mut queue = self.research_responses.lock().await;
+        if queue.is_empty() {
+            Ok(AdaptiveResearchMemo {
+                summary: "default adaptive research memo".into(),
+                findings: Vec::new(),
+                assumptions: Vec::new(),
+                risks: Vec::new(),
+                workflow_hints: vec!["Compile into deterministic workflow before execution.".into()],
+            })
         } else {
             Ok(queue.remove(0))
         }

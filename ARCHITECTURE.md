@@ -1,6 +1,6 @@
-﻿# Narayan Architecture
+# Narayan Architecture
 
-_Last updated: March 2026. Reflects the plan-mode-first architecture, deterministic workflow outlines, test/revise loop, goal-fingerprint repair reuse, multi-role agents, connector system, execution guidelines, completion criteria, savings estimation, role chat, runtime gap fixes, workspace quotas, artifact export flows, and the tool-contract/output-schema layer._
+_Last updated: April 2026. Reflects the plan-mode-first architecture, adaptive-planning-to-workflow compilation, deterministic execution, role-scoped tool pools, permission modes with enforcement policies, adaptive research compiler loop, session tasks, agent messaging, worktree gating, connector/MCP integration, memory consolidation, workspace quotas, and the tool-contract/output-schema layer._
 
 ---
 
@@ -8,7 +8,7 @@ _Last updated: March 2026. Reflects the plan-mode-first architecture, determinis
 
 Narayan is a B2B AI agent platform. Tenants configure automation agents through a conversational plan mode interface â€” no code, no JSON â€” and plan mode now also validates and repairs drafts before save. Those agents can run on a schedule, in response to external events, on demand, or after another role completes. Agents read from and write to SaaS connectors (Salesforce, Zendesk, GitHub, Slack, and 22 built-ins total), external databases, REST APIs, and MCP servers.
 
-The platform is a Rust backend (Axum, SQLx, Tokio) with a React + Vite frontend. All agent state, role config, run history, and credential data live in PostgreSQL. Vector memory uses pgvector. Workspaces are ephemeral directories on the host filesystem.
+The platform is a Rust backend (Axum, SQLx, Tokio) with a React + Vite frontend. All agent state, role config, run history, task state, and credential data live in PostgreSQL. Memory now has two layers: topic memory in the scoped memory store for durable human-readable recall, and pgvector memory for semantic retrieval. Workspaces are ephemeral directories on the host filesystem.
 
 Workspace storage is quota-aware at the tenant plan layer. Free, paid, and enterprise plans share the same workspace model, but the soft cap and per-file cap differ by tier. The UI exposes individual artifact downloads, a compressed workspace bundle export, and a summary PDF export from the agent control center.
 
@@ -18,35 +18,36 @@ Workspace storage is quota-aware at the tenant plan layer. Free, paid, and enter
 
 ```
 src/
-â”œâ”€â”€ agent/          Core agent runtime â€” plan mode, execution, evaluation
-â”œâ”€â”€ api/            Axum routes and SSE streaming
-â”œâ”€â”€ auth/           JWT + API key authentication
-â”œâ”€â”€ billing/        Stripe + PayPal subscription management
-â”œâ”€â”€ browser/        Headless Chrome pool for web automation
-â”œâ”€â”€ cognition/      Cognitive control loop for multi-step reasoning
-â”œâ”€â”€ compliance/     PII redaction, SLA tracking, citations, evidence packaging
-â”œâ”€â”€ config.rs       Environment-based configuration
-â”œâ”€â”€ connectors/     22 built-in SaaS connector definitions + OAuth + webhooks
-â”œâ”€â”€ debug/          Step recorder and replay
-â”œâ”€â”€ events/         In-process SSE event bus + workforce event dispatch
-â”œâ”€â”€ gateway/        LLM gateway â€” routing, cost tracking, rate limiting
-â”œâ”€â”€ knowledge/      In-memory knowledge graph (entity â†’ relationship)
-â”œâ”€â”€ main.rs         Wiring â€” constructs and connects all components
-â”œâ”€â”€ memory/         pgvector embeddings store
-â”œâ”€â”€ metrics/        Prometheus counters
-â”œâ”€â”€ providers/      LLM provider adapters (OpenAI, Anthropic, etc.)
-â”œâ”€â”€ scheduler/      Cron scheduler + task queue
-â”œâ”€â”€ segments/       Domain segment bundles (customer_support, sales_revops, etc.)
-â”œâ”€â”€ skill_evolution/Skill self-improvement loop
-â”œâ”€â”€ skill_marketplace/ Skill publish/install flow
-â”œâ”€â”€ skills/         SkillRegistry â€” curated + domain plan-mode skills
-â”œâ”€â”€ state/          AgentState, GoalInstance, GoalState, WorkforceEvent
-â”œâ”€â”€ storage/        PostgresStore â€” single DB access layer
-â”œâ”€â”€ tenant/         Tenant model, credential store, provider config
-â”œâ”€â”€ tools/          ~70 tool implementations + ToolRegistry
-â”œâ”€â”€ webhooks/       Inbound webhook routing
-â”œâ”€â”€ worker/         Worker pool â€” consumes task queue, drives AgentLoop
-â””â”€â”€ workspace/      Per-agent workspace directories
+  agent/              Core agent runtime - plan mode, execution, evaluation
+  api/                Axum routes and SSE streaming
+  auth/               JWT + API key authentication
+  billing/            Stripe + PayPal subscription management
+  browser/            Headless Chrome pool for web automation
+  cognition/          Cognitive control loop for multi-step reasoning
+  compliance/         PII redaction, SLA tracking, citations, evidence packaging
+  config.rs           Environment-based configuration
+  connectors/         22 built-in SaaS connector definitions + OAuth + webhooks
+  debug/              Step recorder and replay
+  events/             In-process SSE event bus + workforce event dispatch
+  gateway/            LLM gateway - routing, cost tracking, rate limiting
+  knowledge/          In-memory knowledge graph (entity -> relationship)
+  main.rs             Wiring - constructs and connects all components
+  memory/             Topic memory + pgvector embeddings + consolidation
+  metrics/            Prometheus counters
+  providers/          LLM provider adapters (OpenAI, Anthropic, etc.)
+  scheduler/          Cron scheduler + task queue
+  segments/           Domain segment bundles (customer_support, sales_revops, etc.)
+  skill_evolution/    Skill self-improvement loop
+  skill_marketplace/  Skill publish/install flow
+  skills/             SkillRegistry - curated + domain plan-mode skills
+  state/              AgentState, SessionTask, AgentMessage, GoalInstance, GoalState
+  swarm/              Swarm coordinator - manages agent push/schedule across workers
+  storage/            PostgresStore - single DB access layer
+  tenant/             Tenant model, credential store, provider config
+  tools/              ~75 tool implementations + ToolRegistry
+  webhooks/           Inbound webhook routing
+  worker/             Worker pool - consumes task queue, drives AgentLoop
+  workspace/          Per-agent workspace directories
 ```
 
 ---
@@ -63,6 +64,9 @@ One automation responsibility within an agent. A single `AgentDefinition` can ha
 AgentRole {
     trigger:               TriggerDef,
     role_category:         RoleCategory,
+    execution_strategy:    ExecutionStrategy, // deterministic_workflow | adaptive_planning
+    tool_pool:             ToolPool,          // worker | coordinator | verification | teammate | plan
+    permission_mode:       PermissionMode,    // plan_only | safe_auto | workspace_write | trusted_auto
     execution_guidelines:  ExecutionGuidelines,
     output_spec:           OutputSpec,
     connectors:            Vec<String>,
@@ -74,7 +78,80 @@ AgentRole {
 
 `role_category` is persisted and treated as first-class runtime policy (runtime derives job type from it before falling back to heuristic detection).
 
+`execution_strategy`, `tool_pool`, and `permission_mode` are persisted on each role and injected into runtime policy before any tool call happens.
+
 `memory_scope` and `execution_limits` are also persisted on each role and injected into runtime role-policy context on every run.
+
+### Execution strategy and runtime invariants
+
+Narayan now distinguishes between two role-level execution strategies:
+
+- `DeterministicWorkflow` — normal path. Runtime executes the saved `workflow_outline` directly.
+- `AdaptivePlanning` — temporary planning path. Runtime may research and synthesize, but it must compile back into `workflow_outline` before final execution continues.
+
+The invariant is strict: final execution must still run through deterministic workflow steps. Adaptive planning is allowed to improve or repair the execution contract, not replace it with a permanently free-form loop.
+
+### Adaptive research compiler loop (AdaptiveResearchMemo)
+
+The adaptive planning strategy now includes a Claude-style three-phase orchestration:
+
+1. **Research** — planner calls `research_for_workflow()` to gather signal from available context (worker findings, session task outputs, recent successful patterns). Returns `AdaptiveResearchMemo`:
+   ```rust
+   pub struct AdaptiveResearchMemo {
+       pub summary: String,           // synthesis of available signals
+       pub findings: Vec<String>,     // key facts discovered
+       pub assumptions: Vec<String>,  // assumptions made during research
+       pub risks: Vec<String>,        // identified blockers or uncertainties
+       pub workflow_hints: Vec<String>, // suggested next steps or priorities
+   }
+   ```
+
+2. **Synthesis** — memo signal is fed into the standard compiler path. The compiler can now reason about the research findings and risks before committing to a concrete `workflow_outline`.
+
+3. **Compilation** — from the synthesized signal, the system compiles a deterministic `workflow_outline`. Execution then switches back to the normal runtime path — deterministic steps, no further replanning.
+
+This preserves the Claude-style adaptive problem-solving behavior (research, synthesize, decide) while maintaining the strict invariant: final execution is deterministic. The research memo is memoized per run and available to the executor as context for step-level decisions, without creating hidden runtime state or non-deterministic execution loops.
+
+The planner trait now includes:
+```rust
+pub trait Planner {
+    async fn create_plan(&self, state: &AgentState, role: &AgentRole) -> Result<Plan>;
+    async fn revise_plan(&self, plan: &Plan, state: &AgentState, feedback: &str) -> Result<Plan>;
+    async fn research_for_workflow(&self, state: &AgentState, context: &str, available_tools: &[&str]) 
+        -> Result<AdaptiveResearchMemo>;
+}
+```
+
+### SessionTask
+
+`SessionTask` is the model-facing task graph used by plan mode and runtime coordination. It is separate from scheduler queue tasks.
+
+```
+SessionTask {
+    id,
+    agent_id,
+    subject,
+    description,
+    status,      // pending | in_progress | blocked | completed | failed | stopped
+    owner,
+    blocked_by,
+    blocks,
+    output,      // status + findings + artifacts + confidence
+    metadata,
+}
+```
+
+Tasks are planning and orchestration scaffolding. They make work state durable and inspectable, but they do not replace `workflow_outline` as the execution contract.
+
+### AgentMessage
+
+Sub-agent coordination is now explicit and durable. `AgentMessage` is stored in Postgres and powers:
+
+- `send_message` for outbound worker/coordinator messaging
+- `message_inbox` for inbox reads, acknowledgements, and continue-worker flows
+- structured worker result contracts with `status`, `artifacts`, `findings`, and `confidence`
+
+This keeps coordinator synthesis and worker continuation out of hidden conversation state.
 
 ### TriggerDef
 ```
@@ -422,7 +499,7 @@ RoleTemplate {
 }
 ```
 
-All 23 templates are static data â€” no DB table, no migrations, no API to manage them.
+All 23 templates are static data â€” no DB table, no migrations, no API to manage them. The template count has grown from the initial 20 to 23 with the additions of `call_center_triage`, `commerce_fulfillment_ops`, and `brand_protection_monitoring`.
 
 ### Multi-role sessions
 If the user chooses split, remaining `RoleResponsibility` objects are stashed in `draft_agent.memory_ref` as `|pending_roles:[...]`. After `save()` returns, the frontend detects this and immediately opens plan mode again for role 2 on the same agent, pre-populated with the responsibility name. This repeats until all pending roles are configured.
@@ -478,6 +555,40 @@ Custom tool policy in runtime is strict:
 - `create_workspace_tool` is blocked during run execution.
 - `run_registered_wasm` is allowed only for plan-mode-approved role scopes (`wasm_tool:<name>` markers persisted on `role.tools`).
 - If a step requests an out-of-scope WASM tool, executor returns an explicit scope error instead of attempting dynamic tool creation.
+
+### Role-scoped tool pools
+
+Narayan now shapes the visible tool surface by runtime role before step-level selection:
+
+- `Plan` pool â€” discovery, clarification, tasks, connector/resource lookup
+- `Coordinator` pool â€” orchestration, tasks, messaging, read-side inspection
+- `Worker` pool â€” execution tools, edits, scoped integration access
+- `Verification` pool â€” read/test/check tools with limited mutation
+- `Teammate` pool â€” lightweight coordination + task updates
+
+Tool selection still happens per step, but only after the pool has constrained the allowed surface. This mirrors the coordinator/worker separation required for reliable multi-agent execution.
+
+### Permission modes
+
+Policy evaluation now uses explicit permission posture through first-class runtime enforcement:
+
+- `plan_only` — plan mode only, never runtime execution
+- `safe_auto` — auto-execution for read-only and safe connectors, approval gates for writes/external effects
+- `workspace_write` — auto-execution with workspace boundary checks, requires approval for writes outside workspace
+- `trusted_auto` — full auto-execution (for high-confidence roles like data ingestion)
+
+The policy engine combines these permission modes with:
+- tool category restrictions (role-scoped tool pools)
+- workspace path protections (protected paths block writes)
+- workspace boundary enforcement (cross-workspace writes require approval)
+- destructive pattern checks (shell commands, git operations, force deletes)
+- coordinator mutation guards (coordinator pool only, explicit mutation approvals required)
+- worktree gating rules (explicit-only modification inside worktrees)
+- external side-effect classification (API mutations, file writes, webhook triggers)
+
+This enforcement happens in `policy/engine.rs` and `policy/rules.rs`, with role-level policy persisted on each `AgentRole.permission_mode` and injected into runtime before every step executes.
+
+Plan mode now surfaces this policy in the review card under "Runtime Policy", disclosing exactly what execution model will apply at runtime.
 
 ### FailureAction override (`loop.rs: check_failure_rules_for_deterministic_abort`)
 **OPTIMIZATION (March 2026):** FailureAction checks now happen BEFORE the evaluator LLM call instead of after. Deterministic `Abort` rules trigger immediately, saving unnecessary evaluator calls. The check matches by `tool_scope` (which tools were called) and error text:
@@ -573,16 +684,17 @@ Results written to `goal_instance.human_hours_saved` and `human_cost_saved_usd`.
 ## Database schema (key tables)
 
 ```
-agent_definitions       â€” AgentDefinition (JSONB: connectors, constraints)
-agent_roles             â€” AgentRole (JSONB: trigger, execution_guidelines, output_spec, tools)
-goal_instances          â€” One run per role trigger (JSONB: result/criteria_checks, DOUBLE: cost_usd, human_hours_saved)
-plan_mode_sessions      â€” Plan-mode conversation snapshots (JSONB: conversation, attachments, pending_steps, intent_cache, draft_role; columns: attachment_context, session_workspace, goal_fingerprint, repair_version, reused_from_session_id, repair_root_session_id)
-role_chat_sessions      â€” In-progress role chat conversations (JSONB: conversation, pending_change)
-role_chat_sessions      â€” same (JSONB: pending_change for typed RoleChange)
-connector_installs      â€” OAuth tokens + API keys per tenant per connector
-tenant_connectors       â€” Custom connections (databases, REST APIs, MCP servers)
-agents                  â€” Runtime AgentState (ephemeral, re-created per run)
-vector_documents        â€” pgvector embeddings for step findings
+agent_definitions       — AgentDefinition (JSONB: connectors, constraints)
+agent_roles             — AgentRole (JSONB: trigger, execution_guidelines, output_spec, tools)
+goal_instances          — One run per role trigger (JSONB: result/criteria_checks, DOUBLE: cost_usd, human_hours_saved)
+plan_mode_sessions      — Plan-mode conversation snapshots (JSONB: conversation, attachments, pending_steps, intent_cache, draft_role; columns: attachment_context, session_workspace, goal_fingerprint, repair_version, reused_from_session_id, repair_root_session_id)
+role_chat_sessions      — In-progress role chat conversations (JSONB: conversation, pending_change)
+connector_installs      — OAuth tokens + API keys per tenant per connector
+tenant_connectors       — Custom connections (databases, REST APIs, MCP servers)
+agents                  — Runtime AgentState (ephemeral, re-created per run)
+session_tasks           — SessionTask graph for plan-mode and runtime coordination (id, agent_id, subject, description, status, owner, blocked_by, blocks, output JSONB, metadata JSONB)
+agent_messages          — Durable agent-to-agent messages (sender_agent_id, recipient_agent_id, kind, subject, body, task_id, metadata JSONB, delivered_at)
+vector_documents        — pgvector embeddings for step findings
 ```
 
 All queries bind `tenant_id` from the JWT-validated `AuthenticatedTenant` extractor. Cross-tenant reads are structurally impossible â€” `tenant_id` is never read from the request body.
@@ -605,7 +717,7 @@ DELETE /agent-definitions/:id/roles/:role_id
 GET    /agent-definitions/:id/goal-instances
 GET    /agent-definitions/:id/roles/:role_id/goal-instances
 POST   /agent-definitions/:id/roles/:role_id/trigger
-GET    /goal-instances/:id             â€” full detail with criteria_checks
+GET    /goal-instances/:id             — full detail with criteria_checks
 ```
 
 ### Plan mode
@@ -623,6 +735,15 @@ POST   /plan-mode/sessions/:id/save   â€” save AgentDefinition + AgentRole
 POST   /roles/:role_id/chat                    â€” start session
 POST   /roles/:role_id/chat/:sid/turn          â€” send message
 POST   /roles/:role_id/chat/:sid/apply         â€” apply confirmed RoleChange
+```
+
+### Agent messaging and worker coordination
+```
+GET    /agents/:id/messages            — list durable inbox/sent messages (query: direction, undelivered_only, limit)
+GET    /agents/:id/messages/:message_id — fetch one durable agent message
+POST   /agents/:id/messages/:message_id/ack — mark inbox message delivered/read
+POST   /agents/:id/children/:child_id/continue — continue existing child worker with follow-up instruction
+GET    /agents/:id/children            — list child agents for delegation view
 ```
 
 ### Connections
@@ -661,7 +782,7 @@ src/
 â”‚   â”œâ”€â”€ cards/
 â”‚   â”‚   â”œâ”€â”€ SavingsCard.jsx       â€” ROI banner: hours saved, cost, multiplier
 â”‚   â”‚   â”œâ”€â”€ PlanApprovalCard.jsx  â€” credential gap + plan confirm flow
-â”‚   â”‚   â””â”€â”€ ...
+â”‚   â””â”€â”€ ...
 â”‚   â”œâ”€â”€ layout/
 â”‚   â”‚   â””â”€â”€ Sidebar.jsx           â€” agent list with role counts and live status
 â”‚   â””â”€â”€ settings/
@@ -1013,7 +1134,7 @@ The LLM detects a schedule change intent and replies:
 A **confirmation card** appears:
 
 ```
-â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â” 
 â”‚  â†—  Change schedule                      â”‚
 â”‚  Tue + Thu at 7am London (0 7 * * 2,4)  â”‚
 â”‚                                          â”‚
@@ -1161,9 +1282,26 @@ Each role runs in isolation with its own GoalInstance, completion criteria, and 
 
 `TriggerDef.depends_on_role_id` can reference another role in the same agent. This creates a strict ordering within an agent without needing WorkforceEvent subscriptions. Set via the `DependsOnRole` clarification step in plan mode â€” name hint resolved to real ID at save time.
 
-### Delegation (within a run)
+### Delegation and worker continuation (within a run)
 
-During a single run, a step can call the `delegate` tool to spawn a child agent for a sub-task. The parent run suspends and waits for the child. This is used for parallel work â€” e.g. enriching 50 leads by spawning 5 child agents of 10 leads each. `StepOutcome::Delegating { child_ids }` signals this to the worker, which tracks child completion before resuming the parent.
+During a single run, a step can call the `delegate` tool to spawn a child agent for a sub-task. The parent run suspends and waits for the child. This is used for parallel work — e.g. enriching 50 leads by spawning 5 child agents of 10 leads each. `StepOutcome::Delegating { child_ids }` signals this to the worker, which tracks child completion before resuming the parent.
+
+Delegation now supports richer contracts:
+- `worker_type`, `task_id`, `write_scope`, and `continue_child_id` on the delegate tool
+- Structured result contracts: child workers send completion/failure envelopes with `status`, `artifacts`, `findings`, and `confidence` via `send_message`
+- Automatic child-to-parent terminal result reporting in `loop.rs` — workers send structured envelopes even without manual `send_message` calls
+- Parent resume in `scheduler.rs` consumes undelivered child messages first, merges them into durable `worker_messages` metadata, promotes structured findings into parent context
+
+### Continue-worker flow
+
+Both the UI and the agent tool layer can continue an existing child worker with fresh instructions via `message_inbox` (tool) or `POST /agents/:id/children/:child_id/continue` (API). The flow:
+
+1. Parent sends an `Instruction` message to the child via durable `agent_messages`
+2. Child state is updated with the new instruction context and re-queued for execution
+3. Previous inbox messages can be acknowledged in the same call
+4. Events emitted: `AgentMessageSent`, `AgentMessageReceived`, `WorkerContinued`
+
+This keeps coordinator synthesis and worker continuation out of hidden conversation state and makes it inspectable from the frontend.
 
 ---
 
@@ -1246,15 +1384,50 @@ Runtime dynamic custom-tool creation is intentionally blocked; this keeps execut
 
 ---
 
-## Knowledge graph + vector memory
+## Knowledge graph + memory
 
 ### In-run knowledge graph (`knowledge/graph.rs`)
 
 An in-memory directed graph built during a run. Each successful step's findings are parsed by `extract_entities()` and added as `(entity_name, entity_type)` nodes. The evaluator's `key_findings` are also added. The graph persists for the duration of the run and is available to the executor for entity-aware tool calls (e.g. referencing a company name found in step 2 in step 5 without the LLM having to re-read the full context).
 
+### Topic memory + consolidation (`memory/`)
+
+Narayan now has a Claude-style memory consolidation pass above the raw memory primitives.
+
+The consolidation loop is:
+
+1. `Orient`
+   - inspect the current memory index and existing topic memories for the agent
+2. `Gather`
+   - gather only durable signal from successful completed work:
+   - final answer
+   - last reflection
+   - key findings
+   - step outputs
+   - worker messages
+   - session task outputs
+3. `Consolidate`
+   - merge that signal into stable topic memories
+   - prefer updating existing topics over creating duplicates
+   - normalize relative dates into absolute dates
+4. `Prune / index`
+   - remove stale or superseded memories
+   - rebuild the concise memory index
+
+The consolidator only persists memory from successful completed outcomes. Failed or partial runs should not pollute durable memory.
+
+Topic memory is stored under scoped agent keys:
+
+- `agent_id:memory_index`
+- `agent_id:memory_topic/<topic_key>`
+
+Each topic stores a human-readable summary, facts, decisions, risks, and dated notes. `memory_store`, `memory_recall`, `memory_forget`, and `memory_consolidate` operate on this layer.
+
 ### pgvector semantic memory (`memory/`)
 
-Step summaries and findings are embedded and stored in pgvector. On each step, `vector_search` is available as a tool for the executor to retrieve relevant prior context from other runs â€” enabling agents to accumulate knowledge across weeks of operation. `memory_store`, `memory_recall`, and `memory_forget` tools provide explicit read/write/delete access.
+Each consolidated topic is also embedded into pgvector with a stable document ID so semantic search and human-readable topic memory stay aligned.
+
+Step summaries can still be embedded during execution for short-horizon recall, but the durable long-horizon memory layer is now the consolidated topic memory rather than the raw step stream alone.
 
 ---
 
@@ -1390,14 +1563,22 @@ Narayan started as a basic agent loop with a plan/execute/evaluate cycle. Over m
 
 **Session 13:** Plan mode connected to everything â€” `WorkforceEventFilter` + `WorkforceEventInputMapping` + `DependsOnRole` steps so workforce chaining is configured through plan mode, not manually. `active_services_for_category()` discloses segment services in review card.
 
-**Session 14:** 20 pre-built templates in `agent/templates.rs` â€” static `RoleTemplate` structs with `build_role` fn pointers. Template fast-path in `start_plan_mode_session` skips `IntentExtractor` entirely, enters `CapturingClarifications` with 0-3 questions.
+**Session 14:** 20 pre-built templates in `agent/templates.rs` â€” static `RoleTemplate` structs with `build_role` fn pointers. Template fast-path in `start_plan_mode_session` skips `IntentExtractor` entirely, enters `CapturingClarifications` with 0-3 questions. Later expanded to 23 templates with `call_center_triage`, `commerce_fulfillment_ops`, and `brand_protection_monitoring`.
 
 **Session 15:** Role-policy grounding pass â€” persisted `role_category`, defaulted persona/memory scope/execution_limits by category, two-pass intent capability grounding, execution-hint hygiene (`step:` workflow priorities + stale-hint cleanup), safer connector clarification matching, and bounded per-category tool expansion in selector/runtime prompts.
 
 **Session 16:** Plan mode core + deterministic test mode + repair reuse â€” `workflow_outline` became the execution contract, plan test now runs preflight + sandbox without the LLM planner, and goal fingerprinting plus session-local repair snapshots keep the latest good draft reusable for the same normalized goal.
 
----
 
+**Session 17:** Permission engine + plan mode integration — `permission_mode` became first-class on `AgentRole`, with `policy/engine.rs` enforcing permission posture (plan_only, safe_auto, workspace_write, trusted_auto) combined with tool-pool restrictions, protected-path gating, workspace-boundary checks, destructive-pattern detection, and worktree guards. Plan mode now surfaces the runtime policy in the review card before save. Policy propagation happens at executor load time before any step runs.
+
+**Session 18:** Adaptive research compiler loop — moved rich research stage into plan mode where it belongs. Introduced `AdaptiveResearchMemo` with summary, findings, assumptions, risks, and workflow_hints. Plan mode now synthesizes research memo before review/save, stores it on session intent, shows it in review summary. Workflow compilation merges original `workflow_outline` with memo-derived `workflow_hints`. Runtime fallback compiler only recompiles when necessary (new worker evidence). Deterministic execution invariant strengthened: plan mode does full research/synthesis, runtime stays bounded.
+
+**Session 19:** Richer message inbox/continue-worker flow — implemented UI-first durable worker messaging. Added inbox read-side APIs and explicit continue-worker action path. Storage, API routes, worker continuation helper, and model-facing inbox tool all wired. Flow is durable and inspectable from frontend. Both UI and agent tool layer can use continue-worker path. Follow-up instructions land cleanly in next run with proper context injection.
+
+**Session 20:** Memory consolidation using Claude-style logic — added real consolidation service instead of ad hoc memory writes. Implements orient -> gather -> consolidate -> prune pattern on Narayan's existing memory stack. Reads successful run history, updates durable topic memories with index, embeds consolidated topics, prunes superseded memory. Consolidator service + manual `memory_consolidate` tool + automatic success-hook in agent loop ensures durable memories updated only from successful outcomes.
+
+---
 ## The three things that make this different from other agent platforms
 
 **1. ExecutionGuidelines is a contract, not a prompt.**
@@ -1419,88 +1600,148 @@ Every other platform puts guidelines in a free-text system prompt field. Here, g
 ## The most important file relationships
 
 ```
-agent/definition.rs          â† THE source of truth
+agent/definition.rs          ← THE source of truth
     AgentRole
-    ExecutionGuidelines       â† rules + failure_handling + priorities + completion_criteria
-    TriggerDef                â† trigger_type + cron + workforce_event_filter + input_mapping + depends_on_role_id
-    GoalInstanceStatus        â† Pending â†’ Running â†’ Completed | PartiallyComplete | Failed | Cancelled
-    PlanModeSession           â† phase + conversation + attachments + attachment_context + session_workspace + intent_cache + pending_steps + draft_role + goal_fingerprint + repair_version
+    ExecutionGuidelines       ← rules + failure_handling + priorities + completion_criteria
+    TriggerDef                ← trigger_type + cron + workforce_event_filter + input_mapping + depends_on_role_id
+    GoalInstanceStatus        ← Pending → Running → Completed | PartiallyComplete | Failed | Cancelled
+    PlanModeSession           ← phase + conversation + attachments + attachment_context + session_workspace + intent_cache + pending_steps + draft_role + goal_fingerprint + repair_version
 
-agent/plan_mode.rs            â† plan mode conversation manager
-    PlanModeManager::turn()   â† dispatches to handle_intent / handle_clarifications / handle_review
-    test()                    â† deterministic preflight + sandbox validation
-    revise_from_test_result() â† session-local repair loop using structured test output
-    handle_intent()           â† calls IntentExtractor pass 1 + pass 2 refinement, ConnectorResolver, build_step_queue_and_ask
-    build_capability_directory() / build_detailed_capability_context() â† staged grounding input for plan mode inference
-    apply_execution_hints()   â† stores preferred categories + workflow_outline into ExecutionGuidelines (with stale-hint cleanup)
-    compute_plan_mode_goal_fingerprint() â† goal-normalized repair key
-    apply_role_policy_defaults() â† category-derived persona/memory_scope/execution_limits defaults
-    handle_connector_clarification() â† exact connector-name token matching with explicit disambiguation
-    build_step_queue_and_ask()â† loads existing_roles from DB, calls generate_steps()
-    save()                    â† resolves "name:Role Name" hints to UUIDs, preserves completed snapshot, calls sync_subscriptions_for_role
-    build_review_summary()    â† shows trigger description, connectors, services, active_services_for_category()
+agent/plan_mode.rs            ← plan mode conversation manager
+    PlanModeManager::turn()   ← dispatches to handle_intent / handle_clarifications / handle_review
+    test()                    ← deterministic preflight + sandbox validation
+    revise_from_test_result() ← session-local repair loop using structured test output
+    handle_intent()           ← calls IntentExtractor pass 1 + pass 2 refinement, ConnectorResolver, build_step_queue_and_ask
+    build_capability_directory() / build_detailed_capability_context() ← staged grounding input for plan mode inference
+    apply_execution_hints()   ← stores preferred categories + workflow_outline into ExecutionGuidelines (with stale-hint cleanup)
+    compute_plan_mode_goal_fingerprint() ← goal-normalized repair key
+    apply_role_policy_defaults() ← category-derived persona/memory_scope/execution_limits defaults
+    handle_connector_clarification() ← exact connector-name token matching with explicit disambiguation
+    build_step_queue_and_ask()← loads existing_roles from DB, calls generate_steps()
+    save()                    ← resolves "name:Role Name" hints to UUIDs, preserves completed snapshot, calls sync_subscriptions_for_role
+    build_review_summary()    ← shows trigger description, connectors, services, active_services_for_category()
 
-agent/plan_mode_steps.rs      â† the step pipeline
-    generate_steps()          â† intent + category + installed + existing_roles â†’ Vec<ClarificationStep>
-    parse_and_apply()         â† StepField match â†’ writes typed field on draft role
-    infer_input_mapping()     â† natural language â†’ JSONPath { "lead_ids": "$.output_data.lead_ids" }
-    domain_steps_for()        â† 7 categories Ã— 3-5 typed steps each
+agent/plan_mode_steps.rs      ← the step pipeline
+    generate_steps()          ← intent + category + installed + existing_roles → Vec<ClarificationStep>
+    parse_and_apply()         ← StepField match → writes typed field on draft role
+    infer_input_mapping()     ← natural language → JSONPath { "lead_ids": "$.output_data.lead_ids" }
+    domain_steps_for()        ← 7 categories × 3-5 typed steps each
 
-agent/templates.rs            â† 20 pre-built templates
-    RoleTemplate              â† static struct with build_role fn pointer + intent fn pointer
-    find_template(id)         â† used by start_plan_mode_session template fast-path
+agent/templates.rs            ← 23 pre-built templates
+    RoleTemplate              ← static struct with build_role fn pointer + intent fn pointer
+    find_template(id)         ← used by start_plan_mode_session template fast-path
 
-agent/planner.rs              â† deterministic plan construction helpers + planner prompt utilities
-    load_role_context()       â† injects role policy context (category, limits, memory scope, tool/category hints)
-    Plan::from_workflow_outline() â† builds runtime plan from the saved workflow_outline
+agent/planner.rs              ← deterministic plan construction helpers + planner prompt utilities
+    load_role_context()       ← injects role policy context (category, limits, memory scope, tool/category hints)
+    Plan::from_workflow_outline() ← builds runtime plan from the saved workflow_outline
+    AdaptiveResearchMemo      ← research synthesis struct (summary, findings, assumptions, risks, workflow_hints)
+    research_for_workflow()   ← creates adaptive research memo via LLM for plan-mode research stage
 
-agent/executor.rs             â† LLM executor
-    load_role_execution_policy() â† injects same role policy into step execution prompting
-    execute_step()            â† selector gets role.tools + preferred_tool_categories before heuristic fallback
-    run_registered_wasm guard â† enforces role-approved `wasm_tool:<name>` scope, blocks out-of-scope tool_name
-    create_workspace_tool     â† hard-blocked at runtime (plan-mode-only onboarding policy)
+agent/executor.rs             ← LLM executor
+    load_role_execution_policy() ← injects same role policy into step execution prompting
+    execute_step()            ← selector gets role.tools + preferred_tool_categories before heuristic fallback
+    run_registered_wasm guard ← enforces role-approved `wasm_tool:<name>` scope, blocks out-of-scope tool_name
+    create_workspace_tool     ← hard-blocked at runtime (plan-mode-only onboarding policy)
+    permission_mode injection ← propagates role permission_mode, tool_pool, workspace_root to policy engine
 
-tools/selector.rs             â† per-step tool budgeter
-    select_tools_for_step()   â† honors role.tools + role categories, capped to MAX_TOOLS=20
-    MAX_ROLE_CATEGORY_TOOLS   â† per-category cap to prevent broad-category tool flooding
-    RUNTIME_BLOCKED_TOOLS     â† excludes runtime-only forbidden tools (e.g. `create_workspace_tool`)
+tools/selector.rs             ← per-step tool budgeter
+    select_tools_for_step()   ← honors role.tools + role categories, capped to MAX_TOOLS=20
+    MAX_ROLE_CATEGORY_TOOLS   ← per-category cap to prevent broad-category tool flooding
+    RUNTIME_BLOCKED_TOOLS     ← excludes runtime-only forbidden tools (e.g. `create_workspace_tool`)
+    COORDINATOR_TOOLS         ← orchestration-only tools for coordinator pool
+    TEAMMATE_TOOLS            ← lightweight coordination tools for teammate pool
 
-agent/prompts.rs              â† prompt renderers
-    ExecutorPrompt::system()  â† includes request_more_tools category quick maps + connector category hints + "no runtime custom tool creation" rule
+tools/send_message.rs         ← outbound durable agent messaging
+    SendMessageTool           ← first-class tool for sending structured messages between agents
+    ResultContract            ← status, artifacts, findings, confidence envelope
 
-agent/evaluator.rs            â† step evaluation + completion criteria check
-    check_completion_criteria()â† returns Vec<CriterionResult> â€” NOT (bool, String)
-    CriterionResult           â† { description, satisfied, check_type, detail }
-    LlmEvaluator              â† fast-path for unambiguous success, LLM call for ambiguous
+tools/message_inbox.rs        ← read-side agent inbox and worker continuation
+    MessageInboxTool          ← list/get/ack/continue_worker actions
+    ContinueWorkerRequest     ← parent-to-child follow-up instruction struct
+    continue_worker_from_parent() ← shared helper used by tool and API route
 
-agent/loop.rs                 â† the step state machine â€” most complex file in the codebase
-    run_step()                â† workflow-outline-first sequence (preflight â†’ execute â†’ evaluate â†’ criteria check)
-    apply_failure_action_override()â† FailureAction dispatch BEFORE evaluator
-    EvalVerdict               â† Continue | Retry | Abort | GoalComplete â†’ dispatched in match
+tools/session_tasks.rs        ← model-facing session task tools
+    TaskCreateTool, TaskUpdateTool, TaskGetTool, TaskListTool, TaskStopTool, TaskOutputTool
 
-agent/savings.rs              â† ROI estimation â€” fire-and-forget after Complete/PartiallyComplete
-    quality_factor()          â† 0.0 (no output) / 0.5 (result exists, no counts) / 1.0 (real counts)
-    partial_completion_fraction()â† processed/expected from result, default 0.5 if unmeasurable
+tools/tool_search.rs          ← deferred tool schema discovery
+    ToolSearchTool            ← searches tool names, fetches full schema on demand, caches for session
 
-agent/role_chat.rs            â† conversational role editing
-    RoleChangeType            â† 12 variants including AddFailureRule / RemoveFailureRule / SetFailureRules
-    apply_change()            â† typed match â†’ modifies role â†’ upsert_agent_role
+tools/worktree.rs             ← explicit-only git worktree tools
+    EnterWorktreeTool         ← creates git worktree; requires explicit_user_request=true
+    ExitWorktreeTool          ← removes git worktree
 
-storage/postgres.rs           â† every DB operation
-    update_goal_instance_result()â† writes criteria_checks to goal_instance.result JSONB
-    update_goal_instance_savings()â† writes hours/cost after savings estimation
-    plan_mode_sessions rows    â† preserve completed snapshots and repair chain metadata
+memory/consolidation.rs       ← Claude-style memory consolidation service
+    MemoryConsolidator        ← orient → gather → consolidate → prune loop
+    ConsolidationResult       ← topics created/updated/pruned counts
 
-api/routes.rs                 â† all HTTP handlers
-    start_plan_mode_session() â† template fast-path + free-form path
-    test_plan_mode_session()   â† deterministic preflight + sandbox validation
-    revise_plan_mode_session() â† feed structured test output back into plan mode
-    get_goal_instance_detail()â† GET /goal-instances/:id â€” full criteria_checks for RunDetailDrawer
-    list_plan_mode_templates()â† GET /plan-mode/templates â€” 20 template metadata
+tools/memory_consolidate.rs   ← manual trigger for memory consolidation
+    MemoryConsolidateTool     ← callable from UI or runtime for on-demand consolidation
 
-events/workforce.rs           â† cross-role chaining
-    dispatch_workforce_event()â† fires on GoalInstance complete/fail, evaluates filter, creates new GoalInstance
-    sync_subscriptions_for_role()â† called in plan_mode.save() â€” creates WorkforceEventSubscription from trigger
+policy/engine.rs              ← runtime permission enforcement
+    evaluate_tool_call()      ← checks permission_mode + tool_pool + protected paths + workspace boundary + destructive patterns
+    requires_approval()       ← returns whether a tool call needs user approval based on role policy
+
+policy/rules.rs               ← policy rule definitions
+    ProtectedPath, WorkspaceBoundary, DestructivePattern, CoordinatorMutationGuard, WorktreeGate
+
+state/session_task.rs         ← SessionTask model and CRUD
+    SessionTask               ← durable task graph node for plan-mode scaffolding and runtime coordination
+    SessionTaskStatus          ← pending, in_progress, blocked, completed, failed, stopped
+
+state/agent_message.rs        ← AgentMessage model
+    AgentMessage              ← durable agent-to-agent message with kind, subject, body, task_id, metadata
+    AgentMessageKind          ← Instruction, Result, Notification
+
+agent/prompts.rs              ← prompt renderers
+    ExecutorPrompt::system()  ← includes request_more_tools category quick maps + connector category hints + "no runtime custom tool creation" rule
+    PromptSectionId           ← modular cached prompt sections (global_policy, tool_policy, memory_policy, etc.)
+
+agent/evaluator.rs            ← step evaluation + completion criteria check
+    check_completion_criteria()← returns Vec<CriterionResult> — NOT (bool, String)
+    CriterionResult           ← { description, satisfied, check_type, detail }
+    LlmEvaluator              ← fast-path for unambiguous success, LLM call for ambiguous
+
+agent/loop.rs                 ← the step state machine — most complex file in the codebase
+    run_step()                ← workflow-outline-first sequence (preflight → execute → evaluate → criteria check)
+    apply_failure_action_override()← FailureAction dispatch BEFORE evaluator
+    EvalVerdict               ← Continue | Retry | Abort | GoalComplete → dispatched in match
+    auto-consolidation hook   ← triggers memory consolidation on successful completion
+    child-to-parent reporting ← automatic structured result envelopes on worker completion/failure
+
+agent/savings.rs              ← ROI estimation — fire-and-forget after Complete/PartiallyComplete
+    quality_factor()          ← 0.0 (no output) / 0.5 (result exists, no counts) / 1.0 (real counts)
+    partial_completion_fraction()← processed/expected from result, default 0.5 if unmeasurable
+
+agent/role_chat.rs            ← conversational role editing
+    RoleChangeType            ← 12 variants including AddFailureRule / RemoveFailureRule / SetFailureRules
+    apply_change()            ← typed match → modifies role → upsert_agent_role
+
+storage/postgres.rs           ← every DB operation
+    update_goal_instance_result()← writes criteria_checks to goal_instance.result JSONB
+    update_goal_instance_savings()← writes hours/cost after savings estimation
+    plan_mode_sessions rows    ← preserve completed snapshots and repair chain metadata
+    session_task CRUD          ← create/get/list/update/stop session tasks
+    agent_message CRUD         ← create/list/get/ack/mark-delivered agent messages
+    list_agent_inbox_messages()← filtered inbox reads (undelivered_only, limit)
+    count_undelivered_agent_messages() ← unread badge count for UI
+
+api/routes.rs                 ← all HTTP handlers
+    start_plan_mode_session() ← template fast-path + free-form path
+    test_plan_mode_session()   ← deterministic preflight + sandbox validation
+    revise_plan_mode_session() ← feed structured test output back into plan mode
+    get_goal_instance_detail()← GET /goal-instances/:id — full criteria_checks for RunDetailDrawer
+    list_plan_mode_templates()← GET /plan-mode/templates — 23 template metadata
+    list_agent_messages()     ← GET /agents/:id/messages — durable inbox/sent with unread count
+    get_agent_message()       ← GET /agents/:id/messages/:message_id
+    ack_agent_message()       ← POST /agents/:id/messages/:message_id/ack
+    continue_agent_child()    ← POST /agents/:id/children/:child_id/continue
+
+events/bus.rs                 ← in-process SSE event bus
+    AgentEvent variants       ← includes AgentMessageSent, AgentMessageReceived, AgentMessageDelivered, WorkerContinued
+
+events/workforce.rs           ← cross-role chaining
+    dispatch_workforce_event()← fires on GoalInstance complete/fail, evaluates filter, creates new GoalInstance
+    sync_subscriptions_for_role()← called in plan_mode.save() — creates WorkforceEventSubscription from trigger
 ```
 
 ---
@@ -1517,7 +1758,7 @@ build_role(agent_id, tenant_id) â†’ AgentRole with:
     - rules: ["Never post without PO", "Flag >$5k", ...]
     - failure_handling: [SkipAndLog, RetryOnce, EscalateToHuman]
     - completion_criteria: [RecordUpdated("quickbooks"), ErrorsLogged("workspace/errors.txt")]
-session.intent_cache = tmpl.intent()  â† bypasses IntentExtractor
+session.intent_cache = tmpl.intent()  â†  bypasses IntentExtractor
 session.phase = CapturingClarifications
 session.pending_steps = [approval_threshold_step, output_dest_step]
     â†“
@@ -1614,10 +1855,18 @@ All 8 are test infrastructure issues from the `StepResult` field additions and `
 
 ## State of the codebase as of this session
 
-- **Templates:** All 20 templates are defined and wired through template fast-path.
-- **Plan mode:** Includes two-pass intent extraction, connector resolution, clarification pipeline, deterministic test/revise flow, and workforce-event setup steps.
-- **Role policy:** `role_category`, `memory_scope`, and `execution_limits` are persisted and used by runtime prompts. `workflow_outline` is the execution contract for both runtime and test mode.
-- **Tool contracts:** builtin tool input/output contracts, output schemas, and planner guidance live in code and are validated at execution time. No new database tables or fields are required for this layer.
+- **Templates:** All 23 templates are defined and wired through template fast-path (initial 20 + call_center_triage, commerce_fulfillment_ops, brand_protection_monitoring).
+- **Plan mode:** Includes two-pass intent extraction, connector resolution, clarification pipeline, deterministic test/revise flow, workforce-event setup steps, adaptive research memo synthesis before review/save, and runtime policy disclosure in review card.
+- **Role policy:** `role_category`, `memory_scope`, `execution_limits`, `permission_mode`, `tool_pool`, and `execution_strategy` are persisted and used by runtime prompts. `workflow_outline` is the execution contract for both runtime and test mode.
+- **Permission engine:** First-class runtime enforcement in `policy/engine.rs` — permission posture (plan_only, safe_auto, workspace_write, trusted_auto) combined with tool-pool restrictions, protected-path gating, workspace-boundary checks, destructive-pattern detection, and worktree guards.
+- **Adaptive research:** Plan mode owns the heavy research stage via `AdaptiveResearchMemo`. Runtime only does bounded fallback recompilation when new evidence arrives.
+- **Agent messaging:** Durable outbound (`send_message`) and inbox (`message_inbox`) with read/ack/continue-worker flows. Both tool and API surface available. Events: `AgentMessageSent`, `AgentMessageReceived`, `AgentMessageDelivered`, `WorkerContinued`.
+- **Worker continuation:** Both UI (`POST /agents/:id/children/:child_id/continue`) and tool (`message_inbox` with `continue_worker` action) can continue an existing child worker with fresh instructions. Structured result contracts with status/artifacts/findings/confidence.
+- **Session tasks:** Durable `SessionTask` model for plan-mode scaffolding and runtime coordination. Six task tools: create, get, list, update, stop, output.
+- **Worktree gating:** `enter_worktree` / `exit_worktree` tools require `explicit_user_request=true`, scoped to current workspace, require real git repo.
+- **Memory consolidation:** Claude-style orient → gather → consolidate → prune service. Automatic success-hook in agent loop plus manual `memory_consolidate` tool. Only persists memory from successful completed outcomes.
+- **Tool contracts:** Builtin tool input/output contracts, output schemas, and planner guidance live in code and are validated at execution time.
+- **Deferred tool schema:** `tool_search` discovers tools by name, fetches full JSON schema on demand, caches for session. Preferred over `request_more_tools` for exact tool discovery.
 - **Repair reuse:** `goal_fingerprint`, `repair_version`, `reused_from_session_id`, and `repair_root_session_id` keep same-goal drafts reusable without mutating older snapshots.
 - **Completion criteria:** Mechanical checks produce typed `criteria_checks` persisted to DB and shown in run detail UI.
 - **Failure handling:** `SkipAndLog` writes the log file and sets metadata for `ErrorsLogged` checks.
@@ -1662,3 +1911,4 @@ Narayan supports tenant-specific custom WASM tools as a policy-first path:
 - `GET /tenant-wasm-tools/runs` returns recent audits.
 
 Design intent: use LLMs for reasoning and orchestration, but execute tenant business logic in deterministic, bounded WASM with hard resource ceilings.
+

@@ -15,7 +15,7 @@
 //! Result: 8-18 highly relevant tools per step instead of 65.
 
 use crate::{
-    agent::{planner::PlannedStep, prompts::JobType},
+    agent::{definition::ToolPool, planner::PlannedStep, prompts::JobType},
     providers::ToolSpec,
     tools::{tool_spec_from_tool, ToolRegistry, HIDDEN_TOOLS},
 };
@@ -33,16 +33,115 @@ const ALWAYS_INCLUDE: &[&str] = &[
     "file_write",
     "memory_recall",
     "memory_store",
+    "memory_consolidate",
     "data_engine",
     "ask_user",
     "delegate",
+    "task_list",
+    "task_update",
     "plane_guard",
     "vector_search",
     "list_connectors_in_category",
+    "tool_search",
     "request_more_connectors",
     "create_custom_connector",
     "request_more_tools",
 ];
+
+const PLAN_POOL_TOOLS: &[&str] = &[
+    "ask_user",
+    "task_create",
+    "task_get",
+    "task_list",
+    "task_update",
+    "task_output",
+    "tool_search",
+    "request_more_tools",
+    "list_connectors_in_category",
+    "request_more_connectors",
+    "create_custom_connector",
+    "mcp_session",
+    "memory_consolidate",
+    "memory_recall",
+    "vector_search",
+    "glob_search",
+    "content_search",
+    "file_read",
+    "web_search_tool",
+    "web_fetch",
+    "create_workspace_tool",
+];
+
+const COORDINATOR_POOL_TOOLS: &[&str] = &[
+    "ask_user",
+    "delegate",
+    "send_message",
+    "message_inbox",
+    "task_create",
+    "task_get",
+    "task_list",
+    "task_update",
+    "task_output",
+    "tool_search",
+    "memory_consolidate",
+    "request_more_tools",
+    "list_connectors_in_category",
+    "request_more_connectors",
+    "create_custom_connector",
+    "memory_recall",
+    "vector_search",
+    "glob_search",
+    "content_search",
+    "file_read",
+    "web_search_tool",
+    "web_fetch",
+];
+
+const VERIFICATION_POOL_TOOLS: &[&str] = &[
+    "shell",
+    "file_read",
+    "glob_search",
+    "content_search",
+    "git_operations",
+    "diff",
+    "code_run",
+    "memory_consolidate",
+    "memory_recall",
+    "task_get",
+    "task_list",
+    "task_output",
+    "tool_search",
+];
+
+const TEAMMATE_POOL_TOOLS: &[&str] =
+    &[
+        "ask_user",
+        "send_message",
+        "message_inbox",
+        "task_create",
+        "task_get",
+        "task_list",
+        "task_update",
+        "task_output",
+        "tool_search",
+        "memory_consolidate",
+        "memory_recall",
+    ];
+
+fn pool_allows(pool: ToolPool, tool_name: &str) -> bool {
+    let allowed = match pool {
+        ToolPool::Worker => return !RUNTIME_BLOCKED_TOOLS.contains(&tool_name) && !HIDDEN_TOOLS.contains(&tool_name),
+        ToolPool::Plan => PLAN_POOL_TOOLS,
+        ToolPool::Coordinator => COORDINATOR_POOL_TOOLS,
+        ToolPool::Verification => VERIFICATION_POOL_TOOLS,
+        ToolPool::Teammate => TEAMMATE_POOL_TOOLS,
+    };
+    allowed.contains(&tool_name)
+}
+
+pub fn tool_names_for_pool(registry: &ToolRegistry, pool: ToolPool) -> Vec<String> {
+    registry.list().into_iter().filter(|name| pool_allows(pool, name)).map(str::to_string).collect()
+}
 
 /// Select the best tool subset for a given step.
 pub fn select_tools_for_step(
@@ -52,11 +151,22 @@ pub fn select_tools_for_step(
     role_tools: &[String],
     role_tool_categories: &[String],
 ) -> Vec<ToolSpec> {
+    select_tools_for_step_with_pool(registry, step, job_type, role_tools, role_tool_categories, ToolPool::Worker)
+}
+
+pub fn select_tools_for_step_with_pool(
+    registry: &ToolRegistry,
+    step: &PlannedStep,
+    job_type: &JobType,
+    role_tools: &[String],
+    role_tool_categories: &[String],
+    pool: ToolPool,
+) -> Vec<ToolSpec> {
     let mut selected: Vec<String> = Vec::new();
     let mut seen = std::collections::HashSet::new();
 
     let add = |name: &str, selected: &mut Vec<String>, seen: &mut std::collections::HashSet<String>| {
-        if RUNTIME_BLOCKED_TOOLS.contains(&name) || HIDDEN_TOOLS.contains(&name) {
+        if !pool_allows(pool, name) {
             return;
         }
         if seen.insert(name.to_string()) && registry.get(name).is_some() {
@@ -138,11 +248,7 @@ pub fn select_tools_for_step(
     }
 
     // ── 6. Build ToolSpec list ────────────────────────────────────────────────
-    selected
-        .into_iter()
-        .filter_map(|name| registry.get(&name))
-        .map(|t| tool_spec_from_tool(t.as_ref()))
-        .collect()
+    selected.into_iter().filter_map(|name| registry.get(&name)).map(|t| tool_spec_from_tool(t.as_ref())).collect()
 }
 
 /// Extract meaningful keywords from a step description.
@@ -205,10 +311,7 @@ pub fn tool_manifest(registry: &ToolRegistry) -> String {
                 "screenshot",
             ],
         ),
-        (
-            "code",
-            &["code_run", "diff", "patch", "git_operations", "sql_query"],
-        ),
+        ("code", &["code_run", "diff", "patch", "git_operations", "sql_query"]),
         (
             "data",
             &[
@@ -224,16 +327,19 @@ pub fn tool_manifest(registry: &ToolRegistry) -> String {
         ),
         (
             "memory",
-            &["memory_store", "memory_recall", "memory_forget", "vector_store", "vector_search", "vector_delete"],
+            &["memory_store", "memory_consolidate", "memory_recall", "memory_forget", "vector_store", "vector_search", "vector_delete"],
         ),
         ("infra", &["docker", "kubernetes", "ssh_exec", "process_monitor"]),
         (
             "integration",
             &["mcp_session", "search_mcp_registry", "acp_session", "api_call", "http_request", "register_api_tool"],
         ),
-        ("communication", &["email", "notification", "pushover", "ask_user"]),
+        ("communication", &["email", "notification", "pushover", "ask_user", "send_message"]),
         ("security", &["crypto_tool", "plane_guard", "request_credential"]),
-        ("automation", &["schedule", "cron_add", "cron_list", "cron_remove", "cron_run", "delegate"]),
+        (
+            "automation",
+            &["schedule", "cron_add", "cron_list", "cron_remove", "cron_run", "delegate", "enter_worktree", "exit_worktree"],
+        ),
     ];
 
     let mut lines = vec!["Available tool categories (use exact names in tool_args):".to_string()];
@@ -286,10 +392,7 @@ pub fn tool_manifest_from_names(names: &[&str]) -> String {
                 "screenshot",
             ],
         ),
-        (
-            "code",
-            &["code_run", "diff", "patch", "git_operations", "sql_query"],
-        ),
+        ("code", &["code_run", "diff", "patch", "git_operations", "sql_query"]),
         (
             "data",
             &[
@@ -305,13 +408,13 @@ pub fn tool_manifest_from_names(names: &[&str]) -> String {
         ),
         (
             "memory",
-            &["memory_store", "memory_recall", "memory_forget", "vector_store", "vector_search", "vector_delete"],
+            &["memory_store", "memory_consolidate", "memory_recall", "memory_forget", "vector_store", "vector_search", "vector_delete"],
         ),
         ("infra", &["docker", "kubernetes", "ssh_exec", "process_monitor"]),
         ("integration", &["mcp_session", "search_mcp_registry", "api_call", "http_request", "register_api_tool"]),
-        ("communication", &["email", "notification", "pushover", "ask_user"]),
+        ("communication", &["email", "notification", "pushover", "ask_user", "send_message"]),
         ("security", &["crypto_tool", "plane_guard", "request_credential"]),
-        ("automation", &["schedule", "cron_add", "cron_list", "cron_remove", "delegate"]),
+        ("automation", &["schedule", "cron_add", "cron_list", "cron_remove", "delegate", "enter_worktree", "exit_worktree"]),
     ];
 
     let all_known: std::collections::HashSet<&str> = groups.iter().flat_map(|(_, ns)| ns.iter().copied()).collect();

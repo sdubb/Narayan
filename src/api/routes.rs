@@ -26,6 +26,27 @@ use crate::{
 use printpdf::*;
 use zstd::stream::write::Encoder as ZstdEncoder;
 
+#[derive(Debug, Deserialize)]
+pub struct AgentMessageQuery {
+    pub direction: Option<String>,
+    pub undelivered_only: Option<bool>,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ContinueWorkerBody {
+    pub subject: Option<String>,
+    pub body: String,
+    pub task_id: Option<String>,
+    pub worker_type: Option<String>,
+    #[serde(default)]
+    pub write_scope: Vec<String>,
+    #[serde(default)]
+    pub ack_message_ids: Vec<String>,
+    #[serde(default)]
+    pub metadata: serde_json::Value,
+}
+
 // ── Auto-approval store ────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -872,6 +893,7 @@ pub async fn get_agent(
             let step_count = a.plan.as_ref().map(|p| p.steps.len()).unwrap_or(0);
             let job_type = a.plan.as_ref().and_then(|p| p.job_type.clone());
             let cost = state.cost_tracker.get_usage(&a.id).await;
+            let unread_message_count = state.store.count_undelivered_agent_messages(&tenant.tenant_id, &a.id).await.unwrap_or(0);
             Json(serde_json::json!({
                 "id":               a.id,
                 "goal":             a.goal,
@@ -888,6 +910,7 @@ pub async fn get_agent(
                 "job_type":         job_type,
                 "parent_agent_id":  a.parent_agent_id,
                 "pending_children": a.pending_children,
+                "unread_message_count": unread_message_count,
                 "conversation_id":  a.conversation_id,
                 "cost": cost.as_ref().map(|c| serde_json::json!({
                     "total_cost_usd": c.total_cost_usd,
@@ -1125,6 +1148,124 @@ pub async fn list_agent_children(
             }))
             .into_response()
         }
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+/// GET /agents/:id/messages — list durable inbox/sent messages for UI worker coordination.
+pub async fn list_agent_messages(
+    State(state): State<AppState>,
+    tenant: AuthenticatedTenant,
+    Path(agent_id): Path<String>,
+    Query(query): Query<AgentMessageQuery>,
+) -> impl IntoResponse {
+    match state.store.get_agent(&tenant.tenant_id, &agent_id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return err(StatusCode::NOT_FOUND, "agent not found"),
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+
+    let limit = query.limit.unwrap_or(20).clamp(1, 100) as i64;
+    let direction = query.direction.unwrap_or_else(|| "inbox".into());
+    let undelivered_only = query.undelivered_only.unwrap_or(false);
+    let result = match direction.as_str() {
+        "inbox" => state.store.list_agent_inbox_messages(&tenant.tenant_id, &agent_id, undelivered_only, limit).await,
+        "sent" => state.store.list_agent_sent_messages(&tenant.tenant_id, &agent_id, limit).await,
+        "all" => state.store.list_agent_messages_for_agent(&tenant.tenant_id, &agent_id, limit).await,
+        _ => return err(StatusCode::BAD_REQUEST, "direction must be inbox, sent, or all"),
+    };
+
+    match result {
+        Ok(messages) => {
+            let unread_count = state.store.count_undelivered_agent_messages(&tenant.tenant_id, &agent_id).await.unwrap_or(0);
+            Json(serde_json::json!({
+                "agent_id": agent_id,
+                "direction": direction,
+                "messages": messages,
+                "count": messages.len(),
+                "unread_count": unread_count,
+            }))
+            .into_response()
+        }
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+/// GET /agents/:id/messages/:message_id — fetch one durable agent message.
+pub async fn get_agent_message(
+    State(state): State<AppState>,
+    tenant: AuthenticatedTenant,
+    Path((agent_id, message_id)): Path<(String, String)>,
+) -> impl IntoResponse {
+    match state.store.get_agent(&tenant.tenant_id, &agent_id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return err(StatusCode::NOT_FOUND, "agent not found"),
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+
+    match state.store.get_agent_message_for_agent(&tenant.tenant_id, &agent_id, &message_id).await {
+        Ok(Some(message)) => Json(serde_json::json!({ "message": message })).into_response(),
+        Ok(None) => err(StatusCode::NOT_FOUND, "message not found"),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+/// POST /agents/:id/messages/:message_id/ack — mark an inbox message delivered/read.
+pub async fn ack_agent_message(
+    State(state): State<AppState>,
+    tenant: AuthenticatedTenant,
+    Path((agent_id, message_id)): Path<(String, String)>,
+) -> impl IntoResponse {
+    match state.store.get_agent(&tenant.tenant_id, &agent_id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return err(StatusCode::NOT_FOUND, "agent not found"),
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+
+    match state
+        .store
+        .mark_agent_message_delivered_for_recipient(&tenant.tenant_id, &agent_id, &message_id)
+        .await
+    {
+        Ok(true) => {
+            state
+                .event_bus_handle
+                .publish(crate::events::AgentEvent::AgentMessageDelivered { agent_id, message_id: message_id.clone() });
+            Json(serde_json::json!({ "acknowledged": true, "message_id": message_id })).into_response()
+        }
+        Ok(false) => err(StatusCode::NOT_FOUND, "message not found"),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+/// POST /agents/:id/children/:child_id/continue — continue an existing child worker with a fresh instruction.
+pub async fn continue_agent_child(
+    State(state): State<AppState>,
+    tenant: AuthenticatedTenant,
+    Path((agent_id, child_id)): Path<(String, String)>,
+    Json(body): Json<ContinueWorkerBody>,
+) -> impl IntoResponse {
+    match crate::tools::message_inbox::continue_worker_from_parent(
+        &state.store,
+        &state.swarm,
+        &state.event_bus_handle,
+        crate::tools::message_inbox::ContinueWorkerRequest {
+            tenant_id: tenant.tenant_id.clone(),
+            parent_agent_id: agent_id,
+            child_agent_id: child_id,
+            subject: body.subject,
+            body: body.body,
+            task_id: body.task_id,
+            worker_type: body.worker_type,
+            write_scope: body.write_scope,
+            ack_message_ids: body.ack_message_ids,
+            metadata: body.metadata,
+        },
+    )
+    .await
+    {
+        Ok(result) if result.success => Json(result.output).into_response(),
+        Ok(result) => err(StatusCode::BAD_REQUEST, result.error.unwrap_or_else(|| "continue worker failed".into())),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }

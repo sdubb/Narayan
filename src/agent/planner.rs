@@ -52,6 +52,20 @@ pub struct Plan {
     pub rationale: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AdaptiveResearchMemo {
+    #[serde(default)]
+    pub summary: String,
+    #[serde(default)]
+    pub findings: Vec<String>,
+    #[serde(default)]
+    pub assumptions: Vec<String>,
+    #[serde(default)]
+    pub risks: Vec<String>,
+    #[serde(default)]
+    pub workflow_hints: Vec<String>,
+}
+
 impl Plan {
     pub fn next_step(&self, current_step: usize) -> Option<&PlannedStep> {
         self.steps.get(current_step)
@@ -132,6 +146,13 @@ pub trait Planner: Send + Sync {
     async fn create_plan(&self, state: &AgentState, context: &str, available_tools: &[&str]) -> Result<Plan>;
 
     async fn revise_plan(&self, plan: &Plan, state: &AgentState, feedback: &str) -> Result<Plan>;
+
+    async fn research_for_workflow(
+        &self,
+        state: &AgentState,
+        context: &str,
+        available_tools: &[&str],
+    ) -> Result<AdaptiveResearchMemo>;
 }
 
 pub struct LlmPlanner {
@@ -257,6 +278,10 @@ impl LlmPlanner {
     }
 }
 
+fn clean_json_response(raw: &str) -> &str {
+    raw.trim().trim_start_matches("```json").trim_start_matches("```").trim_end_matches("```").trim()
+}
+
 #[async_trait]
 impl Planner for LlmPlanner {
     async fn create_plan(&self, state: &AgentState, context: &str, available_tools: &[&str]) -> Result<Plan> {
@@ -327,7 +352,7 @@ impl Planner for LlmPlanner {
         );
 
         // Strip markdown code fences if model wrapped the JSON
-        let cleaned = raw.trim().trim_start_matches("```json").trim_start_matches("```").trim_end_matches("```").trim();
+        let cleaned = clean_json_response(&raw);
 
         match serde_json::from_str::<Plan>(cleaned) {
             Ok(mut plan) => {
@@ -379,7 +404,7 @@ impl Planner for LlmPlanner {
 
         let resp = self.gateway.chat(request).await?;
         let raw = resp.content.unwrap_or_default();
-        let cleaned = raw.trim().trim_start_matches("```json").trim_start_matches("```").trim_end_matches("```").trim();
+        let cleaned = clean_json_response(&raw);
 
         match serde_json::from_str::<Plan>(cleaned) {
             Ok(mut revised) => {
@@ -394,6 +419,82 @@ impl Planner for LlmPlanner {
             Err(_) => {
                 tracing::warn!(agent_id = %state.id, "plan revision failed to parse, keeping original");
                 Ok(plan.clone())
+            }
+        }
+    }
+
+    async fn research_for_workflow(
+        &self,
+        state: &AgentState,
+        context: &str,
+        available_tools: &[&str],
+    ) -> Result<AdaptiveResearchMemo> {
+        let role_context = self.load_role_context(state).await;
+        let job_type =
+            role_context.as_ref().map(|ctx| ctx.job_type.clone()).unwrap_or_else(|| JobType::detect(&state.goal));
+        let conv_history = self.conversation_history(state).await;
+        let manifest = crate::tools::selector::tool_manifest_from_names(available_tools);
+
+        let system = format!(
+            "{}\n\nYou are in adaptive planning research mode. Study the task and return a JSON synthesis memo only. \
+Do not produce executable steps yet. The memo must capture durable findings, assumptions, risks, and workflow hints \
+that can later be compiled into a deterministic workflow outline.",
+            PlannerPrompt::system(&job_type)
+        );
+        let user = format!(
+            "Goal:\n{}\n\nResearch context:\n{}\n\nAvailable tools:\n{}\n\nConversation history:\n{}\n\nRole context:\n{}\n\n\
+Return strict JSON with this shape:\n{{\n  \"summary\": \"...\",\n  \"findings\": [\"...\"],\n  \"assumptions\": [\"...\"],\n  \"risks\": [\"...\"],\n  \"workflow_hints\": [\"...\"]\n}}\n\
+Focus on what must be true for a deterministic workflow to succeed. Keep findings concrete and implementation-facing.",
+            state.goal,
+            context,
+            manifest,
+            if conv_history.trim().is_empty() { "none" } else { &conv_history },
+            role_context.as_ref().map(|ctx| ctx.prompt_context.as_str()).unwrap_or("none"),
+        );
+
+        tracing::debug!(agent_id = %state.id, job_type = job_type.label(), "creating adaptive research memo");
+        tracing::info!(
+            agent_id = %state.id,
+            goal = %state.goal,
+            job_type = job_type.label(),
+            context = %truncate_for_log(context, 500),
+            "adaptive research request prepared"
+        );
+
+        let request = GatewayRequest::new(
+            state.id.clone(),
+            state.tenant_id.clone(),
+            TaskComplexity::Medium,
+            vec![Message::system(system), Message::user(user)],
+        );
+
+        let resp = self.gateway.chat(request).await?;
+        let raw = resp.content.unwrap_or_default();
+        tracing::info!(
+            agent_id = %state.id,
+            response = %truncate_for_log(&raw, 1200),
+            "adaptive research memo received"
+        );
+
+        match serde_json::from_str::<AdaptiveResearchMemo>(clean_json_response(&raw)) {
+            Ok(memo) => Ok(memo),
+            Err(error) => {
+                tracing::warn!(
+                    agent_id = %state.id,
+                    error = %error,
+                    raw = %truncate_for_log(&raw, 200),
+                    "adaptive research memo failed to parse, using fallback synthesis"
+                );
+                Ok(AdaptiveResearchMemo {
+                    summary: format!("Adaptive planning memo for goal: {}", state.goal),
+                    findings: vec![context.lines().next().unwrap_or_default().trim().to_string()]
+                        .into_iter()
+                        .filter(|value| !value.is_empty())
+                        .collect(),
+                    assumptions: vec![],
+                    risks: vec!["Research memo fallback was generated from unstructured model output.".into()],
+                    workflow_hints: vec!["Compile the memo into bounded deterministic workflow steps before execution.".into()],
+                })
             }
         }
     }

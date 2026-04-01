@@ -2,8 +2,8 @@ use std::{collections::HashMap, sync::Arc};
 
 use anyhow::Result;
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 
 pub const HIDDEN_TOOLS: &[&str] = &["wasm_exec", "wasm_call", "wasm_compile", "wasm_inspect", "run_registered_wasm"];
 
@@ -54,7 +54,7 @@ pub trait Tool: Send + Sync {
     fn description(&self) -> &str;
     fn parameters_schema(&self) -> Vec<ParameterSchema>;
     async fn execute(&self, args: serde_json::Value) -> Result<ToolResult>;
-    
+
     fn output_schema(&self) -> Option<serde_json::Value> {
         default_output_schema(self)
     }
@@ -116,7 +116,8 @@ impl ToolRegistry {
         self.tools.get(name).cloned()
     }
     pub fn list(&self) -> Vec<&str> {
-        let mut names: Vec<&str> = self.tools.keys().map(String::as_str).filter(|name| !HIDDEN_TOOLS.contains(name)).collect();
+        let mut names: Vec<&str> =
+            self.tools.keys().map(String::as_str).filter(|name| !HIDDEN_TOOLS.contains(name)).collect();
         names.sort_unstable();
         names
     }
@@ -193,8 +194,8 @@ pub mod compress;
 pub mod content_search;
 pub mod cron;
 pub mod crypto_tool;
-pub mod data_extractor;
 pub mod data_engine;
+pub mod data_extractor;
 pub mod delegate;
 pub mod diff_patch;
 pub mod docker;
@@ -212,6 +213,8 @@ pub mod image_info;
 pub mod image_process;
 pub mod kubernetes;
 pub mod mcp_session;
+pub mod message_inbox;
+pub mod memory_consolidate;
 pub mod memory_forget;
 pub mod memory_recall;
 pub mod memory_store;
@@ -229,6 +232,8 @@ pub mod run_registered_wasm;
 pub mod schedule;
 pub mod screenshot;
 pub mod search_mcp_registry;
+pub mod send_message;
+pub mod session_tasks;
 pub mod shell;
 pub mod skill_wrapper;
 pub mod spreadsheet;
@@ -236,6 +241,7 @@ pub mod sql_query;
 pub mod ssh_exec;
 pub mod suggest_connectors;
 pub mod tool_output;
+pub mod tool_search;
 pub mod tool_validation;
 pub mod vector_delete;
 pub mod vector_search;
@@ -246,6 +252,7 @@ pub mod wasm_exec;
 pub mod wasm_inspect;
 pub mod web_fetch;
 pub mod web_search_tool;
+pub mod worktree;
 
 pub use delegate::DelegateTool;
 
@@ -300,6 +307,9 @@ pub fn default_registry() -> ToolRegistry {
     r.register(Arc::new(create_custom_connector::CreateCustomConnectorTool));
     r.register(Arc::new(create_workspace_tool::CreateWorkspaceToolTool));
     r.register(Arc::new(request_more_tools::RequestMoreToolsTool));
+    r.register(Arc::new(tool_search::ToolSearchTool));
+    r.register(Arc::new(worktree::EnterWorktreeTool));
+    r.register(Arc::new(worktree::ExitWorktreeTool));
 
     // Register all built-in connector tools (salesforce, github, slack, etc.)
     // install_store=None here — callers that have a ConnectorInstallStore should
@@ -2190,7 +2200,11 @@ fn validate_json_schema(value: &serde_json::Value, schema: &serde_json::Value, p
     if let Some(type_spec) = schema_obj.get("type") {
         let matches_type = matches_schema_type(value, type_spec);
         if !matches_type {
-            return Err(format!("{path}: expected {}, found {}", describe_schema_type(type_spec), describe_value_type(value)));
+            return Err(format!(
+                "{path}: expected {}, found {}",
+                describe_schema_type(type_spec),
+                describe_value_type(value)
+            ));
         }
     }
 
@@ -2267,7 +2281,11 @@ fn validate_json_schema(value: &serde_json::Value, schema: &serde_json::Value, p
                         properties.map(|props| props.keys().map(String::as_str).collect()).unwrap_or_default();
                     for (key, child) in object {
                         if !known.contains(key.as_str()) {
-                            validate_json_schema(child, &serde_json::Value::Object(subschema.clone()), &format!("{path}.{key}"))?;
+                            validate_json_schema(
+                                child,
+                                &serde_json::Value::Object(subschema.clone()),
+                                &format!("{path}.{key}"),
+                            )?;
                         }
                     }
                 }
@@ -2313,7 +2331,9 @@ fn validate_json_schema(value: &serde_json::Value, schema: &serde_json::Value, p
 fn describe_schema_type(type_spec: &serde_json::Value) -> String {
     match type_spec {
         serde_json::Value::String(s) => s.clone(),
-        serde_json::Value::Array(types) => types.iter().filter_map(|value| value.as_str()).collect::<Vec<_>>().join(" | "),
+        serde_json::Value::Array(types) => {
+            types.iter().filter_map(|value| value.as_str()).collect::<Vec<_>>().join(" | ")
+        }
         other => other.to_string(),
     }
 }
@@ -2338,7 +2358,9 @@ fn describe_value_type(value: &serde_json::Value) -> &'static str {
 fn matches_schema_type(value: &serde_json::Value, type_spec: &serde_json::Value) -> bool {
     match type_spec {
         serde_json::Value::String(type_name) => matches_type_name(value, type_name),
-        serde_json::Value::Array(types) => types.iter().any(|entry| entry.as_str().map(|type_name| matches_type_name(value, type_name)).unwrap_or(false)),
+        serde_json::Value::Array(types) => types
+            .iter()
+            .any(|entry| entry.as_str().map(|type_name| matches_type_name(value, type_name)).unwrap_or(false)),
         _ => true,
     }
 }
@@ -2398,6 +2420,9 @@ fn default_when_to_use<T: Tool + ?Sized>(tool: &T) -> String {
         "spreadsheet_write" => "Use to write or update spreadsheet rows and sheets.".into(),
         "image_info" => "Use to inspect image metadata or identify image properties.".into(),
         "image_process" => "Use to transform, resize, annotate, or otherwise process images.".into(),
+        "memory_consolidate" => {
+            "Use to merge successful run history into durable topic memories, update the memory index, and prune stale memory.".into()
+        }
         "memory_store" => "Use to persist useful agent memory, summaries, or durable notes.".into(),
         "memory_recall" => "Use to retrieve stored memory that may help the current task.".into(),
         "memory_forget" => "Use to remove stale or incorrect stored memory.".into(),
@@ -2521,7 +2546,7 @@ fn default_when_not_to_use<T: Tool + ?Sized>(tool: &T) -> String {
         "spreadsheet_write" => "Avoid when you are not updating spreadsheet-like rows or sheets.".into(),
         "image_info" => "Avoid when the source is not an image.".into(),
         "image_process" => "Avoid when you do not need to transform image content.".into(),
-        "memory_store" | "memory_recall" | "memory_forget" | "vector_store" | "vector_search" | "vector_delete" => {
+        "memory_store" | "memory_consolidate" | "memory_recall" | "memory_forget" | "vector_store" | "vector_search" | "vector_delete" => {
             "Avoid as a substitute for durable source-of-truth storage or user-visible output.".into()
         }
         "docker" | "kubernetes" | "ssh_exec" | "process_monitor" => {
@@ -2622,6 +2647,9 @@ mod tests {
         }
         fn parameters_schema(&self) -> Vec<ParameterSchema> {
             vec![]
+        }
+        fn output_schema(&self) -> Option<serde_json::Value> {
+            Some(serde_json::json!({ "type": "string" }))
         }
         fn category(&self) -> &'static str {
             self.category_name

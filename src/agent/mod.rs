@@ -1,5 +1,5 @@
-pub mod clarifier;
 pub mod agent_chat;
+pub mod clarifier;
 pub mod definition;
 pub mod evaluator;
 pub mod executor;
@@ -16,18 +16,19 @@ pub mod savings;
 pub mod templates;
 
 #[allow(unused_imports)]
-pub use clarifier::{ClarificationAnswers, LlmClarifier};
-#[allow(unused_imports)]
 pub use agent_chat::{AgentChatManager, AgentChatMessage, AgentChatRequest};
+#[allow(unused_imports)]
+pub use clarifier::{ClarificationAnswers, LlmClarifier};
 #[allow(unused_imports)]
 pub use definition::{
     infer_failure_action, AgentDefinition, AgentDefinitionStatus, AgentRole, CompletionCheck, CompletionCriterion,
     ConnectorAuthType, ConnectorSource, EndpointDef, EndpointParam, ExecutionGuidelines, ExecutionLimits,
-    FailureAction, FailureRule, GuidelineRule, MemoryScope, OutputDestination, OutputFormat, OutputSpec, ParamLocation,
-    PlanModeAttachment, PlanModeAttachmentKind, PlanModeAttachmentUpload, PlanModeMessage, PlanModePhase,
-    PlanModePreflightResult, PlanModeSandboxResult, PlanModeSession, PlanModeTestCheck, PlanModeTestConfidence,
-    PlanModeTestResult, PlanModeTestStatus, PlanModeTestStepResult, RoleResponsibility, RoleStatus, RulePhase,
-    TenantConnector, TriggerConfidence, TriggerDef, TriggerType, WorkforceEventPayload, WorkforceEventSubscription,
+    ExecutionStrategy, FailureAction, FailureRule, GuidelineRule, MemoryScope, OutputDestination, OutputFormat,
+    OutputSpec, ParamLocation, PlanModeAttachment, PlanModeAttachmentKind, PlanModeAttachmentUpload, PlanModeMessage,
+    PlanModePhase, PlanModePreflightResult, PlanModeSandboxResult, PlanModeSession, PlanModeTestCheck,
+    PlanModeTestConfidence, PlanModeTestResult, PlanModeTestStatus, PlanModeTestStepResult, RoleResponsibility,
+    RoleStatus, RulePhase, TenantConnector, ToolPool, TriggerConfidence, TriggerDef, TriggerType,
+    WorkforceEventPayload, WorkforceEventSubscription,
 };
 #[allow(unused_imports)]
 pub use evaluator::LlmEvaluator;
@@ -54,3 +55,5 @@ pub use templates::{all_templates, find_template, RoleTemplate};
 pub(crate) mod test_helpers;
 #[cfg(test)]
 pub(crate) mod tests;
+#[cfg(test)]
+mod integration_tests;

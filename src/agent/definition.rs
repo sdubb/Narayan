@@ -233,6 +233,55 @@ impl RoleCategory {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionStrategy {
+    #[default]
+    DeterministicWorkflow,
+    AdaptivePlanning,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolPool {
+    #[default]
+    Worker,
+    Plan,
+    Coordinator,
+    Verification,
+    Teammate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionMode {
+    PlanOnly,
+    #[default]
+    SafeAuto,
+    WorkspaceWrite,
+    TrustedAuto,
+}
+
+impl PermissionMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::PlanOnly => "plan_only",
+            Self::SafeAuto => "safe_auto",
+            Self::WorkspaceWrite => "workspace_write",
+            Self::TrustedAuto => "trusted_auto",
+        }
+    }
+
+    pub fn description(&self) -> &'static str {
+        match self {
+            Self::PlanOnly => "planning-only mode; mutating actions require explicit approval",
+            Self::SafeAuto => "safe reads and low-risk actions may proceed automatically",
+            Self::WorkspaceWrite => "workspace-local writes may proceed automatically; destructive and external actions escalate",
+            Self::TrustedAuto => "broad automation allowed, with destructive actions still scrutinized",
+        }
+    }
+}
+
 impl AgentRole {
     pub fn new(id: String, agent_id: String, tenant_id: String, name: String) -> Self {
         let now = Utc::now();
@@ -429,6 +478,17 @@ pub struct ExecutionGuidelines {
     /// instead of calling the LLM planner.
     #[serde(default)]
     pub workflow_outline: Vec<WorkflowStep>,
+    /// DeterministicWorkflow is the steady-state runtime contract.
+    /// AdaptivePlanning is a temporary planning phase that must compile back
+    /// into workflow_outline before execution proceeds.
+    #[serde(default)]
+    pub execution_strategy: ExecutionStrategy,
+    /// Preferred tool pool for the role during normal execution.
+    #[serde(default)]
+    pub tool_pool: ToolPool,
+    /// Permission posture used by runtime policy evaluation.
+    #[serde(default)]
+    pub permission_mode: PermissionMode,
 }
 
 impl ExecutionGuidelines {
@@ -453,10 +513,30 @@ impl ExecutionGuidelines {
         !self.workflow_outline.is_empty()
     }
 
+    pub fn needs_adaptive_compilation(&self) -> bool {
+        self.execution_strategy == ExecutionStrategy::AdaptivePlanning && self.workflow_outline.is_empty()
+    }
+
     pub fn add_workflow_step(&mut self, step: WorkflowStep) {
         if self.workflow_outline.len() < Self::MAX_WORKFLOW {
             self.workflow_outline.push(step);
         }
+    }
+
+    pub fn compile_plan_to_workflow_outline(&mut self, plan: &crate::agent::planner::Plan) {
+        self.workflow_outline = plan
+            .steps
+            .iter()
+            .map(|step| WorkflowStep {
+                description: step.description.clone(),
+                tool: step.tool.clone(),
+                args_template: step.tool_args.clone(),
+                success_criteria: step.success_criteria.clone(),
+                condition: step.condition.clone(),
+            })
+            .take(Self::MAX_WORKFLOW)
+            .collect();
+        self.execution_strategy = ExecutionStrategy::DeterministicWorkflow;
     }
 
     /// Render a structured, numbered prompt block — LLMs follow numbered lists more reliably.
@@ -561,6 +641,23 @@ impl ExecutionGuidelines {
                 .collect();
             parts.push(format!("WORKFLOW OUTLINE:\n{}", items.join("\n")));
         }
+
+        parts.push(format!(
+            "RUNTIME POLICY:\nexecution_strategy: {}\ntool_pool: {}\npermission_mode: {} ({})",
+            match self.execution_strategy {
+                ExecutionStrategy::DeterministicWorkflow => "deterministic_workflow",
+                ExecutionStrategy::AdaptivePlanning => "adaptive_planning",
+            },
+            match self.tool_pool {
+                ToolPool::Worker => "worker",
+                ToolPool::Plan => "plan",
+                ToolPool::Coordinator => "coordinator",
+                ToolPool::Verification => "verification",
+                ToolPool::Teammate => "teammate",
+            },
+            self.permission_mode.as_str(),
+            self.permission_mode.description()
+        ));
 
         parts.join("\n\n")
     }
@@ -1053,6 +1150,22 @@ impl RoleCategory {
             }
         }
     }
+
+    pub fn default_permission_mode(&self) -> PermissionMode {
+        match self {
+            Self::SoftwareEngineer | Self::DataExtraction | Self::DevOps | Self::ITOpsITSM => {
+                PermissionMode::WorkspaceWrite
+            }
+            Self::ResearchAnalyst
+            | Self::CustomerSupport
+            | Self::Marketing
+            | Self::SalesRevOps
+            | Self::FinanceAccounting
+            | Self::HRPeopleOps
+            | Self::LegalContract
+            | Self::General => PermissionMode::SafeAuto,
+        }
+    }
 }
 
 // ── Plan mode conversation state ────────────────────────────────────────────
@@ -1299,6 +1412,7 @@ pub struct TenantConnector {
 #[serde(rename_all = "snake_case")]
 pub enum ConnectorAuthType {
     Bearer,
+    ConnectionString,
     ApiKeyHeader { header_name: String },
     Basic,
     OAuth2,

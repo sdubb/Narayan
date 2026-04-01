@@ -36,13 +36,16 @@ use uuid::Uuid;
 
 use crate::{
     agent::definition::{
-        AgentDefinition, AgentDefinitionStatus, AgentRole, PlanModeMessage, PlanModePhase, PlanModePreflightResult,
-        PlanModeSandboxResult, PlanModeSession, PlanModeTestCheck, PlanModeTestConfidence, PlanModeTestResult,
-        PlanModeTestStatus, PlanModeTestStepResult, RoleCategory, RoleStatus, TenantConnector, TriggerDef, TriggerType,
+        AgentDefinition, AgentDefinitionStatus, AgentRole, ExecutionStrategy, PermissionMode, PlanModeMessage,
+        PlanModePhase, PlanModePreflightResult, PlanModeSandboxResult, PlanModeSession, PlanModeTestCheck,
+        PlanModeTestConfidence, PlanModeTestResult, PlanModeTestStatus, PlanModeTestStepResult, RoleCategory,
+        RoleStatus, TenantConnector, ToolPool, TriggerDef, TriggerType,
     },
+    agent::planner::AdaptiveResearchMemo,
     connectors::ConnectorInstallStore,
     gateway::{GatewayRequest, LlmGateway, TaskComplexity},
     providers::Message,
+    state::{SessionTask, SessionTaskOutput, SessionTaskResultStatus, SessionTaskStatus},
     storage::PostgresStore,
     tools::ToolRegistry,
 };
@@ -822,6 +825,93 @@ impl PlanModeManager {
         parts.join("\n")
     }
 
+    async fn ensure_research_memo(&self, session: &mut PlanModeSession) -> Result<Option<AdaptiveResearchMemo>> {
+        let Some(intent_value) = session.intent_cache.as_ref() else {
+            return Ok(None);
+        };
+        let Some(intent_object) = intent_value.as_object() else {
+            return Ok(None);
+        };
+        if let Some(existing) = intent_object.get("_adaptive_research_memo") {
+            if let Ok(memo) = serde_json::from_value::<AdaptiveResearchMemo>(existing.clone()) {
+                return Ok(Some(memo));
+            }
+        }
+
+        let Some(role) = session.draft_role.as_ref() else {
+            return Ok(None);
+        };
+
+        let research_context = self.build_plan_mode_research_context(session, role);
+        let system = "You are synthesizing a plan-mode research memo for an automation role. \
+Return strict JSON only. Do not produce executable runtime output. \
+The memo must help compile the configuration into a deterministic workflow outline.\n\n\
+Required JSON shape:\n{\n  \"summary\": \"...\",\n  \"findings\": [\"...\"],\n  \"assumptions\": [\"...\"],\n  \"risks\": [\"...\"],\n  \"workflow_hints\": [\"...\"]\n}\n\n\
+Rules:\n\
+- Capture only durable planning signal, not chatty prose\n\
+- workflow_hints must be short, ordered, and directly usable to shape a deterministic workflow\n\
+- risks should focus on missing capabilities, approvals, connector gaps, or validation concerns\n\
+- assumptions should name anything still inferred rather than confirmed"
+            .to_string();
+        let user = format!("Goal: {}\n\nPlanning research context:\n{}", role.purpose, research_context);
+
+        let request = GatewayRequest::new(
+            session.id.clone(),
+            session.tenant_id.clone(),
+            TaskComplexity::Medium,
+            vec![Message::system(system), Message::user(user)],
+        );
+        let raw = self.gateway.chat(request).await?.content.unwrap_or_default();
+        let memo = match serde_json::from_str::<AdaptiveResearchMemo>(clean_json_markdown_response(&raw)) {
+            Ok(memo) => memo,
+            Err(error) => {
+                tracing::warn!(
+                    session_id = %session.id,
+                    error = %error,
+                    "plan mode research memo failed to parse, using fallback synthesis"
+                );
+                fallback_plan_mode_research_memo(role, intent_value)
+            }
+        };
+
+        if let Some(intent_object) = session.intent_cache.as_mut().and_then(|value| value.as_object_mut()) {
+            intent_object.insert("_adaptive_research_memo".into(), serde_json::to_value(&memo)?);
+        }
+        Ok(Some(memo))
+    }
+
+    fn build_plan_mode_research_context(&self, session: &PlanModeSession, role: &AgentRole) -> String {
+        let mut parts = Vec::new();
+        parts.push(format!("Category: {}", role.role_category.as_str()));
+        parts.push(format!("Trigger: {}", crate::agent::agent_chat::trigger_summary(&role.trigger)));
+        parts.push(format!(
+            "Connectors: {}",
+            if role.connectors.is_empty() { "none".into() } else { role.connectors.join(", ") }
+        ));
+        parts.push(format!("Tools: {}", if role.tools.is_empty() { "none".into() } else { role.tools.join(", ") }));
+
+        if let Some(intent) = session.intent_cache.as_ref() {
+            parts.push(format!(
+                "Intent JSON:\n{}",
+                serde_json::to_string_pretty(intent).unwrap_or_else(|_| intent.to_string())
+            ));
+        }
+        if !session.attachment_context.trim().is_empty() {
+            parts.push(format!("Attachment context:\n{}", session.attachment_context));
+        }
+        if !session.draft_agent.constraints.is_empty() {
+            parts.push(format!("Constraints:\n- {}", session.draft_agent.constraints.join("\n- ")));
+        }
+        let history: Vec<&PlanModeMessage> = session.conversation.iter().rev().take(10).collect();
+        if !history.is_empty() {
+            parts.push("Recent plan-mode conversation:".into());
+            for message in history.into_iter().rev() {
+                parts.push(format!("{}: {}", message.role, message.content));
+            }
+        }
+        parts.join("\n\n")
+    }
+
     async fn refine_plan_after_clarifications(&self, session: &mut PlanModeSession) -> Result<Option<String>> {
         let Some(initial_intent) = session.intent_cache.clone() else {
             return Ok(None);
@@ -845,6 +935,9 @@ impl PlanModeManager {
             .refine(&session.id, &session.tenant_id, &description, &initial_intent, &detail_context)
             .await?;
         session.intent_cache = Some(refined.clone());
+        if let Some(intent) = session.intent_cache.as_mut().and_then(|value| value.as_object_mut()) {
+            intent.remove("_adaptive_research_memo");
+        }
 
         let installed: Vec<String> = self
             .installs
@@ -1578,7 +1671,6 @@ impl PlanModeManager {
                         if let Some(intent) = session.intent_cache.as_mut().and_then(|value| value.as_object_mut()) {
                             intent.remove("_pending_connector_resolution");
                         }
-                        pending_connector_resolution = false;
                         session.phase = PlanModePhase::ResolvingConnectors;
                         return Ok(
                             "Please add the database using the inline connection card, then reply with the saved database name so I can continue.".into(),
@@ -1689,12 +1781,14 @@ impl PlanModeManager {
                 }
             }
 
+            let _ = self.ensure_research_memo(session).await?;
             self.materialize_review_workflow_outline(session);
             session.phase = PlanModePhase::Reviewing;
             return Ok(format!("✓ {}\n\n{}", summary, self.build_review_summary(session).await));
         }
 
         // pending_steps was already empty — go straight to review
+        let _ = self.ensure_research_memo(session).await?;
         self.materialize_review_workflow_outline(session);
         session.phase = PlanModePhase::Reviewing;
         Ok(self.build_review_summary(session).await)
@@ -1728,6 +1822,7 @@ impl PlanModeManager {
             session.draft_agent.constraints.extend(constraint_items);
         }
 
+        let _ = self.ensure_research_memo(session).await?;
         self.materialize_review_workflow_outline(session);
         session.phase = PlanModePhase::Reviewing;
         Ok(self.build_review_summary(session).await)
@@ -1735,6 +1830,7 @@ impl PlanModeManager {
 
     /// Public wrapper for build_review_summary — used by the template fast-path in routes.rs
     pub async fn build_review_summary_pub(&self, session: &mut PlanModeSession) -> String {
+        let _ = self.ensure_research_memo(session).await;
         self.materialize_review_workflow_outline(session);
         self.build_review_summary(session).await
     }
@@ -1749,6 +1845,39 @@ impl PlanModeManager {
         }
     }
 
+    async fn sync_review_scaffold_tasks(&self, session: &PlanModeSession) -> Vec<SessionTask> {
+        let specs = plan_mode_scaffold_specs(session);
+        let mut tasks = Vec::new();
+
+        for (task_id, subject, description, status, metadata, output) in specs {
+            let mut task = self
+                .store
+                .get_session_task(&session.tenant_id, &task_id)
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| {
+                    SessionTask::new(
+                        task_id.clone(),
+                        session.tenant_id.clone(),
+                        session.draft_agent.id.clone(),
+                        subject.clone(),
+                        description.clone(),
+                    )
+                });
+
+            task.subject = subject;
+            task.description = description;
+            task.metadata = metadata;
+            task.set_status(status);
+            task.output = output;
+            let _ = self.store.upsert_session_task(&task).await;
+            tasks.push(task);
+        }
+
+        tasks
+    }
+
     async fn build_review_summary(&self, session: &PlanModeSession) -> String {
         let agent = &session.draft_agent;
         let mut preview_role = match session.draft_role.as_ref() {
@@ -1761,6 +1890,12 @@ impl PlanModeManager {
             }
         }
         let role = &preview_role;
+        let scaffold_tasks = self.sync_review_scaffold_tasks(session).await;
+        let research_memo = session
+            .intent_cache
+            .as_ref()
+            .and_then(|intent| intent.get("_adaptive_research_memo"))
+            .and_then(|value| serde_json::from_value::<AdaptiveResearchMemo>(value.clone()).ok());
 
         let trigger_desc = match &role.trigger.trigger_type {
             TriggerType::Webhook => format!(
@@ -1849,6 +1984,73 @@ impl PlanModeManager {
             String::new()
         };
 
+        let runtime_policy = format!(
+            "\n**Runtime policy:** execution={} | tool pool={} | permission mode={}",
+            match role.execution_guidelines.execution_strategy {
+                ExecutionStrategy::DeterministicWorkflow => "deterministic_workflow",
+                ExecutionStrategy::AdaptivePlanning => "adaptive_planning -> compile into workflow_outline",
+            },
+            match role.execution_guidelines.tool_pool {
+                ToolPool::Worker => "worker",
+                ToolPool::Plan => "plan",
+                ToolPool::Coordinator => "coordinator",
+                ToolPool::Verification => "verification",
+                ToolPool::Teammate => "teammate",
+            },
+            role.execution_guidelines.permission_mode.as_str(),
+        );
+
+        let scaffold = if scaffold_tasks.is_empty() {
+            String::new()
+        } else {
+            let lines = scaffold_tasks
+                .iter()
+                .map(|task| {
+                    format!(
+                        "- [{}] {}",
+                        match task.status {
+                            SessionTaskStatus::Completed => "done",
+                            SessionTaskStatus::InProgress => "active",
+                            SessionTaskStatus::Blocked => "blocked",
+                            SessionTaskStatus::Failed => "failed",
+                            SessionTaskStatus::Stopped => "stopped",
+                            SessionTaskStatus::Pending => "pending",
+                        },
+                        task.subject
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("\n**Planning scaffold:**\n{}", lines)
+        };
+
+        let tooling_notes = {
+            let notes = shared_plan_mode_tooling_notes(role);
+            if notes.is_empty() {
+                String::new()
+            } else {
+                format!("\n**Shared planning/runtime tools:** {}", notes.join(" | "))
+            }
+        };
+
+        let research_summary = research_memo.as_ref().map_or_else(String::new, |memo| {
+            let mut lines = Vec::new();
+            if !memo.summary.trim().is_empty() {
+                lines.push(format!("summary: {}", memo.summary));
+            }
+            if !memo.findings.is_empty() {
+                lines.push(format!("findings: {}", memo.findings.join(" | ")));
+            }
+            if !memo.risks.is_empty() {
+                lines.push(format!("risks: {}", memo.risks.join(" | ")));
+            }
+            if lines.is_empty() {
+                String::new()
+            } else {
+                format!("\n**Research synthesis:** {}", lines.join("\n"))
+            }
+        });
+
         format!(
             "Here's what I've configured:\n\n\
             **Agent:** {name}\n\
@@ -1857,7 +2059,7 @@ impl PlanModeManager {
             **Connectors:** {connectors}{tools}\n\
             **Output:** {output}\n\
             **Uploaded docs:** {attachments}\n\
-            **Constraints:** {constraints}{services}{review_focus}\n\n\
+            **Constraints:** {constraints}{services}{runtime_policy}{tooling_notes}{research_summary}{scaffold}{review_focus}\n\n\
             Does this look right? Say **yes** to save, or tell me what to change.",
             name = agent.name,
             purpose = role.purpose,
@@ -1868,6 +2070,10 @@ impl PlanModeManager {
             attachments = attachments,
             constraints = constraints,
             services = services_line,
+            runtime_policy = runtime_policy,
+            tooling_notes = tooling_notes,
+            research_summary = research_summary,
+            scaffold = scaffold,
             review_focus = review_focus,
         )
     }
@@ -1888,6 +2094,8 @@ impl PlanModeManager {
 
     /// Finalise and save the session — creates AgentDefinition + AgentRole in DB.
     pub async fn save(&self, mut session: PlanModeSession) -> Result<(AgentDefinition, AgentRole)> {
+        session.phase = PlanModePhase::Complete;
+        let _ = self.ensure_research_memo(&mut session).await?;
         let mut agent = session.draft_agent.clone();
         agent.status = AgentDefinitionStatus::Active;
         agent.updated_at = Utc::now();
@@ -1932,6 +2140,8 @@ impl PlanModeManager {
                 anyhow::bail!("cannot save plan mode session with no role defined")
             }
         };
+
+        let _ = self.sync_review_scaffold_tasks(&session).await;
 
         Ok((agent, role))
     }
@@ -2208,6 +2418,166 @@ fn apply_role_policy_defaults(agent: &mut AgentDefinition, role: &mut AgentRole)
     if role.execution_limits == crate::agent::definition::ExecutionLimits::default() {
         role.execution_limits = role.role_category.default_execution_limits();
     }
+
+    role.execution_guidelines.permission_mode = role.role_category.default_permission_mode();
+    if matches!(role.role_category, RoleCategory::SoftwareEngineer) {
+        role.execution_guidelines.execution_strategy = ExecutionStrategy::AdaptivePlanning;
+        role.execution_guidelines.tool_pool = ToolPool::Worker;
+    } else if role.execution_guidelines.execution_strategy == ExecutionStrategy::AdaptivePlanning {
+        role.execution_guidelines.execution_strategy = ExecutionStrategy::DeterministicWorkflow;
+    }
+}
+
+fn plan_mode_scaffold_specs(
+    session: &PlanModeSession,
+) -> Vec<(String, String, String, SessionTaskStatus, serde_json::Value, Option<SessionTaskOutput>)> {
+    let phase = phase_rank(&session.phase);
+    let mut specs = Vec::new();
+
+    let intent_output = session.intent_cache.as_ref().map(|intent| SessionTaskOutput {
+        status: SessionTaskResultStatus::Complete,
+        artifacts: Vec::new(),
+        findings: intent["workflow_outline"]
+            .as_array()
+            .map(|items| items.iter().filter_map(|value| value.as_str().map(str::to_string)).take(4).collect())
+            .unwrap_or_default(),
+        confidence: 1.0,
+        note: Some("intent, workflow shape, and operating category captured".into()),
+    });
+    specs.push((
+        format!("planmode:{}:intent", session.id),
+        "Capture intent and workflow shape".into(),
+        "Lock down the business goal, workflow outline, trigger guess, and output direction before execution design.".into(),
+        if session.intent_cache.is_some() { SessionTaskStatus::Completed } else { SessionTaskStatus::InProgress },
+        serde_json::json!({
+            "phase": "capturing_intent",
+            "recommended_tools": ["ask_user:clarification", "task_create", "task_update"],
+        }),
+        intent_output,
+    ));
+
+    let resources_complete = phase > phase_rank(&PlanModePhase::ResolvingConnectors);
+    specs.push((
+        format!("planmode:{}:resources", session.id),
+        "Resolve systems, resources, and access".into(),
+        "Confirm connectors, databases, MCP servers, and any deferred capabilities before the workflow is finalized.".into(),
+        if resources_complete {
+            SessionTaskStatus::Completed
+        } else if phase >= phase_rank(&PlanModePhase::ResolvingConnectors) {
+            SessionTaskStatus::InProgress
+        } else {
+            SessionTaskStatus::Pending
+        },
+        serde_json::json!({
+            "phase": "resolving_connectors",
+            "recommended_tools": ["tool_search", "mcp_session:list_resources", "mcp_session:read_resource", "request_more_tools"],
+        }),
+        resources_complete.then(|| SessionTaskOutput {
+            status: SessionTaskResultStatus::Complete,
+            artifacts: Vec::new(),
+            findings: session
+                .draft_role
+                .as_ref()
+                .map(|role| role.connectors.clone())
+                .unwrap_or_default(),
+            confidence: 1.0,
+            note: Some("connector and capability requirements resolved".into()),
+        }),
+    ));
+
+    let research_memo = session
+        .intent_cache
+        .as_ref()
+        .and_then(|intent| intent.get("_adaptive_research_memo"))
+        .and_then(|value| serde_json::from_value::<AdaptiveResearchMemo>(value.clone()).ok());
+    let research_complete = research_memo.is_some();
+    specs.push((
+        format!("planmode:{}:research", session.id),
+        "Research and compile execution contract".into(),
+        "Synthesize findings, assumptions, and risks into compile-ready workflow hints before deterministic execution is saved.".into(),
+        if research_complete {
+            SessionTaskStatus::Completed
+        } else if session.pending_steps.is_empty() && session.intent_cache.is_some() {
+            SessionTaskStatus::InProgress
+        } else {
+            SessionTaskStatus::Pending
+        },
+        serde_json::json!({
+            "phase": "research_compile",
+            "recommended_tools": ["task_update", "tool_search", "ask_user:decision"],
+        }),
+        research_memo.map(|memo| SessionTaskOutput {
+            status: SessionTaskResultStatus::Complete,
+            artifacts: Vec::new(),
+            findings: memo.workflow_hints.into_iter().take(5).collect(),
+            confidence: 1.0,
+            note: Some(memo.summary),
+        }),
+    ));
+
+    let review_status = if phase >= phase_rank(&PlanModePhase::Reviewing) {
+        SessionTaskStatus::InProgress
+    } else if session.pending_steps.is_empty() && session.intent_cache.is_some() {
+        SessionTaskStatus::InProgress
+    } else {
+        SessionTaskStatus::Pending
+    };
+    specs.push((
+        format!("planmode:{}:review", session.id),
+        "Review, preflight, and sandbox the draft".into(),
+        "Use the checklist to validate workflow steps, required arguments, and sandbox behavior before approval.".into(),
+        review_status,
+        serde_json::json!({
+            "phase": "reviewing",
+            "recommended_tools": ["task_list", "task_output", "ask_user:decision", "tool_search"],
+        }),
+        None,
+    ));
+
+    let save_status = if session.phase == PlanModePhase::Complete {
+        SessionTaskStatus::Completed
+    } else {
+        SessionTaskStatus::Pending
+    };
+    specs.push((
+        format!("planmode:{}:save", session.id),
+        "Save or revise the final draft".into(),
+        "Approval stays separate from clarifications: revise if needed, otherwise save the draft as the execution contract.".into(),
+        save_status,
+        serde_json::json!({
+            "phase": "save",
+            "recommended_tools": ["ask_user:approval", "task_output"],
+        }),
+        (session.phase == PlanModePhase::Complete).then(|| SessionTaskOutput {
+            status: SessionTaskResultStatus::Complete,
+            artifacts: Vec::new(),
+            findings: vec!["plan approved and ready to save".into()],
+            confidence: 1.0,
+            note: Some("plan mode reached completion".into()),
+        }),
+    ));
+
+    specs
+}
+
+fn shared_plan_mode_tooling_notes(role: &AgentRole) -> Vec<String> {
+    let mut notes = vec![
+        "task_* keeps planning and execution state durable".into(),
+        "tool_search lazy-loads optional schemas instead of expanding whole categories".into(),
+        "ask_user stays structured: clarification vs decision vs approval".into(),
+    ];
+
+    if role.tools.iter().any(|tool| tool == "mcp_session") || role.connectors.iter().any(|connector| connector.contains("mcp")) {
+        notes.push("use mcp_session list_resources/read_resource to ground MCP-backed workflows".into());
+    }
+    if matches!(role.execution_guidelines.permission_mode, PermissionMode::WorkspaceWrite | PermissionMode::TrustedAuto) {
+        notes.push("runtime writes stay scoped by permission mode and workspace boundary checks".into());
+    }
+    if matches!(role.execution_guidelines.execution_strategy, ExecutionStrategy::AdaptivePlanning) {
+        notes.push("adaptive planning must compile back into workflow_outline before deterministic execution".into());
+    }
+
+    notes
 }
 
 fn plan_mode_workspace_root(workspace_root: &Path, tenant_id: &str, agent_id: &str) -> PathBuf {
@@ -3030,10 +3400,7 @@ fn apply_execution_hints(role: &mut AgentRole, intent: &serde_json::Value) {
     role.execution_guidelines.remove_rules_with_prefix(CONNECTOR_CATEGORY_RULE_PREFIX);
     role.execution_guidelines.remove_priority_prefix("step: ");
 
-    let workflow_outline: Vec<String> = intent["workflow_outline"]
-        .as_array()
-        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-        .unwrap_or_default();
+    let workflow_outline = workflow_hints_for_compilation(intent);
     for item in workflow_outline.into_iter().take(5) {
         role.execution_guidelines.add_priority(format!("step: {}", item.trim()));
     }
@@ -3067,10 +3434,7 @@ fn apply_execution_hints(role: &mut AgentRole, intent: &serde_json::Value) {
 fn enrich_workflow_outline(role: &mut AgentRole, intent: &serde_json::Value) {
     role.execution_guidelines.workflow_outline.clear();
 
-    let hints: Vec<String> = intent["workflow_outline"]
-        .as_array()
-        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-        .unwrap_or_default();
+    let hints = workflow_hints_for_compilation(intent);
 
     if hints.is_empty() {
         return;
@@ -3088,6 +3452,52 @@ fn enrich_workflow_outline(role: &mut AgentRole, intent: &serde_json::Value) {
             success_criteria: String::new(),
             condition: None,
         });
+    }
+}
+
+fn workflow_hints_for_compilation(intent: &serde_json::Value) -> Vec<String> {
+    let mut hints: Vec<String> = intent["workflow_outline"]
+        .as_array()
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+
+    if let Some(memo) = intent
+        .get("_adaptive_research_memo")
+        .and_then(|value| serde_json::from_value::<AdaptiveResearchMemo>(value.clone()).ok())
+    {
+        hints.extend(memo.workflow_hints);
+    }
+
+    let mut merged = Vec::new();
+    for hint in hints {
+        let normalized = hint.trim();
+        if normalized.is_empty() {
+            continue;
+        }
+        if !merged.iter().any(|existing: &String| existing.eq_ignore_ascii_case(normalized)) {
+            merged.push(normalized.to_string());
+        }
+    }
+    merged
+}
+
+fn clean_json_markdown_response(raw: &str) -> &str {
+    raw.trim().trim_start_matches("```json").trim_start_matches("```").trim_end_matches("```").trim()
+}
+
+fn fallback_plan_mode_research_memo(role: &AgentRole, intent: &serde_json::Value) -> AdaptiveResearchMemo {
+    AdaptiveResearchMemo {
+        summary: format!("Plan-mode research fallback for {}", role.purpose),
+        findings: intent["actions"]
+            .as_array()
+            .map(|arr| arr.iter().filter_map(|value| value.as_str().map(str::to_string)).take(4).collect())
+            .unwrap_or_default(),
+        assumptions: Vec::new(),
+        risks: vec!["Research synthesis fell back to intent-derived hints because the memo response was not valid JSON.".into()],
+        workflow_hints: intent["workflow_outline"]
+            .as_array()
+            .map(|arr| arr.iter().filter_map(|value| value.as_str().map(str::to_string)).take(6).collect())
+            .unwrap_or_default(),
     }
 }
 
@@ -3208,6 +3618,12 @@ fn resolve_tool_for_hint(
         return (Some("file_read".into()), Some(serde_json::json!({ "path": "{input.file_path}" })));
     }
 
+    if lower.contains("extract") || lower.contains("parse") || lower.contains("pull data") {
+        if let Some(args) = resolve_data_extractor_args(&lower) {
+            return (Some("data_extractor".into()), Some(args));
+        }
+    }
+
     // 4. Keyword-based tool matching
     let tool_keywords: &[(&[&str], &str, Option<serde_json::Value>)] = &[
         (
@@ -3284,12 +3700,6 @@ fn resolve_tool_for_hint(
     for (keywords, tool_name, default_args) in tool_keywords {
         if keywords.iter().any(|kw| lower.contains(kw)) {
             return (Some((*tool_name).into()), default_args.clone());
-        }
-    }
-
-    if lower.contains("extract") || lower.contains("parse") || lower.contains("pull data") {
-        if let Some(args) = resolve_data_extractor_args(&lower) {
-            return (Some("data_extractor".into()), Some(args));
         }
     }
 
@@ -3826,26 +4236,7 @@ fn active_services_for_category(category: &str) -> Vec<&'static str> {
 mod tests {
     use super::*;
     use crate::agent::definition::ConnectorAuthType;
-    use std::{
-        env,
-        path::PathBuf,
-        sync::{Arc, Mutex},
-        time::Duration,
-    };
-
-    use anyhow::{Context, Result};
-    use async_trait::async_trait;
-    use serde::{Deserialize, Serialize};
-    use tokio::{sync::RwLock, time::sleep};
-
-    use crate::{
-        connectors::ConnectorInstallStore,
-        gateway::{GatewayRequest, LlmGateway},
-        providers::{build_provider, ChatResponse, Message, Provider, ToolSpec},
-        skills::registry::SkillRegistry,
-        storage::PostgresStore,
-        tools::default_registry,
-    };
+    use crate::agent::TenantConnector;
 
     #[test]
     fn test_connector_resolver_matches_salesforce() {
@@ -4315,5 +4706,94 @@ mod tests {
             role.execution_guidelines.workflow_hints(),
             vec!["fetch source records".to_string(), "transform".to_string(), "write destination".to_string(),]
         );
+    }
+
+    #[test]
+    fn test_workflow_hints_for_compilation_merges_research_memo_hints() {
+        let intent = serde_json::json!({
+            "workflow_outline": ["inspect repository", "compile plan"],
+            "_adaptive_research_memo": {
+                "summary": "research summary",
+                "findings": ["existing CI failures"],
+                "assumptions": [],
+                "risks": ["tests may require credentials"],
+                "workflow_hints": ["inspect repository", "verify behavior independently"]
+            }
+        });
+
+        let hints = workflow_hints_for_compilation(&intent);
+        assert_eq!(
+            hints,
+            vec![
+                "inspect repository".to_string(),
+                "compile plan".to_string(),
+                "verify behavior independently".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn test_enrich_workflow_outline_uses_research_memo_hints() {
+        let mut role = AgentRole::new("role-1".into(), "agent-1".into(), "tenant-1".into(), "Primary Role".into());
+        let intent = serde_json::json!({
+            "workflow_outline": ["inspect repository"],
+            "_adaptive_research_memo": {
+                "summary": "research summary",
+                "findings": [],
+                "assumptions": [],
+                "risks": [],
+                "workflow_hints": ["verify behavior independently"]
+            }
+        });
+
+        enrich_workflow_outline(&mut role, &intent);
+
+        let descriptions = role
+            .execution_guidelines
+            .workflow_outline
+            .iter()
+            .map(|step| step.description.clone())
+            .collect::<Vec<_>>();
+        assert!(descriptions.contains(&"inspect repository".to_string()));
+        assert!(descriptions.contains(&"verify behavior independently".to_string()));
+    }
+
+    #[test]
+    fn test_plan_mode_scaffold_specs_tracks_research_stage() {
+        let session = PlanModeSession {
+            id: "pm-1".into(),
+            tenant_id: "tenant-1".into(),
+            draft_agent: AgentDefinition::new("agent-1".into(), "tenant-1".into(), "Planner".into()),
+            draft_role: Some(AgentRole::new("role-1".into(), "agent-1".into(), "tenant-1".into(), "Primary".into())),
+            conversation: vec![],
+            attachments: vec![],
+            attachment_context: String::new(),
+            session_workspace: None,
+            goal_fingerprint: None,
+            repair_version: 1,
+            reused_from_session_id: None,
+            repair_root_session_id: None,
+            phase: PlanModePhase::Reviewing,
+            intent_cache: Some(serde_json::json!({
+                "workflow_outline": ["inspect repository"],
+                "_adaptive_research_memo": {
+                    "summary": "research summary",
+                    "findings": [],
+                    "assumptions": [],
+                    "risks": [],
+                    "workflow_hints": ["verify behavior independently"]
+                }
+            })),
+            pending_steps: vec![],
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        let specs = plan_mode_scaffold_specs(&session);
+        let research = specs
+            .into_iter()
+            .find(|(task_id, _, _, _, _, _)| task_id.ends_with(":research"))
+            .expect("research scaffold should exist");
+        assert_eq!(research.3, SessionTaskStatus::Completed);
     }
 }

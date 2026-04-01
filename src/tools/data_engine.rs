@@ -274,15 +274,19 @@ impl Tool for DataEngineTool {
                 Ok(steps) => steps,
                 Err(err) => return Ok(ToolResult::err(format!("invalid pipeline: {err}"))),
             };
-            execute_pipeline(records, &steps, &options, &mut warnings, &mut errors, &mut ops_applied)
-                .map_err(anyhow::Error::msg)?
+            match execute_pipeline(records, &steps, &options, &mut warnings, &mut errors, &mut ops_applied) {
+                Ok(res) => res,
+                Err(err) => return Ok(ToolResult::err(err)),
+            }
         } else {
             if op.is_empty() {
                 return Ok(ToolResult::err("either 'pipeline' or 'op' is required"));
             }
             let config = args.get("config").cloned().unwrap_or(Value::Null);
-            execute_single_op(&op, &config, records, &options, &mut warnings, &mut errors, &mut ops_applied)
-                .map_err(anyhow::Error::msg)?
+            match execute_single_op(&op, &config, records, &options, &mut warnings, &mut errors, &mut ops_applied) {
+                Ok(res) => res,
+                Err(err) => return Ok(ToolResult::err(err)),
+            }
         };
 
         let execution_time_ms = start.elapsed().as_millis() as u64;
@@ -347,10 +351,10 @@ fn execute_single_op(
 ) -> Result<Vec<Map<String, Value>>, String> {
     let step = PipelineStep {
         op: op.to_string(),
-        condition: None,
-        assign: None,
-        field: None,
-        formula: None,
+        condition: config.get("condition").and_then(|v| serde_json::from_value(v.clone()).ok()),
+        assign: config.get("assign").and_then(|v| serde_json::from_value(v.clone()).ok()),
+        field: config.get("field").and_then(Value::as_str).map(String::from),
+        formula: config.get("formula").and_then(Value::as_str).map(String::from),
         config: if config.is_null() { None } else { Some(config.clone()) },
         mode: None,
         rules: None,
@@ -473,23 +477,29 @@ fn parse_config<T: for<'de> Deserialize<'de>>(raw: Option<&Value>, label: &str) 
 }
 
 fn parse_rules_config(step: &PipelineStep) -> Result<RulesConfig, String> {
-    let mode = step.mode.clone().unwrap_or_else(|| "first_match".into());
-    if mode != "first_match" && mode != "all_match" {
-        return Err("apply_rules mode must be 'first_match' or 'all_match'".into());
-    }
-    let rules = if let Some(rules) = &step.rules {
-        rules.clone()
+    let mut config = if let Some(rules) = &step.rules {
+        RulesConfig {
+            mode: step.mode.clone().unwrap_or_else(|| "first_match".into()),
+            rules: rules.clone(),
+        }
     } else if let Some(config) = &step.config {
-        serde_json::from_value::<RulesConfig>(config.clone())
-            .map_err(|err| format!("invalid apply_rules config: {err}"))?
-            .rules
+        let mut rc: RulesConfig = serde_json::from_value(config.clone())
+            .map_err(|err| format!("invalid apply_rules config: {err}"))?;
+        if let Some(mode) = &step.mode {
+            rc.mode = mode.clone();
+        }
+        rc
     } else {
         return Err("apply_rules requires rules".into());
     };
-    if rules.is_empty() {
+
+    if config.mode != "first_match" && config.mode != "all_match" {
+        return Err("apply_rules mode must be 'first_match' or 'all_match'".into());
+    }
+    if config.rules.is_empty() {
         return Err("apply_rules requires at least one rule".into());
     }
-    Ok(RulesConfig { mode, rules })
+    Ok(config)
 }
 
 fn validate_step(step: &PipelineStep, options: &EngineOptions) -> Result<(), String> {
@@ -1683,7 +1693,7 @@ mod tests {
         let tool = DataEngineTool;
         let result = tool
             .execute(serde_json::json!({
-                "records": [{"content": "invoice INV-123 amount 4500"}],
+                "records": [{"content": "invoice INV-123 without sum"}],
                 "op": "extract_structured_data",
                 "config": {
                     "source_field": "content",

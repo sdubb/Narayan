@@ -57,6 +57,17 @@ pub struct McpToolInfo {
     pub input_schema: Option<Value>,
 }
 
+#[derive(Deserialize, Serialize, Debug, Clone)]
+pub struct McpResourceInfo {
+    pub uri: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(rename = "mimeType", default)]
+    pub mime_type: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
 // ── Shared request ID counter ──────────────────────────────────────────────
 
 static REQ_ID: AtomicU64 = AtomicU64::new(1);
@@ -203,6 +214,31 @@ impl McpClient {
         }
         Ok(resp.result.unwrap_or(Value::Null))
     }
+
+    async fn list_resources(&self) -> anyhow::Result<Vec<McpResourceInfo>> {
+        let resp = self.rpc("resources/list", None, Some(next_id())).await?;
+        if let Some(err) = resp.error {
+            anyhow::bail!("resources/list failed: {}", err.message);
+        }
+        let resources: Vec<McpResourceInfo> = resp
+            .result
+            .as_ref()
+            .and_then(|value| value.get("resources"))
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
+            .unwrap_or_default();
+        Ok(resources)
+    }
+
+    async fn read_resource(&self, uri: &str) -> anyhow::Result<Value> {
+        let params = serde_json::json!({
+            "uri": uri,
+        });
+        let resp = self.rpc("resources/read", Some(params), Some(next_id())).await?;
+        if let Some(err) = resp.error {
+            anyhow::bail!("resources/read '{}' failed: {}", uri, err.message);
+        }
+        Ok(resp.result.unwrap_or(Value::Null))
+    }
 }
 
 // ── Tool connector registry (in-memory) ───────────────────────────────────
@@ -334,16 +370,21 @@ impl Tool for McpSessionTool {
 
     fn description(&self) -> &str {
         "Connect to any MCP (Model Context Protocol) server using the full JSON-RPC 2.0 protocol. \
-         Supports initialize handshake, tool discovery, and tool execution. \
+         Supports initialize handshake, tool discovery, resource access, and tool execution. \
          Compatible with Claude.ai MCP servers (Gmail, GitHub, Slack, Stripe, etc.)."
     }
 
     fn parameters_schema(&self) -> Vec<ParameterSchema> {
         vec![
             ParameterSchema::required("server_url", "string", "MCP server endpoint URL."),
-            ParameterSchema::required("action", "string", "Action: 'connect' | 'list_tools' | 'call_tool'"),
+            ParameterSchema::required(
+                "action",
+                "string",
+                "Action: 'connect' | 'list_tools' | 'call_tool' | 'list_resources' | 'read_resource'",
+            ),
             ParameterSchema::optional("tool_name", "string", "Tool name to call (for call_tool)."),
             ParameterSchema::optional("tool_args", "object", "Tool arguments as JSON object (for call_tool)."),
+            ParameterSchema::optional("resource_uri", "string", "Resource URI to read (for read_resource)."),
             ParameterSchema::optional("auth_token", "string", "Bearer auth token (OAuth or API key)."),
         ]
     }
@@ -454,7 +495,42 @@ impl Tool for McpSessionTool {
                 }
             }
 
-            other => Ok(ToolResult::err(format!("Unknown action '{}'. Use: connect | list_tools | call_tool", other))),
+            "list_resources" => {
+                if let Err(e) = mcp.initialize().await {
+                    return Ok(ToolResult::err(format!("MCP initialize failed: {}", e)));
+                }
+                match mcp.list_resources().await {
+                    Ok(resources) => Ok(ToolResult::ok(serde_json::json!({
+                        "resources": resources,
+                        "count": resources.len(),
+                    }))),
+                    Err(e) => Ok(ToolResult::err(format!("list_resources failed: {}", e))),
+                }
+            }
+
+            "read_resource" => {
+                let resource_uri = match args["resource_uri"].as_str() {
+                    Some(uri) => uri.to_string(),
+                    None => return Ok(ToolResult::err("'resource_uri' is required for action='read_resource'")),
+                };
+
+                if let Err(e) = mcp.initialize().await {
+                    return Ok(ToolResult::err(format!("MCP initialize failed: {}", e)));
+                }
+
+                match mcp.read_resource(&resource_uri).await {
+                    Ok(result) => Ok(ToolResult::ok(serde_json::json!({
+                        "resource_uri": resource_uri,
+                        "result": result,
+                    }))),
+                    Err(e) => Ok(ToolResult::err(format!("read_resource '{}' failed: {}", resource_uri, e))),
+                }
+            }
+
+            other => Ok(ToolResult::err(format!(
+                "Unknown action '{}'. Use: connect | list_tools | call_tool | list_resources | read_resource",
+                other
+            ))),
         }
     }
 }

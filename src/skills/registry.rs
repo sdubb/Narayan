@@ -443,7 +443,7 @@ fn curated_skills() -> Vec<Skill> {
                 },
             ],
         )
-        .with_aliases(vec!["plan writing", "draft plan", "write plans"]),
+        .with_aliases(vec!["plan writing", "draft plan", "write plans", "detailed plan"]),
         Skill::structured(
             "verification-before-completion",
             "Validate the drafted plan before save and look for missing safety checks.",

@@ -20,6 +20,7 @@ use async_trait::async_trait;
 
 use crate::{
     agent::{
+        definition::{PermissionMode, ToolPool},
         planner::{Plan, PlannedStep},
         prompts::{build_conversation_history, is_direct_response_goal, ExecutorPrompt, JobType, StepHistory},
     },
@@ -32,12 +33,8 @@ use crate::{
     storage::PostgresStore,
     tenant::TenantStore,
     tools::{
-        parameters_schema_to_json,
-        selector::select_tools_for_step,
-        validate_output_against_schema,
-        ParameterSchema,
-        ToolRegistry,
-        ToolResult,
+        parameters_schema_to_json, validate_output_against_schema, ParameterSchema, ToolRegistry, ToolResult,
+        HIDDEN_TOOLS,
     },
 };
 
@@ -115,7 +112,10 @@ fn validate_tool_output_result(tool_name: &str, result: ToolResult, schema: Opti
             output = %truncate_for_log(&serde_json::to_string(&result.output).unwrap_or_default(), 1200),
             "tool output schema validation failed"
         );
-        return ToolResult::err(format!("tool '{}' returned output that does not match its schema: {}", tool_name, err));
+        return ToolResult::err(format!(
+            "tool '{}' returned output that does not match its schema: {}",
+            tool_name, err
+        ));
     }
 
     result
@@ -292,6 +292,29 @@ fn workspace_tool_language_config(language: &str) -> Option<(&'static str, &'sta
         "bash" | "sh" => Some(("bash", "sh")),
         _ => None,
     }
+}
+
+fn tool_schema_cache_key(agent_id: &str) -> String {
+    format!("tool_schema_cache:{}", agent_id)
+}
+
+fn cached_tool_schema_names(agent_id: &str) -> Vec<String> {
+    crate::tools::memory_store_internal::get(&tool_schema_cache_key(agent_id))
+        .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok())
+        .unwrap_or_default()
+}
+
+fn cache_tool_schema_names(agent_id: &str, names: &[String]) {
+    let mut cached = cached_tool_schema_names(agent_id);
+    for name in names {
+        if !cached.contains(name) {
+            cached.push(name.clone());
+        }
+    }
+    crate::tools::memory_store_internal::insert(
+        tool_schema_cache_key(agent_id),
+        serde_json::to_string(&cached).unwrap_or_else(|_| "[]".into()),
+    );
 }
 
 fn build_workspace_tool_spec(tool: &WorkspaceGeneratedTool) -> crate::providers::ToolSpec {
@@ -936,6 +959,8 @@ struct RoleExecutionPolicy {
     job_type: JobType,
     tool_preferences: Vec<String>,
     preferred_tool_categories: Vec<String>,
+    tool_pool: ToolPool,
+    permission_mode: PermissionMode,
     allowed_wasm_tools: Vec<String>,
     prompt_context: String,
 }
@@ -998,6 +1023,21 @@ impl LlmExecutor {
         let mut parts = vec![
             format!("Role category: {}", role.role_category.as_str()),
             format!("Memory scope: {:?}", role.memory_scope).to_lowercase(),
+            format!(
+                "Permission mode: {} ({})",
+                role.execution_guidelines.permission_mode.as_str(),
+                role.execution_guidelines.permission_mode.description()
+            ),
+            format!(
+                "Tool pool: {}",
+                match role.execution_guidelines.tool_pool {
+                    ToolPool::Worker => "worker",
+                    ToolPool::Plan => "plan",
+                    ToolPool::Coordinator => "coordinator",
+                    ToolPool::Verification => "verification",
+                    ToolPool::Teammate => "teammate",
+                }
+            ),
             format!(
                 "Execution limits: max_steps={}, max_retries={}, timeout_secs={}, max_cost_usd={}",
                 role.execution_limits.max_steps,
@@ -1065,6 +1105,8 @@ impl LlmExecutor {
             job_type: JobType::from_role_category(&role.role_category),
             tool_preferences: preferred_tools,
             preferred_tool_categories,
+            tool_pool: role.execution_guidelines.tool_pool,
+            permission_mode: role.execution_guidelines.permission_mode,
             allowed_wasm_tools,
             prompt_context: parts.join("\n\n"),
         })
@@ -1443,6 +1485,93 @@ impl LlmExecutor {
                 })
             }
 
+            "tool_search" => {
+                let query = args["query"].as_str().unwrap_or("").trim().to_ascii_lowercase();
+                if query.is_empty() {
+                    return serde_json::json!({ "error": "'query' is required" });
+                }
+
+                let requested_names = args["tool_names"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|value| value.as_str().map(str::to_string))
+                    .collect::<Vec<_>>();
+                let limit = args["limit"].as_u64().unwrap_or(8).clamp(1, 20) as usize;
+
+                let mut matches = self
+                    .tools
+                    .list()
+                    .into_iter()
+                    .filter(|name| !HIDDEN_TOOLS.contains(name))
+                    .filter_map(|name| {
+                        let tool = self.tools.get(name)?;
+                        let contract = format!("{} {}", tool.name(), tool.description()).to_ascii_lowercase();
+                        let score = if tool.name().eq_ignore_ascii_case(&query) {
+                            100
+                        } else if contract.contains(&query) {
+                            10
+                        } else {
+                            crate::tools::selector::keyword_score(
+                                std::slice::from_ref(&query),
+                                tool.name(),
+                                tool.description(),
+                            )
+                        };
+                        if score == 0 {
+                            None
+                        } else {
+                            Some((
+                                score,
+                                tool.name().to_string(),
+                                tool.category().to_string(),
+                                tool.description().to_string(),
+                            ))
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                matches.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+
+                let mut loaded = Vec::new();
+                let mut current_names: std::collections::HashSet<String> =
+                    tool_specs.iter().map(|spec| spec.name.clone()).collect();
+                for name in &requested_names {
+                    if current_names.contains(name) {
+                        loaded.push(name.clone());
+                        continue;
+                    }
+                    if let Some(tool) = self.tools.get(name) {
+                        current_names.insert(name.clone());
+                        loaded.push(name.clone());
+                        tool_specs.push(crate::tools::tool_spec_from_tool(tool.as_ref()));
+                    }
+                }
+                if !loaded.is_empty() {
+                    cache_tool_schema_names(&state.id, &loaded);
+                }
+
+                serde_json::json!({
+                    "status": if loaded.is_empty() { "matches" } else { "loaded" },
+                    "query": query,
+                    "matches": matches
+                        .into_iter()
+                        .take(limit)
+                        .map(|(_, name, category, description)| {
+                            let loaded_now = current_names.contains(&name);
+                            serde_json::json!({
+                                "name": name,
+                                "category": category,
+                                "description": description,
+                                "loaded": loaded_now,
+                            })
+                        })
+                        .collect::<Vec<_>>(),
+                    "loaded_tools": loaded,
+                    "message": "Use tool_names with exact matches to load the schemas you need.",
+                })
+            }
+
             "create_workspace_tool" => {
                 serde_json::json!({
                     "status": "blocked",
@@ -1527,7 +1656,27 @@ impl Executor for LlmExecutor {
             let role_tools = role_policy.as_ref().map(|policy| policy.tool_preferences.clone()).unwrap_or_default();
             let role_tool_categories =
                 role_policy.as_ref().map(|policy| policy.preferred_tool_categories.clone()).unwrap_or_default();
-            select_tools_for_step(&self.tools, step, &job_type, &role_tools, &role_tool_categories)
+            let tool_pool = role_policy.as_ref().map(|policy| policy.tool_pool).unwrap_or(ToolPool::Worker);
+            let mut selected = crate::tools::selector::select_tools_for_step_with_pool(
+                &self.tools,
+                step,
+                &job_type,
+                &role_tools,
+                &role_tool_categories,
+                tool_pool,
+            );
+            let mut current_names: std::collections::HashSet<String> =
+                selected.iter().map(|spec| spec.name.clone()).collect();
+            for cached_name in cached_tool_schema_names(&state.id) {
+                if current_names.contains(&cached_name) {
+                    continue;
+                }
+                if let Some(tool) = self.tools.get(&cached_name) {
+                    current_names.insert(cached_name.clone());
+                    selected.push(crate::tools::tool_spec_from_tool(tool.as_ref()));
+                }
+            }
+            selected
         };
         let mut workspace_tools: HashMap<String, WorkspaceGeneratedTool> = HashMap::new();
 
@@ -1548,6 +1697,7 @@ impl Executor for LlmExecutor {
             "request_more_connectors",
             "create_custom_connector",
             "request_more_tools",
+            "tool_search",
         ];
         let mut connector_expansion_rounds = 0u8;
         let history_text = history.summarise();
@@ -1692,19 +1842,50 @@ impl Executor for LlmExecutor {
             // stored tokens by tenant_id — inject it so they don't need it from the LLM.
             {
                 let needs_tenant =
-                    matches!(tool_call.name.as_str(), "external_db" | "external_api" | "run_registered_wasm")
-                        || crate::tools::connector_tool::ALL_CONNECTORS
-                            .iter()
-                            .any(|c| c.name == tool_call.name.as_str());
+                    matches!(
+                        tool_call.name.as_str(),
+                        "external_db"
+                            | "external_api"
+                            | "run_registered_wasm"
+                            | "mcp_session"
+                            | "search_mcp_registry"
+                            | "send_message"
+                            | "message_inbox"
+                            | "task_create"
+                            | "task_get"
+                            | "task_list"
+                            | "task_update"
+                            | "task_stop"
+                            | "task_output"
+                            | "memory_consolidate"
+                            | "delegate"
+                            | "enter_worktree"
+                            | "exit_worktree"
+                    ) || crate::tools::connector_tool::ALL_CONNECTORS.iter().any(|c| c.name == tool_call.name.as_str());
 
                 if needs_tenant {
                     if let Some(obj) = tool_call.arguments.as_object_mut() {
                         obj.entry("tenant_id").or_insert_with(|| serde_json::json!(state.tenant_id));
+                        obj.entry("agent_id").or_insert_with(|| serde_json::json!(state.id));
                         obj.entry("step_index").or_insert_with(|| serde_json::json!(step.index));
                         if let Some(goal_instance_id) =
                             state.metadata.get("goal_instance_id").and_then(|value| value.as_str())
                         {
                             obj.entry("goal_instance_id").or_insert_with(|| serde_json::json!(goal_instance_id));
+                        }
+                        if tool_call.name == "delegate" {
+                            obj.entry("parent_agent_id").or_insert_with(|| serde_json::json!(state.id));
+                        }
+                        if matches!(tool_call.name.as_str(), "send_message" | "message_inbox") {
+                            if let Some(parent_agent_id) = state.parent_agent_id.as_ref() {
+                                obj.entry("parent_agent_id").or_insert_with(|| serde_json::json!(parent_agent_id));
+                            }
+                            if let Some(current_task) = state.current_task.as_ref() {
+                                obj.entry("task_id").or_insert_with(|| serde_json::json!(current_task));
+                            }
+                        }
+                        if matches!(tool_call.name.as_str(), "enter_worktree" | "exit_worktree") {
+                            obj.entry("workspace_path").or_insert_with(|| serde_json::json!(state.workspace_path));
                         }
                     }
                 }
@@ -1852,6 +2033,9 @@ impl Executor for LlmExecutor {
             }
 
             if let Some(ref engine) = self.services.policy {
+                let permission_mode =
+                    role_policy.as_ref().map(|policy| policy.permission_mode).unwrap_or(PermissionMode::SafeAuto);
+                let tool_pool = role_policy.as_ref().map(|policy| policy.tool_pool).unwrap_or(ToolPool::Worker);
                 let ctx = PolicyContext {
                     tenant_id: state.tenant_id.clone(),
                     agent_id: state.id.clone(),
@@ -1859,6 +2043,9 @@ impl Executor for LlmExecutor {
                     tool_args: clean_args.clone(),
                     plan: plan_tier.clone(),
                     risk_level: plane_guard_risk(&tool_call.name).to_string(),
+                    permission_mode: permission_mode.as_str().to_string(),
+                    tool_pool: format!("{:?}", tool_pool).to_ascii_lowercase(),
+                    workspace_root: Some(state.workspace_path.clone()),
                 };
 
                 let decision = engine.evaluate(&ctx, &tenant_rules);
@@ -2166,6 +2353,9 @@ mod tests {
         }
         fn parameters_schema(&self) -> Vec<ParameterSchema> {
             vec![]
+        }
+        fn output_schema(&self) -> Option<serde_json::Value> {
+            None
         }
         async fn execute(&self, args: serde_json::Value) -> Result<ToolResult> {
             Ok(ToolResult::ok(serde_json::json!({ "echo": args })))

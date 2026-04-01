@@ -186,6 +186,30 @@ pub enum AgentEvent {
         agent_id: String,
         child_ids: Vec<String>,
     },
+    AgentMessageSent {
+        agent_id: String,
+        recipient_agent_id: String,
+        message_kind: String,
+        task_id: Option<String>,
+        has_result_contract: bool,
+    },
+    AgentMessageReceived {
+        agent_id: String,
+        sender_agent_id: String,
+        message_kind: String,
+        task_id: Option<String>,
+        has_result_contract: bool,
+    },
+    AgentMessageDelivered {
+        agent_id: String,
+        message_id: String,
+    },
+    WorkerContinued {
+        agent_id: String,
+        child_agent_id: String,
+        task_id: Option<String>,
+        worker_type: Option<String>,
+    },
 
     // ── Cost tracking ────────────────────────────────────────────────────
     /// Emitted after each LLM call with cost deltas for live cost counter.
@@ -280,6 +304,10 @@ impl AgentEvent {
             AgentEvent::ConnectorTrigger { agent_id, .. } => agent_id,
             AgentEvent::ChildSpawned { agent_id, .. } => agent_id,
             AgentEvent::ChildrenComplete { agent_id, .. } => agent_id,
+            AgentEvent::AgentMessageSent { agent_id, .. } => agent_id,
+            AgentEvent::AgentMessageReceived { agent_id, .. } => agent_id,
+            AgentEvent::AgentMessageDelivered { agent_id, .. } => agent_id,
+            AgentEvent::WorkerContinued { agent_id, .. } => agent_id,
             AgentEvent::LlmCostUpdate { agent_id, .. } => agent_id,
             AgentEvent::PlanApprovalNeeded { agent_id, .. } => agent_id,
             AgentEvent::PlanApproved { agent_id, .. } => agent_id,

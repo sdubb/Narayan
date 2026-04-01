@@ -18,6 +18,8 @@ fn default_required() -> bool {
 pub struct ClarificationQuestion {
     #[serde(default)]
     pub id: String,
+    #[serde(default, alias = "type")]
+    pub question_type: Option<String>,
     pub prompt: String,
     #[serde(default)]
     pub placeholder: Option<String>,
@@ -25,6 +27,12 @@ pub struct ClarificationQuestion {
     pub helper_text: Option<String>,
     #[serde(default)]
     pub options: Vec<String>,
+    #[serde(default, alias = "multiSelect")]
+    pub multi_select: bool,
+    #[serde(default)]
+    pub recommended: Vec<String>,
+    #[serde(default)]
+    pub preview: Option<serde_json::Value>,
     #[serde(default = "default_required")]
     pub required: bool,
     #[serde(default)]
@@ -42,10 +50,14 @@ impl ClarificationQuestion {
         let prompt = prompt.into();
         Self {
             id: question_id_from_prompt(&prompt, 0),
+            question_type: Some("clarification".into()),
             prompt,
             placeholder: None,
             helper_text: None,
             options: Vec::new(),
+            multi_select: false,
+            recommended: Vec::new(),
+            preview: None,
             required: true,
             secret: false,
             store_as_credential: None,
@@ -94,6 +106,11 @@ pub fn parse_clarification_questions(value: &serde_json::Value) -> Vec<Clarifica
                     map.get("question").and_then(|value| value.as_str()).map(|prompt| {
                         ClarificationQuestion {
                             id: map.get("id").and_then(|value| value.as_str()).unwrap_or_default().to_string(),
+                            question_type: map
+                                .get("question_type")
+                                .or_else(|| map.get("type"))
+                                .and_then(|value| value.as_str())
+                                .map(str::to_string),
                             prompt: prompt.to_string(),
                             placeholder: map.get("placeholder").and_then(|value| value.as_str()).map(str::to_string),
                             helper_text: map
@@ -111,6 +128,22 @@ pub fn parse_clarification_questions(value: &serde_json::Value) -> Vec<Clarifica
                                         .collect::<Vec<_>>()
                                 })
                                 .unwrap_or_default(),
+                            multi_select: map
+                                .get("multi_select")
+                                .or_else(|| map.get("multiSelect"))
+                                .and_then(|value| value.as_bool())
+                                .unwrap_or(false),
+                            recommended: map
+                                .get("recommended")
+                                .and_then(|value| value.as_array())
+                                .map(|items| {
+                                    items
+                                        .iter()
+                                        .filter_map(|value| value.as_str().map(str::to_string))
+                                        .collect::<Vec<_>>()
+                                })
+                                .unwrap_or_default(),
+                            preview: map.get("preview").cloned(),
                             required: map.get("required").and_then(|value| value.as_bool()).unwrap_or(true),
                             secret: map.get("secret").and_then(|value| value.as_bool()).unwrap_or(false),
                             store_as_credential: map

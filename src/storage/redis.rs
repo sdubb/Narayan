@@ -1,7 +1,7 @@
 use anyhow::Result;
 use redis::AsyncCommands;
 
-use crate::scheduler::queue::Task;
+use crate::scheduler::queue::ExecutionTask;
 
 pub struct RedisQueue {
     client: redis::Client,
@@ -20,7 +20,7 @@ impl RedisQueue {
     }
 
     /// Push a task onto the right end of the queue list.
-    pub async fn enqueue(&self, task: &Task) -> Result<()> {
+    pub async fn enqueue(&self, task: &ExecutionTask) -> Result<()> {
         let mut conn = self.conn().await?;
         let payload = serde_json::to_string(task)?;
         conn.rpush::<_, _, ()>(&self.queue_key, payload).await?;
@@ -28,7 +28,7 @@ impl RedisQueue {
     }
 
     /// Pop one task from the queue (blocking with timeout).
-    pub async fn dequeue(&self, timeout_secs: f64) -> Result<Option<Task>> {
+    pub async fn dequeue(&self, timeout_secs: f64) -> Result<Option<ExecutionTask>> {
         let mut conn = self.conn().await?;
         // BLPOP returns the source key and payload.
         let result: Option<[String; 2]> = conn.blpop(&self.queue_key, timeout_secs).await?;
@@ -44,7 +44,7 @@ impl RedisQueue {
     }
 
     /// Acknowledge task completion – remove from processing set.
-    pub async fn ack(&self, task: &Task) -> Result<()> {
+    pub async fn ack(&self, task: &ExecutionTask) -> Result<()> {
         let mut conn = self.conn().await?;
         let payload = serde_json::to_string(task)?;
         conn.lrem::<_, _, ()>(&self.processing_key, 1, payload).await?;
@@ -52,7 +52,7 @@ impl RedisQueue {
     }
 
     /// Re-queue a failed task.
-    pub async fn retry(&self, task: &Task) -> Result<()> {
+    pub async fn retry(&self, task: &ExecutionTask) -> Result<()> {
         let mut conn = self.conn().await?;
         // Remove from processing
         let payload = serde_json::to_string(task)?;

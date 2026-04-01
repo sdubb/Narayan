@@ -29,3 +29,12 @@ where
 {
     f(store())
 }
+
+/// List key-value entries whose keys start with the provided prefix.
+pub fn entries_with_prefix(prefix: &str) -> Vec<(String, String)> {
+    store()
+        .iter()
+        .filter(|entry| entry.key().starts_with(prefix))
+        .map(|entry| (entry.key().clone(), entry.value().clone()))
+        .collect()
+}

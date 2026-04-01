@@ -158,6 +158,34 @@ export const agents = {
     req('POST', `/agents/${agentId}/plan-mode/resume`, {}),
 };
 
+// ── Agent Messaging ───────────────────────────────────────────────────────
+export const agentMessages = {
+  list:     (agentId, params = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return req('GET', `/agents/${agentId}/messages${qs ? `?${qs}` : ''}`);
+  },
+  get:      (agentId, messageId)   => req('GET', `/agents/${agentId}/messages/${messageId}`),
+  ack:      (agentId, messageId)   => req('POST', `/agents/${agentId}/messages/${messageId}/ack`),
+  continueChild: (agentId, childId, instruction) =>
+    req('POST', `/agents/${agentId}/children/${childId}/continue`, { instruction }),
+  listChildren: (agentId) => req('GET', `/agents/${agentId}/children`),
+};
+
+// ── Session Tasks ─────────────────────────────────────────────────────────
+export const sessionTasks = {
+  list:   (agentId)             => req('GET', `/agents/${agentId}/tasks`),
+  get:    (agentId, taskId)     => req('GET', `/agents/${agentId}/tasks/${taskId}`),
+  create: (agentId, body)       => req('POST', `/agents/${agentId}/tasks`, body),
+  update: (agentId, taskId, body) => req('PUT', `/agents/${agentId}/tasks/${taskId}`, body),
+  stop:   (agentId, taskId)     => req('POST', `/agents/${agentId}/tasks/${taskId}/stop`),
+};
+
+// ── Memory ────────────────────────────────────────────────────────────────
+export const memory = {
+  consolidate: (agentId) => req('POST', `/agents/${agentId}/memory/consolidate`),
+  topics:      (agentId) => req('GET', `/agents/${agentId}/memory/topics`),
+};
+
 // ── Workspace ─────────────────────────────────────────────────────────────
 export const workspace = {
   files: (agentId) => req('GET', `/agents/${agentId}/workspace/files`),

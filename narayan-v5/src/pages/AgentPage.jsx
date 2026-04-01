@@ -13,6 +13,9 @@ import AgentChatDrawer from '../components/agent/AgentChatDrawer';
 import RoleChatDrawer from '../components/agent/RoleChatDrawer';
 import RunDetailDrawer from '../components/agent/RunDetailDrawer';
 import SavingsCard from '../components/cards/SavingsCard';
+import AgentMessagesTab from '../components/agent/AgentMessagesTab';
+import AgentTasksTab from '../components/agent/AgentTasksTab';
+import AgentMemoryTab from '../components/agent/AgentMemoryTab';
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 function timeAgo(iso) {
@@ -240,6 +243,7 @@ export default function AgentPage({ agentId, onBack }) {
   const [showAgentChat, setShowAgentChat] = useState(false);
   const [chatRole,    setChatRole]   = useState(null); // { id, name } | null
   const [selectedRun, setSelectedRun] = useState(null); // goal_instance id | null
+  const [activeTab,   setActiveTab]  = useState('roles');
 
   const load = useCallback(async () => {
     if (!agentId) return;
@@ -357,10 +361,42 @@ export default function AgentPage({ agentId, onBack }) {
           )}
         </div>
 
-        {/* ── Roles ───────────────────────────────────────────── */}
+        {/* ── Tabs Header ──────────────────────────────────────── */}
+        <div className="px-6 py-0 border-b border-border bg-bg flex items-center gap-6">
+          <button
+            onClick={() => setActiveTab('roles')}
+            className={clsx('py-3 text-sm font-medium border-b-2 transition-colors', activeTab === 'roles' ? 'border-accent text-accent' : 'border-transparent text-tx-3 hover:text-tx-2')}
+          >
+            Roles
+          </button>
+          <button
+            onClick={() => setActiveTab('messages')}
+            className={clsx('py-3 text-sm font-medium border-b-2 transition-colors', activeTab === 'messages' ? 'border-accent text-accent' : 'border-transparent text-tx-3 hover:text-tx-2')}
+          >
+            Messages
+          </button>
+          <button
+            onClick={() => setActiveTab('tasks')}
+            className={clsx('py-3 text-sm font-medium border-b-2 transition-colors', activeTab === 'tasks' ? 'border-accent text-accent' : 'border-transparent text-tx-3 hover:text-tx-2')}
+          >
+            Tasks
+          </button>
+          <button
+            onClick={() => setActiveTab('memory')}
+            className={clsx('py-3 text-sm font-medium border-b-2 transition-colors', activeTab === 'memory' ? 'border-accent text-accent' : 'border-transparent text-tx-3 hover:text-tx-2')}
+          >
+            Memory
+          </button>
+        </div>
+
+        {/* ── Tab Content ──────────────────────────────────────── */}
         <div className="px-6 py-5 space-y-5">
 
-          {roles.length === 0 ? (
+          {activeTab === 'messages' && <AgentMessagesTab agentId={agentId} />}
+          {activeTab === 'tasks' && <AgentTasksTab agentId={agentId} />}
+          {activeTab === 'memory' && <AgentMemoryTab agentId={agentId} />}
+
+          {activeTab === 'roles' && roles.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-16 text-center">
               <div className="size-12 rounded-2xl bg-accent-soft border border-accent/20 flex items-center justify-center mb-4">
                 <Zap size={20} className="text-accent" />

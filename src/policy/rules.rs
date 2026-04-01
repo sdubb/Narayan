@@ -34,8 +34,18 @@ pub enum PolicyCondition {
     ArgThreshold { field: String, max: f64 },
     /// Matches when the agent's plan is in a specific plan tier.
     PlanIs { plan: String },
+    /// Matches when the role is running under a specific permission mode.
+    PermissionModeIs { mode: String },
+    /// Matches when the role exposes a specific tool pool.
+    ToolPoolIs { pool: String },
     /// Matches when the agent's risk level exceeds a threshold.
     RiskLevel { min_level: String },
+    /// Matches when the tool call has external side effects.
+    ExternalSideEffect,
+    /// Matches when the tool call targets a protected path.
+    ProtectedPathTouched,
+    /// Matches when a write target leaves the current workspace.
+    WritesOutsideWorkspace,
     /// Matches a regex pattern against the tool arguments JSON.
     ArgsMatch { pattern: String },
     /// Combines multiple conditions with AND.

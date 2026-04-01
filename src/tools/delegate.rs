@@ -9,6 +9,10 @@ struct DelegateArgs {
     tenant_id: String,
     parent_id: String,
     sub_goals: Vec<String>,
+    worker_type: Option<String>,
+    task_id: Option<String>,
+    write_scope: Vec<String>,
+    continue_child_id: Option<String>,
 }
 
 fn parse_delegate_args(args: &serde_json::Value) -> Result<DelegateArgs, String> {
@@ -16,20 +20,30 @@ fn parse_delegate_args(args: &serde_json::Value) -> Result<DelegateArgs, String>
     let parent_id = args["parent_agent_id"].as_str().unwrap_or("").to_string();
     let sub_goals: Vec<String> =
         args["sub_goals"].as_array().unwrap_or(&vec![]).iter().filter_map(|v| v.as_str().map(String::from)).collect();
+    let worker_type = args["worker_type"].as_str().map(String::from);
+    let task_id = args["task_id"].as_str().map(String::from);
+    let write_scope: Vec<String> = args["write_scope"]
+        .as_array()
+        .unwrap_or(&vec![])
+        .iter()
+        .filter_map(|value| value.as_str().map(String::from))
+        .collect();
+    let continue_child_id = args["continue_child_id"].as_str().map(String::from);
 
-    if sub_goals.is_empty() {
-        return Err("sub_goals must not be empty".into());
+    if sub_goals.is_empty() && continue_child_id.is_none() {
+        return Err("sub_goals must not be empty unless continue_child_id is provided".into());
     }
     if tenant_id.is_empty() || parent_id.is_empty() {
         return Err("tenant_id and parent_agent_id are required".into());
     }
 
-    Ok(DelegateArgs { tenant_id, parent_id, sub_goals })
+    Ok(DelegateArgs { tenant_id, parent_id, sub_goals, worker_type, task_id, write_scope, continue_child_id })
 }
 
-fn delegate_result(child_ids: Vec<String>) -> ToolResult {
+fn delegate_result(child_ids: Vec<String>, continued: Option<String>) -> ToolResult {
     ToolResult::ok(serde_json::json!({
         "child_agent_ids": child_ids,
+        "continued_child_id": continued,
         "message": format!("{} sub-agents spawned and scheduled", child_ids.len()),
     }))
 }
@@ -72,15 +86,46 @@ impl Tool for DelegateTool {
                 "string",
                 "Parent agent ID — injected automatically by the executor.",
             ),
+            ParameterSchema::optional(
+                "worker_type",
+                "string",
+                "Worker role such as research, implementation, or verification.",
+            ),
+            ParameterSchema::optional("task_id", "string", "Associated session task ID."),
+            ParameterSchema::optional("write_scope", "array", "Explicit file/module ownership for the worker."),
+            ParameterSchema::optional(
+                "continue_child_id",
+                "string",
+                "Existing child agent ID to resume instead of spawning a fresh worker.",
+            ),
         ]
     }
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
-        let DelegateArgs { tenant_id, parent_id, sub_goals } = match parse_delegate_args(&args) {
-            Ok(parsed) => parsed,
-            Err(message) => return Ok(ToolResult::err(message)),
-        };
+        let DelegateArgs { tenant_id, parent_id, sub_goals, worker_type, task_id, write_scope, continue_child_id } =
+            match parse_delegate_args(&args) {
+                Ok(parsed) => parsed,
+                Err(message) => return Ok(ToolResult::err(message)),
+            };
 
         let mut child_ids = Vec::new();
+        let mut continued = None;
+        if let Some(existing_child_id) = continue_child_id {
+            if let Some(mut child) = self.store.get_agent(&tenant_id, &existing_child_id).await? {
+                child.metadata["delegation_context"] = serde_json::json!({
+                    "worker_type": worker_type,
+                    "task_id": task_id,
+                    "write_scope": write_scope,
+                    "continued_at": chrono::Utc::now().to_rfc3339(),
+                });
+                self.store.upsert_agent(&child).await?;
+                if let Err(e) = self.swarm.push(existing_child_id.clone()).await {
+                    tracing::warn!(child = %existing_child_id, error = %e, "swarm enqueue failed for continued child");
+                }
+                child_ids.push(existing_child_id.clone());
+                continued = Some(existing_child_id);
+            }
+        }
+
         for sub_goal in &sub_goals {
             let child_id = crate::util::new_id();
             // Use WorkspaceManager so child agents respect hybrid/remote storage mode
@@ -89,6 +134,12 @@ impl Tool for DelegateTool {
             let mut child =
                 crate::state::AgentState::new(child_id.clone(), tenant_id.clone(), sub_goal.clone(), workspace);
             child.parent_agent_id = Some(parent_id.clone());
+            child.metadata["delegation_context"] = serde_json::json!({
+                "worker_type": worker_type,
+                "task_id": task_id,
+                "write_scope": write_scope,
+                "spawned_at": chrono::Utc::now().to_rfc3339(),
+            });
             self.store.upsert_agent(&child).await?;
             tracing::info!(parent = %parent_id, child = %child_id, sub_goal = %sub_goal, "child agent spawned");
             // Enqueue child via the shared queue-backed Swarm — no global Mutex.
@@ -97,7 +148,7 @@ impl Tool for DelegateTool {
             }
             child_ids.push(child_id);
         }
-        Ok(delegate_result(child_ids))
+        Ok(delegate_result(child_ids, continued))
     }
 }
 
@@ -114,7 +165,7 @@ mod tests {
         }))
         .expect_err("empty sub-goals should fail");
 
-        assert_eq!(error, "sub_goals must not be empty");
+        assert_eq!(error, "sub_goals must not be empty unless continue_child_id is provided");
     }
 
     #[test]
@@ -142,13 +193,17 @@ mod tests {
                 tenant_id: "tenant-1".into(),
                 parent_id: "agent-1".into(),
                 sub_goals: vec!["inspect logs".into(), "review CI workflow".into()],
+                worker_type: None,
+                task_id: None,
+                write_scope: vec![],
+                continue_child_id: None,
             }
         );
     }
 
     #[test]
     fn test_delegate_result_reports_child_count_and_ids() {
-        let result = delegate_result(vec!["child-1".into(), "child-2".into()]);
+        let result = delegate_result(vec!["child-1".into(), "child-2".into()], None);
 
         assert!(result.success);
         assert_eq!(result.output["child_agent_ids"][0], "child-1");
