@@ -42,6 +42,16 @@ pub enum AgentEvent {
     PlanningStarted {
         agent_id: String,
     },
+    RecompileRequested {
+        agent_id: String,
+        reason: String,
+        failure_kind: String,
+        failed_workflow_version: Option<String>,
+        parent_workflow_version: Option<String>,
+        data_signature: Option<serde_json::Value>,
+        plan_mode_session_id: Option<String>,
+        variant_id: Option<String>,
+    },
     PlanCreated {
         agent_id: String,
         step_count: usize,
@@ -262,7 +272,8 @@ pub enum AgentEvent {
         role_id: String,
         role_name: String,
         output_data: serde_json::Value,
-    },    GoalComplete {
+    },
+    GoalComplete {
         agent_id: String,
         summary: String,
     },
@@ -287,6 +298,7 @@ impl AgentEvent {
             AgentEvent::ClarificationNeeded { agent_id, .. } => agent_id,
             AgentEvent::ClarificationReceived { agent_id } => agent_id,
             AgentEvent::PlanningStarted { agent_id, .. } => agent_id,
+            AgentEvent::RecompileRequested { agent_id, .. } => agent_id,
             AgentEvent::PlanCreated { agent_id, .. } => agent_id,
             AgentEvent::StepStarted { agent_id, .. } => agent_id,
             AgentEvent::ToolCalled { agent_id, .. } => agent_id,

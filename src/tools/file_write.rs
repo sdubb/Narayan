@@ -28,7 +28,10 @@ impl Tool for FileWriteTool {
         Some("{ written, path, bytes, appended }. Indicates the file write result.".into())
     }
     fn when_to_use(&self) -> Option<String> {
-        Some("Use when the final artifact should be stored as a workspace file or when appending to an existing file.".into())
+        Some(
+            "Use when the final artifact should be stored as a workspace file or when appending to an existing file."
+                .into(),
+        )
     }
     fn when_not_to_use(&self) -> Option<String> {
         Some("Avoid when you only need to read content, or when the output should be a structured transform rather than a file write.".into())

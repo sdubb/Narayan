@@ -26,7 +26,7 @@ pub struct ResponseCache {
     inner: Arc<RwLock<HashMap<String, CacheEntry>>>,
     default_ttl: Duration,
     max_entries: usize,
-    metrics: Option<Arc<Metrics>>,  // Optional metrics tracking
+    metrics: Option<Arc<Metrics>>, // Optional metrics tracking
 }
 
 impl ResponseCache {
@@ -53,8 +53,9 @@ impl ResponseCache {
     /// Records cache hit/miss metrics.
     pub async fn get(&self, key: &str) -> Option<ChatResponse> {
         let cache = self.inner.read().await;
-        let result = cache.get(key).and_then(|entry| if entry.is_expired() { None } else { Some(entry.response.clone()) });
-        
+        let result =
+            cache.get(key).and_then(|entry| if entry.is_expired() { None } else { Some(entry.response.clone()) });
+
         // Track metrics
         if let Some(ref metrics) = self.metrics {
             if result.is_some() {
@@ -63,7 +64,7 @@ impl ResponseCache {
                 metrics.response_cache_miss();
             }
         }
-        
+
         result
     }
 

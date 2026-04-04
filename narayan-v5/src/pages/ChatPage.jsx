@@ -33,7 +33,7 @@ function EmptyState({ onNew, canCreateAgents }) {
         </button>
         {!canCreateAgents && (
           <p className="mt-3 max-w-sm text-xs leading-6 text-tx-4">
-            Once you add a provider, the agent planner will be ready immediately.
+            Once you add a provider, the compiler will be ready immediately.
           </p>
         )}
         <div className="mt-8 grid w-full max-w-md grid-cols-3 gap-3 text-left">
@@ -157,6 +157,7 @@ export default function ChatPage({ onNavigate, canCreateAgents = true }) {
             <AgentPage
               agentId={selectedAgentId}
               onBack={() => setSelectedAgentId(null)}
+              onNavigateSettings={() => onNavigate('settings')}
             />
           ) : (
             <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-5 px-6 py-8">
@@ -168,12 +169,15 @@ export default function ChatPage({ onNavigate, canCreateAgents = true }) {
       </main>
 
       {planModeFor === 'new' && (
-        <PlanModeChat
-          agentName="New Agent"
-          existingAgentId={null}
-          onComplete={handlePlanModeComplete}
-          onCancel={null}
-        />
+        <div className="absolute inset-y-0 right-0 z-50 w-full max-w-[44rem]">
+          <PlanModeChat
+            agentName="New Agent"
+            existingAgentId={null}
+            onComplete={handlePlanModeComplete}
+            onCancel={null}
+            presentation="inline"
+          />
+        </div>
       )}
     </div>
   );

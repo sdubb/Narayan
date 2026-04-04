@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use walkdir::WalkDir;
 
-use crate::tools::{ParameterSchema, Tool, ToolResult};
+use crate::tools::{ParameterSchema, Tool, ToolResult, schema_string, schema_integer, schema_array};
 
 pub struct ContentSearchTool;
 
@@ -34,6 +34,30 @@ impl Tool for ContentSearchTool {
             ParameterSchema::optional("case_insensitive", "boolean", "Case-insensitive match (default: false)."),
         ]
     }
+
+
+    fn output_schema(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
+            "type": "object",
+            "required": ["pattern", "count", "matches"],
+            "properties": {
+                "pattern": schema_string(),
+                "count": schema_integer(),
+                "matches": schema_array(serde_json::json!({
+                    "type": "object",
+                    "required": ["file", "line_no", "line"],
+                    "properties": {
+                        "file": schema_string(),
+                        "line_no": schema_integer(),
+                        "line": schema_string(),
+                    },
+                    "additionalProperties": true,
+                })),
+            },
+            "additionalProperties": true,
+        }))
+    }
+
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         let pat = match args["pattern"].as_str() {
             Some(p) => p,

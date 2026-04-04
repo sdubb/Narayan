@@ -17,6 +17,11 @@ impl Tool for HardwareBoardInfoTool {
     fn parameters_schema(&self) -> Vec<ParameterSchema> {
         vec![]
     }
+
+    fn output_schema(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({ "type": "object", "additionalProperties": true }))
+    }
+
     async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<ToolResult> {
         let cpuinfo = tokio::fs::read_to_string("/proc/cpuinfo").await.ok();
         let out = tokio::process::Command::new("sh")
@@ -71,7 +76,7 @@ impl Tool for HardwareMemoryReadTool {
                     .filter_map(|l| {
                         let mut p = l.splitn(2, ':');
                         Some((p.next()?.trim().to_string(), p.next()?.trim().to_string()))
-                    })
+                    }))
                     .collect();
                 Ok(ToolResult::ok(serde_json::json!(stats)))
             }

@@ -10,9 +10,7 @@ use async_trait::async_trait;
 use tokio::{sync::RwLock, time::sleep};
 
 use crate::{
-    agent::{
-        PlanModeManager, PlanModePhase, PlanModeSession, PlanModeTestStatus,
-    },
+    agent::{PlanModeManager, PlanModePhase, PlanModeSession, PlanModeTestStatus},
     connectors::ConnectorInstallStore,
     gateway::{GatewayRequest, LlmGateway},
     providers::{build_provider, ChatResponse, Message, Provider, ToolSpec},
@@ -234,7 +232,9 @@ async fn groq_answer_clarification(
     let intent_lower = intent.to_ascii_lowercase();
 
     if assistant_lower.contains("connector")
-        && (intent_lower.contains("external systems") || intent_lower.contains("read-only") || intent_lower.contains("writes"))
+        && (intent_lower.contains("external systems")
+            || intent_lower.contains("read-only")
+            || intent_lower.contains("writes"))
     {
         answer = "No external connectors are needed. Keep it local and read-only.".into();
     } else if answer.is_empty() {
@@ -359,7 +359,10 @@ async fn test_plan_mode_groq_end_to_end() -> Result<()> {
         log_block(
             &transcript,
             "REPAIR DECISION",
-            format!("attempt: {}\nauto_status: {:?}\nauto_summary: {}", attempts, auto_result.status, auto_result.summary),
+            format!(
+                "attempt: {}\nauto_status: {:?}\nauto_summary: {}",
+                attempts, auto_result.status, auto_result.summary
+            ),
         );
 
         let repair_result = auto_result.clone();

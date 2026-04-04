@@ -50,7 +50,8 @@ fn parse_message_kind(args: &serde_json::Value) -> Result<AgentMessageKind, Stri
 }
 
 fn parse_result_contract(args: &serde_json::Value) -> Result<Option<SessionTaskOutput>, String> {
-    let Some(status) = args.get("status").and_then(|value| value.as_str()).map(|value| value.trim().to_ascii_lowercase())
+    let Some(status) =
+        args.get("status").and_then(|value| value.as_str()).map(|value| value.trim().to_ascii_lowercase())
     else {
         return Ok(None);
     };
@@ -103,7 +104,11 @@ impl Tool for SendMessageTool {
 
     fn parameters_schema(&self) -> Vec<ParameterSchema> {
         vec![
-            ParameterSchema::optional("recipient_agent_id", "string", "Explicit agent recipient. If omitted, parent_agent_id is used."),
+            ParameterSchema::optional(
+                "recipient_agent_id",
+                "string",
+                "Explicit agent recipient. If omitted, parent_agent_id is used.",
+            ),
             ParameterSchema::optional("parent_agent_id", "string", "Injected automatically for child agents."),
             ParameterSchema::optional("message_kind", "string", "update|result|question|instruction"),
             ParameterSchema::optional("subject", "string", "Short subject line."),
@@ -119,6 +124,10 @@ impl Tool for SendMessageTool {
             ParameterSchema::required("agent_id", "string", "Injected automatically."),
             ParameterSchema::optional("step_index", "integer", "Injected automatically."),
         ]
+    }
+
+    fn output_schema(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({ "type": "object", "additionalProperties": true }))
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {

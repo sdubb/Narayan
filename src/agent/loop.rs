@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -8,17 +9,17 @@ use crate::{
         clarifier::{ClarificationResult, Clarifier},
         evaluator::{check_completion_criteria, EvalVerdict, Evaluator},
         executor::Executor,
-        planner::{Plan, Planner},
+        planner::Plan,
         preflight::{Preflight, PreflightResult},
         prompts::{is_direct_response_goal, StepHistory},
         reflector::Reflector,
+        workflow_compiler::{data_signature_from_value, TypedExpression},
     },
     cognition::{
         control_loop::CognitiveControlLoop,
         judgement::{JudgementContext, JudgementEngine, JudgementRecommendation, JudgementSignal},
     },
     compliance::sla::{EscalationAction, SlaStatus},
-    debug::recorder::AgentRecorder,
     events::{AgentEvent, EventBus},
     knowledge::graph::KnowledgeGraph,
     segments::AgentServices,
@@ -95,6 +96,10 @@ fn step_history_summary(result: &crate::agent::executor::StepResult, fallback: &
     fallback.to_string()
 }
 
+/// Maximum step_outputs entries kept in the metadata JSONB column.
+/// Older entries are evicted. Full outputs remain on disk as artifact files.
+const STEP_OUTPUTS_METADATA_CAP: usize = 30;
+
 /// Atomic state transaction — batches all step-related mutations for consistency.
 /// Ensures crash-safety: either all changes commit or none do.
 struct StepStateTransaction {
@@ -103,6 +108,9 @@ struct StepStateTransaction {
     last_reflection: Option<String>,
     key_findings: Option<Vec<String>>,
     step_outputs_entry: Option<serde_json::Value>,
+    // Progress tracking deltas (Phase 0B)
+    progress_tool_calls_delta: u32,
+    progress_tokens_delta: u64,
 }
 
 impl StepStateTransaction {
@@ -113,6 +121,8 @@ impl StepStateTransaction {
             last_reflection: None,
             key_findings: None,
             step_outputs_entry: None,
+            progress_tool_calls_delta: 0,
+            progress_tokens_delta: 0,
         }
     }
 
@@ -138,6 +148,12 @@ impl StepStateTransaction {
 
     fn with_step_output(mut self, entry: serde_json::Value) -> Self {
         self.step_outputs_entry = Some(entry);
+        self
+    }
+
+    fn with_progress(mut self, tool_calls: u32, tokens: u64) -> Self {
+        self.progress_tool_calls_delta = tool_calls;
+        self.progress_tokens_delta = tokens;
         self
     }
 
@@ -167,7 +183,25 @@ impl StepStateTransaction {
             let mut outputs =
                 state.metadata.get("step_outputs").and_then(|v| v.as_array()).cloned().unwrap_or_default();
             outputs.push(entry.clone());
+            // Phase 0C: Cap the metadata array to prevent unbounded growth.
+            // Full outputs are preserved on disk as artifact files.
+            if outputs.len() > STEP_OUTPUTS_METADATA_CAP {
+                let excess = outputs.len() - STEP_OUTPUTS_METADATA_CAP;
+                outputs.drain(..excess);
+            }
             state.metadata["step_outputs"] = serde_json::Value::Array(outputs);
+        }
+
+        // Phase 0B: Progress tracking — accumulate deltas
+        if self.progress_tool_calls_delta > 0 || self.progress_tokens_delta > 0 {
+            let prev_tool_count = state.metadata.get("progress_tool_count").and_then(|v| v.as_u64()).unwrap_or(0);
+            let prev_token_count = state.metadata.get("progress_token_count").and_then(|v| v.as_u64()).unwrap_or(0);
+
+            state.metadata["progress_tool_count"] =
+                serde_json::json!(prev_tool_count + self.progress_tool_calls_delta as u64);
+            state.metadata["progress_token_count"] = serde_json::json!(prev_token_count + self.progress_tokens_delta);
+            state.metadata["progress_last_step"] = serde_json::json!(state.current_step);
+            state.metadata["progress_updated_at"] = serde_json::json!(chrono::Utc::now().to_rfc3339());
         }
 
         tracing::debug!(
@@ -191,7 +225,13 @@ fn persist_step_output(
     step: &crate::agent::planner::PlannedStep,
     result: &crate::agent::executor::StepResult,
 ) {
-    let record = serde_json::json!({
+    // Phase 0A: Full output goes to disk artifact.
+    // The async write is fire-and-forget (best-effort); the compact pointer
+    // in metadata is the durable record.
+    let workspace = state.workspace_path.clone();
+    let agent_id = state.id.clone();
+    let step_index = step.index;
+    let full_record = serde_json::json!({
         "step_index": step.index,
         "description": step.description,
         "success": result.success,
@@ -200,41 +240,66 @@ fn persist_step_output(
         "tools_called": result.tools_called,
         "tool_results": result.tool_results,
     });
+    tokio::spawn(async move {
+        if let Err(e) = crate::agent::step_artifacts::write_step_artifact(
+            Path::new(&workspace),
+            &agent_id,
+            step_index,
+            &full_record,
+        )
+        .await
+        {
+            tracing::warn!(step_index, error = %e, "failed to write step artifact");
+        }
+    });
+
+    // Compact pointer → metadata JSONB (Phase 0A)
+    let artifact_path =
+        crate::agent::step_artifacts::step_artifact_path(Path::new(&state.workspace_path), &state.id, step.index);
+    let pointer = crate::agent::step_artifacts::compact_step_pointer(
+        step.index,
+        &step.description,
+        result.success,
+        &result.output,
+        &artifact_path,
+        &result.tools_called,
+    );
 
     if let Some(outputs) = state.metadata.get_mut("step_outputs").and_then(|value| value.as_array_mut()) {
         if outputs.len() <= step.index {
             outputs.resize(step.index + 1, serde_json::Value::Null);
         }
-        outputs[step.index] = record;
+        outputs[step.index] = pointer;
     } else {
         let mut outputs = Vec::new();
         outputs.resize(step.index + 1, serde_json::Value::Null);
-        outputs[step.index] = record;
+        outputs[step.index] = pointer;
         state.metadata["step_outputs"] = serde_json::Value::Array(outputs);
     }
 }
 
 fn persist_skipped_step_output(state: &mut AgentState, step: &crate::agent::planner::PlannedStep, summary: &str) {
-    let record = serde_json::json!({
-        "step_index": step.index,
-        "description": step.description,
-        "success": true,
-        "skipped": true,
-        "output": summary,
-        "final_answer_candidate": serde_json::Value::Null,
-        "tools_called": [],
-        "tool_results": [],
-    });
+    // Skipped steps don't need a full artifact file — just the compact pointer.
+    let artifact_path =
+        crate::agent::step_artifacts::step_artifact_path(Path::new(&state.workspace_path), &state.id, step.index);
+    let pointer = crate::agent::step_artifacts::compact_step_pointer(
+        step.index,
+        &step.description,
+        true,
+        summary,
+        &artifact_path,
+        &[],
+    );
 
     if let Some(outputs) = state.metadata.get_mut("step_outputs").and_then(|value| value.as_array_mut()) {
         if outputs.len() <= step.index {
             outputs.resize(step.index + 1, serde_json::Value::Null);
         }
-        outputs[step.index] = record;
+        outputs[step.index] = pointer;
     } else {
         let mut outputs = Vec::new();
         outputs.resize(step.index + 1, serde_json::Value::Null);
-        outputs[step.index] = record;
+        outputs[step.index] = pointer;
         state.metadata["step_outputs"] = serde_json::Value::Array(outputs);
     }
 }
@@ -295,16 +360,21 @@ fn condition_compare_numbers(
 }
 
 fn format_step_condition(step: &crate::agent::planner::PlannedStep) -> Option<String> {
-    step.condition.as_ref().map(|condition| {
-        let value = condition
-            .value
-            .as_ref()
-            .map(|value| match value {
-                serde_json::Value::String(text) => format!(" \"{text}\""),
-                other => format!(" {}", other),
-            })
-            .unwrap_or_default();
-        format!("{} {}{}", condition.reference, condition.operator, value)
+    step.condition.as_ref().map(|condition| match condition {
+        crate::agent::planner::StepCondition::Deterministic(cond) => {
+            let value = cond
+                .right
+                .as_ref()
+                .map(|value| match value {
+                    serde_json::Value::String(text) => format!(" \"{text}\""),
+                    other => format!(" {}", other),
+                })
+                .unwrap_or_default();
+            format!("{} {:?}{}", cond.left, cond.operator, value)
+        }
+        crate::agent::planner::StepCondition::Expression(expr) => {
+            serde_json::to_string(expr).unwrap_or_else(|_| "{}".into())
+        }
     })
 }
 
@@ -391,13 +461,16 @@ fn provider_credentials_questions() -> Vec<crate::agent::clarifier::Clarificatio
         store_as_credential: None,
         connector_type: Some("provider_credentials".into()),
         action_label: Some("Open Settings -> Credentials".into()),
+        card_type: Some("provider_credentials".into()),
+        required_fields: vec!["api_key".into()],
+        binding_target: Some("provider_credentials".into()),
+        resume_token: Some("provider_credentials".into()),
     }]
 }
 
 // ── AgentLoop ──────────────────────────────────────────────────────────────
 
 pub struct AgentLoop {
-    planner: Arc<dyn Planner>,
     executor: Arc<dyn Executor>,
     evaluator: Arc<dyn Evaluator>,
     reflector: Arc<dyn Reflector>,
@@ -412,6 +485,8 @@ pub struct AgentLoop {
     memory_consolidator: Option<Arc<crate::memory::MemoryConsolidator>>,
     services: Arc<AgentServices>,
     store: Option<Arc<crate::storage::PostgresStore>>,
+    /// DAG workflow persistence — when set, enables DAG engine routing.
+    workflow_store: Option<Arc<dyn crate::storage::WorkflowStore>>,
     max_steps: usize,
     timeout_secs: u64,
 }
@@ -419,7 +494,6 @@ pub struct AgentLoop {
 impl AgentLoop {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        planner: Arc<dyn Planner>,
         executor: Arc<dyn Executor>,
         evaluator: Arc<dyn Evaluator>,
         reflector: Arc<dyn Reflector>,
@@ -434,7 +508,6 @@ impl AgentLoop {
         services: Arc<AgentServices>,
     ) -> Self {
         Self {
-            planner,
             executor,
             evaluator,
             reflector,
@@ -449,6 +522,7 @@ impl AgentLoop {
             memory_consolidator: None,
             services,
             store: None,
+            workflow_store: None,
             max_steps: 50,
             timeout_secs: 300,
         }
@@ -467,6 +541,11 @@ impl AgentLoop {
     pub fn with_limits(mut self, max_steps: usize, timeout_secs: u64) -> Self {
         self.max_steps = max_steps;
         self.timeout_secs = timeout_secs;
+        self
+    }
+
+    pub fn with_workflow_store(mut self, store: Arc<dyn crate::storage::WorkflowStore>) -> Self {
+        self.workflow_store = Some(store);
         self
     }
 
@@ -520,11 +599,8 @@ impl AgentLoop {
             .and_then(|value| value.as_str())
             .map(str::to_string)
             .or_else(|| state.current_task.clone());
-        let artifacts = if state.workspace_path.trim().is_empty() {
-            Vec::new()
-        } else {
-            vec![state.workspace_path.clone()]
-        };
+        let artifacts =
+            if state.workspace_path.trim().is_empty() { Vec::new() } else { vec![state.workspace_path.clone()] };
 
         let mut message = AgentMessage::new(
             uuid::Uuid::new_v4().to_string(),
@@ -687,12 +763,17 @@ impl AgentLoop {
                     job_type: Some("general".into()),
                     rationale: "Simple conversational request; answer directly without tools.".into(),
                     steps: vec![crate::agent::planner::PlannedStep {
+                        foreach: None,
                         index: 0,
                         description: "Answer the user's message directly in chat.".into(),
-                        tool: None,
-                        tool_args: None,
+                        tool: Some(crate::agent::workflow_compiler::LLM_WORKER_TOOL_NAME.into()),
+                        tool_args: Some(serde_json::json!({
+                            "instruction": "Answer the user's message directly in chat.",
+                            "response_format": "text",
+                        })),
                         success_criteria: "User receives a direct answer.".into(),
                         condition: None,
+                        depends_on: vec![],
                     }],
                 }
             } else if let Some(skill) = maybe_skill {
@@ -702,11 +783,11 @@ impl AgentLoop {
                     "using pre-built skill — skipping LLM planning"
                 );
                 Plan::from_skill(&skill)
-            } else if let Some(workflow_plan) = self.try_plan_from_workflow_outline(state).await {
+            } else if let Some(workflow_plan) = self.try_plan_from_compiled_workflow(state).await {
                 tracing::info!(
                     agent_id = %state.id,
                     steps    = workflow_plan.steps.len(),
-                    "using workflow outline — skipping LLM planning"
+                    "using compiled workflow artifact — skipping LLM planning"
                 );
                 workflow_plan
             } else {
@@ -721,10 +802,18 @@ impl AgentLoop {
                 if refined != orig {
                     state.goal = refined;
                 }
-                let reason = format!(
-                    "runtime does not invent plans anymore; rerun plan mode to produce a workflow outline for '{}'",
-                    state.goal
-                );
+                let reason = state
+                    .metadata
+                    .get("recompile_reason")
+                    .and_then(|value| value.as_str())
+                    .filter(|value| !value.trim().is_empty())
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| {
+                        format!(
+                            "runtime does not invent plans anymore; rerun plan mode to produce a compiled workflow artifact for '{}'",
+                            state.goal
+                        )
+                    });
                 tracing::error!(
                     agent_id = %state.id,
                     goal = %state.goal,
@@ -764,6 +853,86 @@ impl AgentLoop {
             *plan = Some(new_plan);
         }
 
+        // ── 4c. DAG routing — fan-out/fan-in workflows ──────────────────────
+        // If we have a workflow store, route deterministic plans through the
+        // DagEngine by default. Explicit DAG edges are preserved, while
+        // ordinary plans fall back to sequential execution inside the engine.
+        if let (Some(wf_store), Some(current_plan)) = (&self.workflow_store, plan.as_ref()) {
+            let not_already_running = state.workflow_id.is_none();
+
+            if not_already_running {
+                tracing::info!(
+                    agent_id = %state.id,
+                    steps = current_plan.steps.len(),
+                    "workflow persistence available — routing plan to DagEngine"
+                );
+
+                let workflow = crate::agent::dag::Workflow::from_plan(current_plan, &state.id, &state.tenant_id);
+                state.workflow_id = Some(workflow.id.clone());
+
+                // Persist workflow to DB before execution
+                if let Err(e) = wf_store.create_workflow(&workflow).await {
+                    tracing::error!(error = %e, "failed to persist workflow — falling back to linear");
+                    state.workflow_id = None;
+                } else {
+                    // Run the DAG engine to completion — with full orchestrator hooks
+                    let mut orch = crate::agent::orchestrator::StepOrchestrator::new(
+                        Arc::clone(&self.executor),
+                        Arc::clone(&self.event_bus),
+                        Arc::clone(&self.knowledge_graph),
+                        Arc::clone(&self.services),
+                        Arc::clone(&self.vector_store),
+                        Arc::clone(&self.embedder),
+                    );
+                    if let Some(ref store) = self.store {
+                        orch = orch.with_store(Arc::clone(store));
+                    }
+                    let dag_engine = crate::agent::dag_engine::DagEngine::new(
+                        Arc::clone(&self.executor),
+                        Arc::clone(wf_store),
+                        Arc::clone(&self.event_bus),
+                    )
+                    .with_orchestrator(Arc::new(orch));
+                    let cancel = tokio_util::sync::CancellationToken::new();
+                    match dag_engine.run_workflow(state, cancel).await {
+                        Ok(crate::agent::dag_engine::WorkflowOutcome::Completed) => {
+                            state.workflow_id = None;
+                            let summary = completion_summary(state);
+                            state.mark_completed();
+                            self.event_bus.publish(AgentEvent::GoalComplete {
+                                agent_id: state.id.clone(),
+                                summary: summary.clone(),
+                            });
+                            self.event_bus.close(&state.id);
+                            return Ok(StepOutcome::Complete);
+                        }
+                        Ok(crate::agent::dag_engine::WorkflowOutcome::Cancelled) => {
+                            state.workflow_id = None;
+                            state.mark_failed();
+                            return Ok(StepOutcome::Failed("DAG workflow cancelled".into()));
+                        }
+                        Ok(crate::agent::dag_engine::WorkflowOutcome::Failed(reason)) => {
+                            state.workflow_id = None;
+                            state.mark_failed();
+                            self.event_bus
+                                .publish(AgentEvent::GoalFailed { agent_id: state.id.clone(), reason: reason.clone() });
+                            self.event_bus.close(&state.id);
+                            return Ok(StepOutcome::Failed(reason));
+                        }
+                        Err(e) => {
+                            let reason = format!("DAG engine error: {:#}", e);
+                            state.workflow_id = None;
+                            state.mark_failed();
+                            self.event_bus
+                                .publish(AgentEvent::GoalFailed { agent_id: state.id.clone(), reason: reason.clone() });
+                            self.event_bus.close(&state.id);
+                            return Ok(StepOutcome::Failed(reason));
+                        }
+                    }
+                }
+            }
+        }
+
         let current_plan = plan.as_ref().unwrap();
 
         // ── 5. Completion check ─────────────────────────────────────────────
@@ -785,9 +954,7 @@ impl AgentLoop {
                     .get("key_findings")
                     .and_then(|value| value.as_array())
                     .map(|items| {
-                        items.iter()
-                            .filter_map(|value| value.as_str().map(str::to_string))
-                            .collect::<Vec<_>>()
+                        items.iter().filter_map(|value| value.as_str().map(str::to_string)).collect::<Vec<_>>()
                     })
                     .unwrap_or_else(|| vec![summary.clone()]),
                 1.0,
@@ -854,144 +1021,70 @@ impl AgentLoop {
             return Ok(StepOutcome::Continue { delay_secs: 0 });
         }
 
-        self.event_bus.publish(AgentEvent::StepStarted {
-            agent_id: state.id.clone(),
-            step_index: step.index,
-            description: step.description.clone(),
-            tool: step.tool.clone(),
-            success_criteria: (!step.success_criteria.trim().is_empty()).then(|| step.success_criteria.clone()),
-            condition: format_step_condition(&step),
-        });
-        tracing::info!(
-            agent_id = %state.id,
-            step_index = step.index,
-            step_description = %step.description,
-            planner_hint = ?step.tool,
-            "agent loop executing step"
+        let orchestrator = crate::agent::orchestrator::StepOrchestrator::new(
+            self.executor.clone(),
+            self.event_bus.clone(),
+            self.knowledge_graph.clone(),
+            self.services.clone(),
+            self.vector_store.clone(),
+            self.embedder.clone(),
         );
+        let orchestrator = match &self.store {
+            Some(s) => orchestrator.with_store(s.clone()),
+            None => orchestrator,
+        };
+
         state.mark_running();
         self.mark_step_task_in_progress(state, &step).await;
 
-        // ── 5a. Inject knowledge graph facts into history ───────────────────
-        // OPTIMIZATION: Only inject recent facts (from this agent's run) not all related facts
-        // This reduces noise and ensures facts are from recent successful steps, not historical data
-        if let Ok(graph) = self.knowledge_graph.try_lock() {
-            // Inject facts from current step and 2 previous successful steps (tunable)
-            let facts = graph.get_related(&state.goal);
-            if !facts.is_empty() {
-                let recent_count = facts.len().min(5); // Limit to top 5 recent facts
-                let facts_text = facts
-                    .iter()
-                    .take(recent_count)
-                    .map(|n| format!("{}: {}", n.id, n.value))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                history.inject_facts(&facts_text);
-                tracing::debug!(
-                    agent_id = %state.id,
-                    total_available = facts.len(),
-                    injected = recent_count,
-                    "injected optimized recent facts (not all historical facts)"
-                );
+        let verdict = orchestrator.run_step(state, &step, current_plan, history).await;
+
+        let result = match verdict {
+            crate::agent::orchestrator::StepVerdict::Executed { result, .. } => result,
+            crate::agent::orchestrator::StepVerdict::Skipped { .. } => {
+                return Ok(StepOutcome::Continue { delay_secs: 0 })
             }
-        }
-
-        // ── 5b. Inject delegation context for delegate tool ────────────────
-        let step_exec = self.inject_delegation_ctx(&step, state);
-
-        // ── 6. Execute step ────────────────────────────────────────────────
-        // plane_guard validated inside executor before each tool call
-        let result = match self.executor.execute_step(state, &step_exec, current_plan, history).await {
-            Ok(result) => result,
-            Err(error) if is_missing_provider_credentials_error(&error) => {
-                return self.prompt_for_provider_credentials(state);
+            crate::agent::orchestrator::StepVerdict::Delegating { child_ids, .. } => {
+                state.advance_step();
+                state.mark_delegating(child_ids.clone());
+                return Ok(StepOutcome::Delegating { child_ids });
             }
-            Err(error) => return Err(error),
-        };
-        tracing::info!(
-            agent_id = %state.id,
-            step_index = step.index,
-            success = result.success,
-            tools_called = ?result.tools_called,
-            output = %truncate_for_log(&result.output, 400),
-            "agent loop executor result"
-        );
-
-        // ── 7. Debug recording ─────────────────────────────────────────────
-        {
-            let mut recorder: AgentRecorder = state
-                .metadata
-                .get("debug_recording")
-                .and_then(|v| serde_json::from_value(v.clone()).ok())
-                .unwrap_or_else(AgentRecorder::new);
-            recorder.record(
-                step.index,
-                step.description.clone(),
-                serde_json::to_string(&result.tool_results).unwrap_or_default(),
-            );
-            state.metadata["debug_recording"] = serde_json::to_value(&recorder.steps).unwrap_or_default();
-        }
-
-        if let Some(candidate) = result.final_answer_candidate.clone() {
-            state.set_final_answer(candidate);
-        }
-        persist_step_output(state, &step, &result);
-
-        // ── 8. Delegation check ─────────────────────────────────────────────
-        for tool_result in &result.tool_results {
-            if let Some(arr) = tool_result.output.get("child_agent_ids").and_then(|v| v.as_array()) {
-                let child_ids: Vec<String> = arr.iter().filter_map(|v| v.as_str().map(String::from)).collect();
-                if !child_ids.is_empty() {
-                    for cid in &child_ids {
-                        self.event_bus.publish(AgentEvent::ChildSpawned {
-                            agent_id: state.id.clone(),
-                            child_agent_id: cid.clone(),
-                            sub_goal: step.description.clone(),
-                        });
-                    }
-                    state.advance_step();
-                    state.mark_delegating(child_ids.clone());
-                    return Ok(StepOutcome::Delegating { child_ids });
-                }
-            }
-        }
-
-        // Emit tool result events
-        for (index, tool_result) in result.tool_results.iter().enumerate() {
-            self.event_bus.publish(AgentEvent::ToolResult {
-                agent_id: state.id.clone(),
-                step_index: step.index,
-                tool_name: result.tools_called.get(index).cloned().unwrap_or_else(|| "tool".into()),
-                success: tool_result.success,
-                output_preview: crate::util::truncate(
-                    &serde_json::to_string(&tool_result.output).unwrap_or_default(),
-                    600,
-                )
-                .to_string(),
-                error: tool_result.error.clone(),
-            });
-        }
-
-        if let Some(question_output) = result.tool_results.iter().find(|tool_result| {
-            tool_result.output.get("status").and_then(|v| v.as_str()) == Some("awaiting_user_input")
-        }) {
-            let questions = crate::agent::clarifier::parse_clarification_questions(
-                question_output.output.get("questions").unwrap_or(&serde_json::Value::Null),
-            );
-            if !questions.is_empty() {
+            crate::agent::orchestrator::StepVerdict::NeedsClarification { questions, .. } => {
                 state.metadata["clarification_questions"] = serde_json::to_value(&questions)?;
                 state.mark_clarifying();
-                self.event_bus.publish(AgentEvent::ClarificationNeeded {
-                    agent_id: state.id.clone(),
-                    questions: questions.clone(),
-                });
                 return Ok(StepOutcome::NeedsClarification { questions });
             }
-        }
+            crate::agent::orchestrator::StepVerdict::DeterministicAbort { reason, .. } => {
+                state.metadata["last_reflection"] =
+                    serde_json::Value::String("Aborted by deterministic FailureRule".into());
+                state.metadata["key_findings"] = serde_json::json!([]);
+                state.mark_failed();
+                let display_reason = format!("Step {} blocked by policy/permission rule: {}", step.index, reason);
+                self.notify_parent_of_terminal_result(
+                    state,
+                    SessionTaskResultStatus::Failed,
+                    display_reason.clone(),
+                    vec![display_reason.clone()],
+                    1.0,
+                )
+                .await;
+                self.event_bus
+                    .publish(AgentEvent::GoalFailed { agent_id: state.id.clone(), reason: display_reason.clone() });
+                self.event_bus.close(&state.id);
+                return Ok(StepOutcome::PermanentError { reason: display_reason });
+            }
+            crate::agent::orchestrator::StepVerdict::Error { error } => {
+                if is_missing_provider_credentials_error(&error) {
+                    return self.prompt_for_provider_credentials(state);
+                }
+                return Err(error);
+            }
+        };
 
+        // ── Direct response fast path ──────────────────────────────────────────
         if is_direct_response_goal(&state.goal)
             && current_plan.steps.len() == 1
-            && step.tool.is_none()
+            && step.tool.as_deref() == Some(crate::agent::workflow_compiler::LLM_WORKER_TOOL_NAME)
             && result.success
             && result.tool_results.is_empty()
         {
@@ -1022,44 +1115,8 @@ impl AgentLoop {
             return Ok(StepOutcome::Complete);
         }
 
-        // ── 9. Check FailureRules BEFORE evaluator (skip LLM if deterministic match) ─
+        // ── 9b. Evaluate + Reflect (LLM) ──────────────────────────────────
         let retry_count = state.metadata.get("retry_count").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-
-        // Try to get a deterministic verdict from FailureRules before calling evaluator
-        if !result.success {
-            let role_id = state.metadata.get("role_id").and_then(|v| v.as_str()).map(String::from);
-            if let (Some(ref store), Some(ref rid)) = (&self.store, role_id.as_ref()) {
-                if let Ok(Some(role)) = store.get_agent_role(&state.tenant_id, rid).await {
-                    if check_failure_rules_for_deterministic_abort(&result, &role).is_some() {
-                        tracing::warn!(
-                            agent_id = %state.id,
-                            step = step.index,
-                            "FailureRule matched deterministic abort — skipping evaluator LLM call"
-                        );
-                        state.metadata["last_reflection"] =
-                            serde_json::Value::String("Aborted by deterministic FailureRule".into());
-                        state.metadata["key_findings"] = serde_json::json!([]);
-                        state.mark_failed();
-                        let reason = format!("Step {} blocked by policy/permission rule", step.index);
-                        self.notify_parent_of_terminal_result(
-                            state,
-                            SessionTaskResultStatus::Failed,
-                            reason.clone(),
-                            vec![reason.clone()],
-                            1.0,
-                        )
-                        .await;
-                        self.event_bus
-                            .publish(AgentEvent::GoalFailed { agent_id: state.id.clone(), reason: reason.clone() });
-                        self.event_bus.close(&state.id);
-                        return Ok(StepOutcome::PermanentError { reason });
-                    }
-                }
-            }
-        }
-
-        // ── 9b. Evaluate + Reflect (one combined LLM call) ───────────────────
-        // Evaluator is only called if no deterministic FailureRule matched
         let eval = self.evaluator.evaluate_and_reflect(state, current_plan, &step, &result, retry_count, 3).await?;
 
         tracing::info!(
@@ -1071,7 +1128,6 @@ impl AgentLoop {
             "agent loop evaluation complete"
         );
 
-        // ── Publish evaluation complete event ────────────────────────────────
         self.event_bus.publish(AgentEvent::EvaluationComplete {
             agent_id: state.id.clone(),
             step_index: step.index,
@@ -1083,26 +1139,11 @@ impl AgentLoop {
         state.metadata["last_reflection"] = serde_json::Value::String(eval.summary.clone());
         state.metadata["key_findings"] = serde_json::json!(eval.key_findings);
 
-        // ── Write step_outputs for CompletionCriteria and savings estimator ──
-        if result.items_processed > 0 || !result.connector_writes.is_empty() {
-            let entry = serde_json::json!({
-                "step":      step.index,
-                "success":   result.success,
-                "processed": result.items_processed,
-                "connectors": result.connector_writes,
-            });
-            let mut outputs =
-                state.metadata.get("step_outputs").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-            outputs.push(entry);
-            state.metadata["step_outputs"] = serde_json::Value::Array(outputs);
-        }
-
-        // ── Apply verdict from evaluator ────────────────────────────────────
-        let eval_verdict = eval.verdict.clone();
-
         // Update step history for next executor call
         let history_summary = step_history_summary(&result, &eval.summary);
         history.push(step.index, step.description.clone(), result.success, &history_summary);
+
+        let eval_verdict = eval.verdict.clone();
         let judgement = JudgementEngine::default().evaluate(JudgementContext {
             state,
             plan: current_plan,
@@ -1137,23 +1178,6 @@ impl AgentLoop {
             });
         }
 
-        // ── 11. Knowledge graph — extract and store entities ────────────────
-        // Fire-and-forget: non-critical knowledge capture; failures don't block execution
-        {
-            if let Ok(mut graph) = self.knowledge_graph.try_lock() {
-                for finding in extract_entities(&eval.summary) {
-                    let _ = graph.add_node(finding.0, finding.1);
-                }
-                tracing::debug!(
-                    agent_id = %state.id,
-                    entity_count = extract_entities(&eval.summary).len(),
-                    "knowledge graph entities recorded"
-                );
-            } else {
-                tracing::debug!(agent_id = %state.id, "knowledge graph lock contention — skipping entity recording");
-            }
-        }
-
         // ── 12. Skill evolution ──────────────────────────────────────────────
         if result.success {
             let skill_name = state.metadata.get("active_skill").and_then(|v| v.as_str()).map(String::from);
@@ -1183,74 +1207,12 @@ impl AgentLoop {
             }
         }
 
-        // ── 12a. Optional plan revision from combined eval ───────────────────
         if eval.should_revise && !eval.revision_feedback.is_empty() {
             tracing::info!(
                 agent_id = %state.id,
                 step_index = step.index,
                 "runtime revision requested by evaluator; leaving repair to plan mode"
             );
-        }
-
-        // ── 12b. Persist key findings to pgvector ────────────────────────────
-        if result.success && !eval.summary.is_empty() {
-            use crate::memory::VectorStore;
-            let content = format!("Step {} — {} | Finding: {}", step.index, step.description, eval.summary);
-            match self.embedder.embed(&content).await {
-                Ok(embedding) => {
-                    let doc = crate::memory::VectorDocument::new(
-                        state.tenant_id.clone(),
-                        state.id.clone(),
-                        content,
-                        embedding,
-                    )
-                    .with_metadata(serde_json::json!({
-                        "step":  step.index,
-                        "goal":  state.goal,
-                        "auto":  true,
-                    }));
-                    if let Err(e) = self.vector_store.upsert(doc).await {
-                        tracing::debug!(error = %e, "vector upsert failed — continuing");
-                    }
-                }
-                Err(e) => tracing::debug!(error = %e, "embedding failed — skipping vector store"),
-            }
-        }
-
-        // ── 12c. Citation tracking — record source attribution per step ──────
-        if result.success && !eval.summary.is_empty() {
-            if let Some(ref ct) = self.services.citations {
-                for tool_name in &result.tools_called {
-                    let confidence = if result.success { 1.0_f64 } else { 0.5_f64 };
-                    let _ = ct
-                        .record(
-                            &state.id,
-                            &state.tenant_id,
-                            step.index,
-                            &eval.summary,
-                            "tool_output",
-                            tool_name,
-                            &crate::util::truncate(&result.output, 200),
-                            confidence,
-                        )
-                        .await;
-                    // Emit SSE so the frontend can render citations live
-                    self.event_bus.publish(AgentEvent::CitationRecorded {
-                        agent_id: state.id.clone(),
-                        step_index: step.index,
-                        claim: crate::util::truncate(&eval.summary, 120).to_string(),
-                        source_ref: tool_name.clone(),
-                        source_type: "tool_output".into(),
-                        confidence,
-                    });
-                }
-                tracing::debug!(
-                    agent_id   = %state.id,
-                    step       = step.index,
-                    tool_count = result.tools_called.len(),
-                    "citations recorded"
-                );
-            }
         }
 
         // ── 12d. SLA check — fire escalation actions if threshold crossed ────
@@ -1651,104 +1613,218 @@ impl AgentLoop {
         }
     }
 
-    /// Try to build a deterministic Plan from the role's enriched workflow outline.
-    /// Returns None if no role is found or the workflow outline is empty, causing
-    /// the caller to fail fast and let plan mode repair the role.
-    async fn try_plan_from_workflow_outline(&self, state: &mut AgentState) -> Option<Plan> {
-        // Fallback for tests and legacy execution contexts where the workflow outline is embedded in the agent's state metadata 
-        // to bypass the requirement of a Postgres DB and AgentRole.
-        if let Some(outline_val) = state.metadata.get("workflow_outline") {
-            if let Some(steps_val) = outline_val.get("steps").and_then(|v| v.as_array()) {
-                let mut steps = Vec::new();
-                for (i, step_val) in steps_val.iter().enumerate() {
-                    if let Some(desc) = step_val.get("description").and_then(|v| v.as_str()) {
-                        steps.push(crate::agent::planner::PlannedStep {
-                            index: i,
-                            description: desc.to_string(),
-                            tool: step_val.get("tool").and_then(|v| v.as_str()).map(|s| s.to_string()),
-                            tool_args: step_val.get("tool_args").cloned(),
-                            success_criteria: step_val
-                                .get("success_criteria")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or_default()
-                                .to_string(),
-                            condition: None, // Simplified for legacy fallback
-                        });
-                    }
-                }
-                if !steps.is_empty() {
-                    return Some(Plan {
-                        goal: state.goal.clone(),
-                        job_type: Some("deterministic".into()),
-                        steps,
-                        rationale: "deterministic plan from legacy embedded workflow outline".into(),
-                    });
-                }
-            }
-        }
-
+    /// Try to build a deterministic Plan from the saved compiler artifact.
+    /// Returns None if the role has no compiled workflow, allowing the caller
+    /// to fail fast instead of invoking the old runtime repair path.
+    async fn try_plan_from_compiled_workflow(&self, state: &mut AgentState) -> Option<Plan> {
         let store = self.store.as_ref()?;
-        let role_id = state.metadata.get("role_id").and_then(|v| v.as_str())?;
-        let mut role = store.get_agent_role(&state.tenant_id, role_id).await.ok()??;
+        let role_id = state.metadata.get("role_id").and_then(|v| v.as_str())?.to_string();
+        let mut role = store.get_agent_role(&state.tenant_id, &role_id).await.ok()??;
 
-        if role.execution_guidelines.needs_adaptive_compilation() {
-            let available_tools = crate::tools::selector::tool_names_for_pool(
-                &self.tools,
-                crate::agent::definition::ToolPool::Coordinator,
-            );
-            let tool_refs = available_tools.iter().map(String::as_str).collect::<Vec<_>>();
-            let planning_context = format!(
-                "Compile this work into a deterministic workflow outline. Do not execute the work now.\nReturn steps that can be converted directly into workflow_outline.\nInput data:\n{}",
-                serde_json::to_string_pretty(
-                    &state.metadata.get("input_data").cloned().unwrap_or_else(|| serde_json::json!({}))
-                )
-                .unwrap_or_else(|_| "{}".into())
-            );
+        if matches!(
+            role.execution_guidelines.execution_strategy,
+            crate::agent::definition::ExecutionStrategy::CoordinatorShell
+        ) {
+            state.metadata["coordinator_shell"] = serde_json::json!({
+                "mode": "coordinator_shell",
+                "tool_pool": "coordinator",
+                "goal": state.goal.clone(),
+                "pending_children": state.pending_children.clone(),
+                "worker_messages": state.metadata.get("worker_messages").cloned().unwrap_or_else(|| serde_json::json!([])),
+                "assembled_at": chrono::Utc::now().to_rfc3339(),
+            });
+            return Some(self.build_coordinator_shell_plan(state, &role));
+        }
 
-            match self.planner.create_plan(state, &planning_context, &tool_refs).await {
-                Ok(compiled_plan) if !compiled_plan.steps.is_empty() => {
-                    tracing::info!(
-                        agent_id = %state.id,
-                        role_id = %role_id,
-                        steps = compiled_plan.steps.len(),
-                        "adaptive planning compiled into workflow outline"
-                    );
-                    role.bump_version();
-                    role.execution_guidelines.compile_plan_to_workflow_outline(&compiled_plan);
-                    if let Err(error) = store.upsert_agent_role(&role).await {
-                        tracing::warn!(
-                            agent_id = %state.id,
-                            role_id = %role_id,
-                            error = %error,
-                            "failed to persist compiled workflow outline"
-                        );
-                    }
-                    state.metadata["adaptive_planning"] = serde_json::json!({
-                        "compiled_at": chrono::Utc::now().to_rfc3339(),
-                        "source": "runtime_adaptive_planner",
-                        "steps": compiled_plan.steps.len(),
-                    });
-                }
-                Ok(_) => return None,
-                Err(error) => {
-                    tracing::warn!(
-                        agent_id = %state.id,
-                        role_id = %role_id,
-                        error = %error,
-                        "adaptive planning compilation failed"
-                    );
-                    return None;
-                }
+        let compiled = role.execution_guidelines.compiled_workflow.as_ref()?;
+        let input_data = state.metadata.get("input_data").cloned().unwrap_or_else(|| serde_json::json!({}));
+        let data_signature = data_signature_from_value(&input_data);
+        state.metadata["workflow_data_signature"] =
+            serde_json::to_value(&data_signature).unwrap_or_else(|_| serde_json::json!({}));
+        if let Some(policy) = &compiled.variant_policy {
+            if let Some(selection) = policy.select(
+                &data_signature,
+                &compiled.execution,
+                &compiled.execution_constraints,
+                &compiled.data_strategy,
+                &compiled.scheduler,
+            ) {
+                state.metadata["workflow_variant"] =
+                    serde_json::to_value(&selection).unwrap_or_else(|_| serde_json::json!({}));
+                state.metadata["workflow_variant_id"] = serde_json::json!(selection.variant_id.clone());
+                state.metadata["workflow_execution_profile"] = serde_json::json!({
+                    "execution": selection.execution,
+                    "execution_constraints": selection.execution_constraints,
+                    "data_strategy": selection.data_strategy,
+                    "scheduler": selection.scheduler,
+                });
+            } else if matches!(policy.fallback, crate::agent::workflow_compiler::VariantFallbackMode::Recompile) {
+                state.metadata["needs_recompile"] = serde_json::json!(true);
+                state.metadata["recompile_reason"] =
+                    serde_json::json!("no workflow variant matched the current data signature");
+                return None;
             }
         }
 
-        if !role.execution_guidelines.has_workflow_outline() {
-            return None;
+        Some(Plan::from_compiled_workflow(compiled, &role))
+    }
+
+    fn build_coordinator_shell_plan(&self, state: &mut AgentState, role: &crate::agent::definition::AgentRole) -> Plan {
+        let worker_messages =
+            state.metadata.get("worker_messages").and_then(|value| value.as_array()).cloned().unwrap_or_default();
+        let pending_children = state.pending_children.clone();
+        let research_hints = role.execution_guidelines.workflow_hints();
+
+        let research_sub_goals = if research_hints.is_empty() {
+            vec![
+                format!("Research the systems, dependencies, and open questions needed to accomplish: {}", state.goal),
+                format!("Identify risks, unknowns, and validation ideas for: {}", state.goal),
+            ]
+        } else {
+            research_hints.iter().take(2).map(|hint| format!("Research and validate: {}", hint)).collect::<Vec<_>>()
+        };
+
+        let implementation_sub_goals = vec![
+            format!("Implement the synthesized spec for: {}", state.goal),
+            format!("Keep the implementation scoped to the verified workspace boundaries for: {}", state.goal),
+        ];
+
+        let verification_sub_goals = vec![
+            format!("Verify the implementation independently for: {}", state.goal),
+            "Report only concrete failures, regressions, or missing evidence.".into(),
+        ];
+
+        let research_step = if let Some(child_id) = pending_children.first().cloned() {
+            crate::agent::planner::PlannedStep {
+                foreach: None,
+                index: 1,
+                description: "Continue the most relevant existing research worker with fresh context.".into(),
+                tool: Some("delegate".into()),
+                tool_args: Some(serde_json::json!({
+                    "continue_child_id": child_id,
+                    "worker_type": "research",
+                    "sub_goals": [],
+                })),
+                success_criteria: "research worker resumed or refreshed".into(),
+                condition: None,
+                depends_on: vec![0],
+            }
+        } else {
+            crate::agent::planner::PlannedStep {
+                foreach: None,
+                index: 1,
+                description: "Spawn parallel research workers for independent discovery.".into(),
+                tool: Some("delegate".into()),
+                tool_args: Some(serde_json::json!({
+                    "sub_goals": research_sub_goals,
+                    "worker_type": "research",
+                    "write_scope": ["research", "analysis"],
+                })),
+                success_criteria: "research workers spawned and scheduled".into(),
+                condition: None,
+                depends_on: vec![0],
+            }
+        };
+
+        state.metadata["coordinator_shell"] = serde_json::json!({
+            "mode": "coordinator_shell",
+            "tool_pool": "coordinator",
+            "goal": state.goal.clone(),
+            "research_hints": research_hints,
+            "worker_messages_seen": worker_messages.len(),
+            "pending_children": pending_children,
+            "updated_at": chrono::Utc::now().to_rfc3339(),
+        });
+
+        Plan {
+            goal: state.goal.clone(),
+            job_type: Some("coordinator".into()),
+            rationale: "coordinator-shell plan: task-first research, synthesis, implementation, and verification".into(),
+            steps: vec![
+                crate::agent::planner::PlannedStep {
+                    foreach: None,
+                    index: 0,
+                    description: "Assemble the coordination brief from durable tasks, cached prompt context, and the current goal.".into(),
+                    tool: Some("task_list".into()),
+                    tool_args: Some(serde_json::json!({
+                        "status": "pending",
+                    })),
+                    success_criteria: "coordination brief assembled".into(),
+                    condition: None,
+                    depends_on: vec![],
+                },
+                research_step,
+                crate::agent::planner::PlannedStep {
+                    foreach: None,
+                    index: 2,
+                    description: "Receive structured worker notifications and inspect the inbox before synthesizing.".into(),
+                    tool: Some("message_inbox".into()),
+                    tool_args: Some(serde_json::json!({
+                        "action": "list",
+                        "direction": "inbox",
+                        "undelivered_only": true,
+                        "limit": 25,
+                    })),
+                    success_criteria: "worker notifications reviewed".into(),
+                    condition: None,
+                    depends_on: vec![1],
+                },
+                crate::agent::planner::PlannedStep {
+                    foreach: None,
+                    index: 3,
+                    description: "Synthesize the findings into a self-contained implementation and verification spec; continue or respawn workers when the inbox shows stale context overlap.".into(),
+                    tool: Some(crate::agent::workflow_compiler::LLM_WORKER_TOOL_NAME.into()),
+                    tool_args: Some(serde_json::json!({
+                        "instruction": "Synthesize the findings into a self-contained implementation and verification spec; continue or respawn workers when the inbox shows stale context overlap.",
+                        "response_format": "text",
+                    })),
+                    success_criteria: "self-contained spec produced".into(),
+                    condition: None,
+                    depends_on: vec![2],
+                },
+                crate::agent::planner::PlannedStep {
+                    foreach: None,
+                    index: 4,
+                    description: "Run implementation through a scoped worker using the synthesized spec.".into(),
+                    tool: Some("delegate".into()),
+                    tool_args: Some(serde_json::json!({
+                        "sub_goals": implementation_sub_goals,
+                        "worker_type": "implementation",
+                        "write_scope": ["workspace"],
+                    })),
+                    success_criteria: "implementation worker spawned and scheduled".into(),
+                    condition: None,
+                    depends_on: vec![3],
+                },
+                crate::agent::planner::PlannedStep {
+                    foreach: None,
+                    index: 5,
+                    description: "Run an independent verification worker from fresh context.".into(),
+                    tool: Some("delegate".into()),
+                    tool_args: Some(serde_json::json!({
+                        "sub_goals": verification_sub_goals,
+                        "worker_type": "verification",
+                        "write_scope": ["verification"],
+                    })),
+                    success_criteria: "verification worker spawned and scheduled".into(),
+                    condition: None,
+                    depends_on: vec![4],
+                },
+                crate::agent::planner::PlannedStep {
+                    foreach: None,
+                    index: 6,
+                    description: "Finalize from verified state only and record the durable result contract.".into(),
+                    tool: Some("task_output".into()),
+                    tool_args: Some(serde_json::json!({
+                        "status": "complete",
+                        "note": "coordinator shell completed after verification",
+                    })),
+                    success_criteria: "verified final result recorded".into(),
+                    condition: None,
+                    depends_on: vec![5],
+                },
+            ],
         }
-
-        let input_data = state.metadata.get("input_data").cloned().unwrap_or_else(|| serde_json::json!({}));
-
-        Some(Plan::from_workflow_outline(&role, &input_data))
     }
 
     async fn sync_session_tasks_for_plan(&self, state: &mut AgentState, plan: &Plan) {
@@ -1875,6 +1951,25 @@ impl AgentLoop {
             let mut args = step.tool_args.clone().unwrap_or_default();
             args["tenant_id"] = serde_json::json!(state.tenant_id);
             args["agent_id"] = serde_json::json!(state.id);
+            if matches!(
+                step.tool.as_deref(),
+                Some("delegate")
+                    | Some("task_create")
+                    | Some("task_get")
+                    | Some("task_list")
+                    | Some("task_update")
+                    | Some("task_stop")
+                    | Some("task_output")
+            ) && args
+                .get("task_id")
+                .and_then(|value| value.as_str())
+                .map(|value| value.trim().is_empty())
+                .unwrap_or(true)
+            {
+                if let Some(current_task) = state.current_task.as_ref() {
+                    args["task_id"] = serde_json::json!(current_task);
+                }
+            }
             if step.tool.as_deref() == Some("delegate") {
                 args["parent_agent_id"] = serde_json::json!(state.id);
             }
@@ -1905,85 +2000,211 @@ impl AgentLoop {
             return Ok(None);
         };
 
-        let resolved = crate::agent::executor::resolve_reference_from_state(&condition.reference, state)
-            .map_err(anyhow::Error::msg);
-        let operator = condition.operator.as_str();
+        let (should_run, condition_desc) =
+            match condition {
+                crate::agent::planner::StepCondition::Deterministic(cond) => {
+                    let resolved = crate::agent::executor::resolve_reference_from_state(&cond.left, state)
+                        .map_err(anyhow::Error::msg);
 
-        let should_run = match operator {
-            "exists" => resolved.is_ok(),
-            "not_exists" => resolved.is_err(),
-            "truthy" => resolved.map(|value| condition_truthy(&value)).unwrap_or(false),
-            "falsy" => resolved.map(|value| !condition_truthy(&value)).unwrap_or(true),
-            "nonempty" => resolved.map(|value| condition_truthy(&value)).unwrap_or(false),
-            "empty" => resolved.map(|value| !condition_truthy(&value)).unwrap_or(true),
-            "equals" => {
-                let actual = resolved?;
-                let expected = condition
-                    .value
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("condition.operator 'equals' requires condition.value"))?;
-                actual == *expected
-            }
-            "not_equals" => {
-                let actual = resolved?;
-                let expected = condition
-                    .value
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("condition.operator 'not_equals' requires condition.value"))?;
-                actual != *expected
-            }
-            "contains" => {
-                let actual = resolved?;
-                let expected = condition
-                    .value
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("condition.operator 'contains' requires condition.value"))?;
-                condition_contains(&actual, expected)
-            }
-            "gt" => {
-                let actual = resolved?;
-                let expected = condition
-                    .value
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("condition.operator 'gt' requires condition.value"))?;
-                condition_compare_numbers(&actual, expected, |left, right| left > right)?
-            }
-            "gte" => {
-                let actual = resolved?;
-                let expected = condition
-                    .value
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("condition.operator 'gte' requires condition.value"))?;
-                condition_compare_numbers(&actual, expected, |left, right| left >= right)?
-            }
-            "lt" => {
-                let actual = resolved?;
-                let expected = condition
-                    .value
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("condition.operator 'lt' requires condition.value"))?;
-                condition_compare_numbers(&actual, expected, |left, right| left < right)?
-            }
-            "lte" => {
-                let actual = resolved?;
-                let expected = condition
-                    .value
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("condition.operator 'lte' requires condition.value"))?;
-                condition_compare_numbers(&actual, expected, |left, right| left <= right)?
-            }
-            other => return Err(anyhow::anyhow!("unsupported step condition operator '{other}'")),
-        };
+                    let operator = match &cond.operator {
+                        crate::agent::planner::ConditionOp::Exists => "exists",
+                        crate::agent::planner::ConditionOp::NotExists => "not_exists",
+                        crate::agent::planner::ConditionOp::IsTruthy => "truthy",
+                        crate::agent::planner::ConditionOp::IsFalsy => "falsy",
+                        crate::agent::planner::ConditionOp::NotEmpty => "nonempty",
+                        crate::agent::planner::ConditionOp::Empty => "empty",
+                        crate::agent::planner::ConditionOp::Equals => "equals",
+                        crate::agent::planner::ConditionOp::NotEquals => "not_equals",
+                        crate::agent::planner::ConditionOp::Contains => "contains",
+                        crate::agent::planner::ConditionOp::GreaterThan => "gt",
+                        crate::agent::planner::ConditionOp::GreaterThanEquals => "gte",
+                        crate::agent::planner::ConditionOp::LessThan => "lt",
+                        crate::agent::planner::ConditionOp::LessThanEquals => "lte",
+                    };
+
+                    let should_run =
+                        match operator {
+                            "exists" => resolved.is_ok(),
+                            "not_exists" => resolved.is_err(),
+                            "truthy" => resolved.map(|value| condition_truthy(&value)).unwrap_or(false),
+                            "falsy" => resolved.map(|value| !condition_truthy(&value)).unwrap_or(true),
+                            "nonempty" => resolved.map(|value| condition_truthy(&value)).unwrap_or(false),
+                            "empty" => resolved.map(|value| !condition_truthy(&value)).unwrap_or(true),
+                            "equals" => {
+                                let actual = resolved?;
+                                let expected = cond.right.as_ref().ok_or_else(|| {
+                                    anyhow::anyhow!("condition.operator 'equals' requires condition.right")
+                                })?;
+                                actual == *expected
+                            }
+                            "not_equals" => {
+                                let actual = resolved?;
+                                let expected = cond.right.as_ref().ok_or_else(|| {
+                                    anyhow::anyhow!("condition.operator 'not_equals' requires condition.right")
+                                })?;
+                                actual != *expected
+                            }
+                            "contains" => {
+                                let actual = resolved?;
+                                let expected = cond.right.as_ref().ok_or_else(|| {
+                                    anyhow::anyhow!("condition.operator 'contains' requires condition.right")
+                                })?;
+                                condition_contains(&actual, expected)
+                            }
+                            "gt" => {
+                                let actual = resolved?;
+                                let expected = cond.right.as_ref().ok_or_else(|| {
+                                    anyhow::anyhow!("condition.operator 'gt' requires condition.right")
+                                })?;
+                                condition_compare_numbers(&actual, expected, |left, right| left > right)?
+                            }
+                            "gte" => {
+                                let actual = resolved?;
+                                let expected = cond.right.as_ref().ok_or_else(|| {
+                                    anyhow::anyhow!("condition.operator 'gte' requires condition.right")
+                                })?;
+                                condition_compare_numbers(&actual, expected, |left, right| left >= right)?
+                            }
+                            "lt" => {
+                                let actual = resolved?;
+                                let expected = cond.right.as_ref().ok_or_else(|| {
+                                    anyhow::anyhow!("condition.operator 'lt' requires condition.right")
+                                })?;
+                                condition_compare_numbers(&actual, expected, |left, right| left < right)?
+                            }
+                            "lte" => {
+                                let actual = resolved?;
+                                let expected = cond.right.as_ref().ok_or_else(|| {
+                                    anyhow::anyhow!("condition.operator 'lte' requires condition.right")
+                                })?;
+                                condition_compare_numbers(&actual, expected, |left, right| left <= right)?
+                            }
+                            other => return Err(anyhow::anyhow!("unsupported step condition operator '{other}'")),
+                        };
+                    (should_run, format!("{} {:?}", cond.left, cond.operator))
+                }
+                crate::agent::planner::StepCondition::Expression(expr) => (
+                    Self::evaluate_typed_step_condition(expr, state)?,
+                    serde_json::to_string(expr).unwrap_or_else(|_| "{}".into()),
+                ),
+            };
 
         if should_run {
             Ok(None)
         } else {
-            Ok(Some(format!(
-                "Skipped step {} because condition {} {} was not satisfied.",
-                step.index, condition.reference, condition.operator
-            )))
+            Ok(Some(format!("Skipped step {} because condition {} was not satisfied.", step.index, condition_desc)))
         }
     }
+
+    fn evaluate_typed_step_condition(expr: &TypedExpression, state: &AgentState) -> Result<bool> {
+        let result = evaluate_typed_expression(expr, state)?;
+        match result {
+            serde_json::Value::Bool(value) => Ok(value),
+            other => Err(anyhow::anyhow!("typed expression for step condition must evaluate to boolean, got {other}")),
+        }
+    }
+}
+
+fn evaluate_typed_expression(expr: &TypedExpression, state: &AgentState) -> Result<serde_json::Value> {
+    if let Some(value) = &expr.value {
+        return Ok(value.clone());
+    }
+
+    if let Some(path) = &expr.path {
+        return crate::agent::executor::resolve_reference_from_state(path, state).map_err(anyhow::Error::msg);
+    }
+
+    if let Some(function) = &expr.function {
+        let args = expr.args.iter().map(|arg| evaluate_typed_expression(arg, state)).collect::<Result<Vec<_>>>()?;
+
+        return match function.as_str() {
+            "len" | "count" => {
+                let first =
+                    args.first().ok_or_else(|| anyhow::anyhow!("function '{function}' requires one argument"))?;
+                let count = match first {
+                    serde_json::Value::Array(values) => values.len(),
+                    serde_json::Value::Object(map) => map.len(),
+                    serde_json::Value::String(text) => text.chars().count(),
+                    other => {
+                        return Err(anyhow::anyhow!(
+                            "function '{function}' expects array, object, or string input, got {other}"
+                        ));
+                    }
+                };
+                Ok(serde_json::json!(count))
+            }
+            other => Err(anyhow::anyhow!("unsupported typed expression function '{other}'")),
+        };
+    }
+
+    if let Some(op) = expr.op.as_deref() {
+        let left = expr
+            .left
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("typed expression operator '{op}' requires left operand"))?;
+        let left = evaluate_typed_expression(left, state)?;
+        let right = match expr.right.as_deref() {
+            Some(right) => Some(evaluate_typed_expression(right, state)?),
+            None => None,
+        };
+
+        let result = match op {
+            "gt" => numeric_value(&left, right.as_ref(), |l, r| l > r)?,
+            "gte" => numeric_value(&left, right.as_ref(), |l, r| l >= r)?,
+            "lt" => numeric_value(&left, right.as_ref(), |l, r| l < r)?,
+            "lte" => numeric_value(&left, right.as_ref(), |l, r| l <= r)?,
+            "eq" => compare_values(&left, right.as_ref(), |l, r| l == r)?,
+            "neq" => compare_values(&left, right.as_ref(), |l, r| l != r)?,
+            "and" => bool_value(&left)
+                .zip(right.as_ref().and_then(bool_value))
+                .map(|(l, r)| l && r)
+                .ok_or_else(|| anyhow::anyhow!("typed expression operator 'and' requires boolean operands"))?,
+            "or" => bool_value(&left)
+                .zip(right.as_ref().and_then(bool_value))
+                .map(|(l, r)| l || r)
+                .ok_or_else(|| anyhow::anyhow!("typed expression operator 'or' requires boolean operands"))?,
+            "not" => !bool_value(&left)
+                .ok_or_else(|| anyhow::anyhow!("typed expression operator 'not' requires boolean operand"))?,
+            other => return Err(anyhow::anyhow!("unsupported typed expression operator '{other}'")),
+        };
+
+        return Ok(serde_json::Value::Bool(result));
+    }
+
+    Err(anyhow::anyhow!("typed expression is missing value, path, function, or operator"))
+}
+
+fn bool_value(value: &serde_json::Value) -> Option<bool> {
+    match value {
+        serde_json::Value::Bool(boolean) => Some(*boolean),
+        serde_json::Value::Number(number) => number.as_f64().map(|number| number != 0.0),
+        serde_json::Value::String(text) => Some(!text.trim().is_empty()),
+        serde_json::Value::Array(items) => Some(!items.is_empty()),
+        serde_json::Value::Object(map) => Some(!map.is_empty()),
+        serde_json::Value::Null => Some(false),
+    }
+}
+
+fn numeric_value(
+    left: &serde_json::Value,
+    right: Option<&serde_json::Value>,
+    cmp: impl Fn(f64, f64) -> bool,
+) -> Result<bool> {
+    let left = left.as_f64().ok_or_else(|| anyhow::anyhow!("typed comparison requires numeric left operand"))?;
+    let right = right
+        .ok_or_else(|| anyhow::anyhow!("typed comparison requires numeric right operand"))?
+        .as_f64()
+        .ok_or_else(|| anyhow::anyhow!("typed comparison requires numeric right operand"))?;
+    Ok(cmp(left, right))
+}
+
+fn compare_values(
+    left: &serde_json::Value,
+    right: Option<&serde_json::Value>,
+    cmp: impl Fn(&serde_json::Value, &serde_json::Value) -> bool,
+) -> Result<bool> {
+    let right = right.ok_or_else(|| anyhow::anyhow!("typed comparison requires right operand"))?;
+    Ok(cmp(left, right))
 }
 
 // ── Knowledge graph entity extraction ────────────────────────────────────────
@@ -2321,9 +2542,9 @@ mod tests {
         agent::{
             evaluator::EvalVerdict,
             executor::StepResult,
-            planner::{Plan, PlannedStep, Planner},
+            planner::{Plan, PlannedStep},
             reflector::Reflection,
-            test_helpers::{MockClarifier, MockEvaluator, MockExecutor, MockPlanner, MockPreflight, MockReflector},
+            test_helpers::{MockClarifier, MockEvaluator, MockExecutor, MockPreflight, MockReflector},
         },
         memory::{DistanceMetric, PgVectorStore},
         state::AgentState,
@@ -2339,30 +2560,30 @@ mod tests {
             goal: "fix CI pipeline".into(),
             job_type: Some("software_engineer".into()),
             steps: vec![PlannedStep {
+                foreach: None,
                 index: 0,
                 description: "Inspect failing workflow".into(),
                 tool: Some("file_read".into()),
                 tool_args: Some(serde_json::json!({"path": ".github/workflows/ci.yml"})),
                 success_criteria: "workflow reviewed".into(),
                 condition: None,
+                depends_on: vec![],
             }],
             rationale: "inspect before changing".into(),
         }
     }
 
     fn make_loop(
-        planner: Arc<dyn Planner>,
         executor: Arc<dyn Executor>,
         evaluator: Arc<dyn Evaluator>,
         reflector: Arc<dyn Reflector>,
         preflight: Arc<dyn Preflight>,
         clarifier: Arc<dyn Clarifier>,
     ) -> AgentLoop {
-        make_loop_with_registry(planner, executor, evaluator, reflector, preflight, clarifier, SkillRegistry::new())
+        make_loop_with_registry(executor, evaluator, reflector, preflight, clarifier, SkillRegistry::new())
     }
 
     fn make_loop_with_registry(
-        _planner: Arc<dyn Planner>,
         executor: Arc<dyn Executor>,
         evaluator: Arc<dyn Evaluator>,
         reflector: Arc<dyn Reflector>,
@@ -2378,7 +2599,6 @@ mod tests {
             Arc::new(crate::memory::embeddings::StubEmbeddingModel::new(4));
 
         AgentLoop::new(
-            _planner,
             executor,
             evaluator,
             reflector,
@@ -2463,7 +2683,6 @@ mod tests {
     #[tokio::test]
     async fn test_run_step_pending_feasible_and_clear_transitions_to_waiting() {
         let loop_runtime = make_loop(
-            Arc::new(MockPlanner::new()),
             Arc::new(MockExecutor::new()),
             Arc::new(MockEvaluator::new()),
             Arc::new(MockReflector::new()),
@@ -2487,7 +2706,6 @@ mod tests {
     #[tokio::test]
     async fn test_run_step_pending_with_clarification_needed_persists_questions() {
         let loop_runtime = make_loop(
-            Arc::new(MockPlanner::new()),
             Arc::new(MockExecutor::new()),
             Arc::new(MockEvaluator::new()),
             Arc::new(MockReflector::new()),
@@ -2526,10 +2744,10 @@ mod tests {
     #[tokio::test]
     async fn test_run_step_detects_delegation_from_tool_output() {
         let loop_runtime = make_loop(
-            Arc::new(MockPlanner::new()),
             Arc::new(MockExecutor::from_responses(vec![StepResult {
                 step_index: 0,
                 success: true,
+                skipped: false,
                 output: "delegated".into(),
                 final_answer_candidate: Some("delegated".into()),
                 tool_results: vec![ToolResult::ok(serde_json::json!({
@@ -2566,10 +2784,10 @@ mod tests {
     #[tokio::test]
     async fn test_run_step_continue_advances_history_and_waiting_state() {
         let loop_runtime = make_loop(
-            Arc::new(MockPlanner::new()),
             Arc::new(MockExecutor::from_responses(vec![StepResult {
                 step_index: 0,
                 success: true,
+                skipped: false,
                 output: "STEP COMPLETE".into(),
                 final_answer_candidate: Some("STEP COMPLETE".into()),
                 tool_results: vec![],
@@ -2604,39 +2822,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_inject_delegation_ctx_adds_agent_and_tenant_identifiers() {
-        let loop_runtime = make_loop(
-            Arc::new(MockPlanner::new()),
-            Arc::new(MockExecutor::new()),
-            Arc::new(MockEvaluator::new()),
-            Arc::new(MockReflector::new()),
-            Arc::new(MockPreflight::new()),
-            Arc::new(MockClarifier::new()),
-        );
-        let state = make_state();
-        let step = PlannedStep {
-            index: 0,
-            description: "Delegate the sub-task".into(),
-            tool: Some("delegate".into()),
-            tool_args: Some(serde_json::json!({"goal": "check logs"})),
-            success_criteria: "child created".into(),
-            condition: None,
-        };
-
-        let injected = loop_runtime.inject_delegation_ctx(&step, &state);
-
-        assert_eq!(injected.tool_args.as_ref().and_then(|v| v.get("tenant_id")), Some(&serde_json::json!("tenant-1")));
-        assert_eq!(injected.tool_args.as_ref().and_then(|v| v.get("agent_id")), Some(&serde_json::json!("agent-1")));
-        assert_eq!(
-            injected.tool_args.as_ref().and_then(|v| v.get("parent_agent_id")),
-            Some(&serde_json::json!("agent-1"))
-        );
-    }
-
-    #[tokio::test]
     async fn test_run_step_fails_when_cognitive_control_limit_is_hit() {
         let loop_runtime = make_loop(
-            Arc::new(MockPlanner::new()),
             Arc::new(MockExecutor::new()),
             Arc::new(MockEvaluator::new()),
             Arc::new(MockReflector::new()),
@@ -2663,7 +2850,6 @@ mod tests {
     #[tokio::test]
     async fn test_run_step_pending_infeasible_marks_agent_failed() {
         let loop_runtime = make_loop(
-            Arc::new(MockPlanner::new()),
             Arc::new(MockExecutor::new()),
             Arc::new(MockEvaluator::new()),
             Arc::new(MockReflector::new()),
@@ -2693,7 +2879,6 @@ mod tests {
     #[tokio::test]
     async fn test_run_step_returns_existing_clarification_questions_without_progressing() {
         let loop_runtime = make_loop(
-            Arc::new(MockPlanner::new()),
             Arc::new(MockExecutor::new()),
             Arc::new(MockEvaluator::new()),
             Arc::new(MockReflector::new()),
@@ -2728,10 +2913,10 @@ mod tests {
             vec!["Inspect failing workflow".into(), "Patch workflow".into()],
         ));
         let loop_runtime = make_loop_with_registry(
-            Arc::new(MockPlanner::new()),
             Arc::new(MockExecutor::from_responses(vec![StepResult {
                 step_index: 0,
                 success: true,
+                skipped: false,
                 output: "STEP COMPLETE".into(),
                 final_answer_candidate: Some("STEP COMPLETE".into()),
                 tool_results: vec![],
@@ -2773,7 +2958,6 @@ mod tests {
     #[tokio::test]
     async fn test_run_step_completes_immediately_when_plan_is_already_complete() {
         let loop_runtime = make_loop(
-            Arc::new(MockPlanner::new()),
             Arc::new(MockExecutor::new()),
             Arc::new(MockEvaluator::new()),
             Arc::new(MockReflector::new()),
@@ -2797,10 +2981,10 @@ mod tests {
     #[tokio::test]
     async fn test_run_step_retry_keeps_same_step_and_reschedules() {
         let loop_runtime = make_loop(
-            Arc::new(MockPlanner::new()),
             Arc::new(MockExecutor::from_responses(vec![StepResult {
                 step_index: 0,
                 success: false,
+                skipped: false,
                 output: "temporary failure".into(),
                 final_answer_candidate: Some("temporary failure".into()),
                 tool_results: vec![ToolResult::err("timeout")],
@@ -2837,10 +3021,10 @@ mod tests {
     #[tokio::test]
     async fn test_run_step_abort_marks_failed() {
         let loop_runtime = make_loop(
-            Arc::new(MockPlanner::new()),
             Arc::new(MockExecutor::from_responses(vec![StepResult {
                 step_index: 0,
                 success: false,
+                skipped: false,
                 output: "STEP FAILED: permission denied".into(),
                 final_answer_candidate: None,
                 tool_results: vec![ToolResult::err("permission denied")],
@@ -2875,10 +3059,10 @@ mod tests {
     #[tokio::test]
     async fn test_run_step_goal_complete_verdict_marks_completed() {
         let loop_runtime = make_loop(
-            Arc::new(MockPlanner::new()),
             Arc::new(MockExecutor::from_responses(vec![StepResult {
                 step_index: 0,
                 success: true,
+                skipped: false,
                 output: "done".into(),
                 final_answer_candidate: Some("done".into()),
                 tool_results: vec![],
@@ -2907,5 +3091,53 @@ mod tests {
 
         assert!(matches!(outcome, StepOutcome::Complete));
         assert_eq!(state.status, AgentStatus::Completed);
+    }
+
+    #[test]
+    fn test_build_coordinator_shell_plan_has_orchestration_steps() {
+        let loop_runtime = make_loop(
+            Arc::new(MockExecutor::new()),
+            Arc::new(MockEvaluator::new()),
+            Arc::new(MockReflector::new()),
+            Arc::new(MockPreflight::new()),
+            Arc::new(MockClarifier::new()),
+        );
+
+        let mut state = make_state();
+        state.pending_children = vec!["child-1".into()];
+        state.metadata["worker_messages"] = serde_json::json!([
+            { "id": "msg-1", "body": "research complete" }
+        ]);
+
+        let mut role = crate::agent::definition::AgentRole::new(
+            "role-1".into(),
+            state.id.clone(),
+            state.tenant_id.clone(),
+            "Coordinator".into(),
+        );
+        role.role_category = crate::agent::definition::RoleCategory::ResearchAnalyst;
+        role.execution_guidelines.execution_strategy = crate::agent::definition::ExecutionStrategy::CoordinatorShell;
+        role.execution_guidelines.tool_pool = crate::agent::definition::ToolPool::Coordinator;
+        role.execution_guidelines.add_priority("step: synthesize worker findings");
+
+        let plan = loop_runtime.build_coordinator_shell_plan(&mut state, &role);
+
+        assert_eq!(plan.steps.len(), 7);
+        assert_eq!(plan.steps[0].tool.as_deref(), Some("task_list"));
+        assert_eq!(plan.steps[1].tool.as_deref(), Some("delegate"));
+        assert_eq!(plan.steps[2].tool.as_deref(), Some("message_inbox"));
+        assert_eq!(plan.steps[3].tool.as_deref(), Some(crate::agent::workflow_compiler::LLM_WORKER_TOOL_NAME));
+        assert_eq!(plan.steps[4].tool.as_deref(), Some("delegate"));
+        assert_eq!(plan.steps[5].tool.as_deref(), Some("delegate"));
+        assert_eq!(plan.steps[6].tool.as_deref(), Some("task_output"));
+        assert_eq!(
+            plan.steps[1]
+                .tool_args
+                .as_ref()
+                .and_then(|args| args.get("continue_child_id"))
+                .and_then(|value| value.as_str()),
+            Some("child-1")
+        );
+        assert_eq!(state.metadata["coordinator_shell"]["mode"].as_str(), Some("coordinator_shell"));
     }
 }

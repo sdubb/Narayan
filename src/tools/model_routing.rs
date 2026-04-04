@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use crate::tools::{ParameterSchema, Tool, ToolResult};
+use crate::tools::{ParameterSchema, Tool, ToolResult, schema_boolean};
 pub struct ModelRoutingTool;
 #[async_trait]
 impl Tool for ModelRoutingTool {
@@ -18,6 +18,18 @@ impl Tool for ModelRoutingTool {
             ParameterSchema::optional("provider", "string", "Provider name override."),
         ]
     }
+
+    fn output_schema(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
+            "type": "object",
+            "required": ["updated"],
+            "properties": {
+                "updated": schema_boolean(),
+            },
+            "additionalProperties": true,
+        }))
+    }
+
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         let mut updated = Vec::new();
         if let Some(s) = args["simple_model"].as_str() {

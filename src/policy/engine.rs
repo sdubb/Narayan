@@ -76,7 +76,8 @@ impl PolicyEngine {
 
     fn evaluate_builtin_guards(&self, ctx: &PolicyContext) -> Option<PolicyDecision> {
         let paths = target_paths(&ctx.tool_args);
-        let writes_outside_workspace = paths.iter().any(|path| is_write_target(ctx, path) && path_leaves_workspace(path, ctx));
+        let writes_outside_workspace =
+            paths.iter().any(|path| is_write_target(ctx, path) && path_leaves_workspace(path, ctx));
         let protected_path = paths.iter().find(|path| targets_protected_path(path)).cloned();
         let mutating_tool = is_mutating_tool(ctx);
         let external_side_effect = has_external_side_effect(ctx);
@@ -92,16 +93,15 @@ impl PolicyEngine {
 
         if let Some(command) = command_text(ctx) {
             if let Some(reason) = dangerous_shell_reason(&command) {
-                return Some(PolicyDecision::Block {
-                    rule_id: "builtin-dangerous-shell".into(),
-                    reason,
-                });
+                return Some(PolicyDecision::Block { rule_id: "builtin-dangerous-shell".into(), reason });
             }
-            if looks_destructive_shell_command(&command) && permission_mode_ord(&ctx.permission_mode) < permission_mode_ord("trusted_auto")
+            if looks_destructive_shell_command(&command)
+                && permission_mode_ord(&ctx.permission_mode) < permission_mode_ord("trusted_auto")
             {
                 return Some(PolicyDecision::RequireApproval {
                     rule_id: "builtin-destructive-shell".into(),
-                    message: "destructive shell or git operations require explicit approval in this permission mode".into(),
+                    message: "destructive shell or git operations require explicit approval in this permission mode"
+                        .into(),
                 });
             }
         }
@@ -116,7 +116,8 @@ impl PolicyEngine {
         if ctx.tool_pool == "coordinator" && mutating_tool {
             return Some(PolicyDecision::RequireApproval {
                 rule_id: "builtin-coordinator-mutation".into(),
-                message: "coordinator-scoped roles should orchestrate rather than produce final artifacts directly".into(),
+                message: "coordinator-scoped roles should orchestrate rather than produce final artifacts directly"
+                    .into(),
             });
         }
 
@@ -179,10 +180,12 @@ impl PolicyEngine {
             PolicyCondition::ToolPoolIs { pool } => ctx.tool_pool == *pool,
             PolicyCondition::RiskLevel { min_level } => risk_ord(&ctx.risk_level) >= risk_ord(min_level),
             PolicyCondition::ExternalSideEffect => has_external_side_effect(ctx),
-            PolicyCondition::ProtectedPathTouched => target_paths(&ctx.tool_args).iter().any(|path| targets_protected_path(path)),
-            PolicyCondition::WritesOutsideWorkspace => {
-                target_paths(&ctx.tool_args).iter().any(|path| is_write_target(ctx, path) && path_leaves_workspace(path, ctx))
+            PolicyCondition::ProtectedPathTouched => {
+                target_paths(&ctx.tool_args).iter().any(|path| targets_protected_path(path))
             }
+            PolicyCondition::WritesOutsideWorkspace => target_paths(&ctx.tool_args)
+                .iter()
+                .any(|path| is_write_target(ctx, path) && path_leaves_workspace(path, ctx)),
             PolicyCondition::ArgThreshold { field, max } => {
                 ctx.tool_args.get(field).and_then(|v| v.as_f64()).map(|v| v > *max).unwrap_or(false)
             }
@@ -239,10 +242,7 @@ fn has_external_side_effect(ctx: &PolicyContext) -> bool {
             .and_then(|value| value.as_str())
             .map(|method| !matches!(method.to_ascii_uppercase().as_str(), "GET" | "HEAD"))
             .unwrap_or(false),
-        "mcp_session" => matches!(
-            ctx.tool_args.get("action").and_then(|value| value.as_str()),
-            Some("call_tool")
-        ),
+        "mcp_session" => matches!(ctx.tool_args.get("action").and_then(|value| value.as_str()), Some("call_tool")),
         _ => false,
     }
 }
@@ -284,10 +284,7 @@ fn is_mutating_tool(ctx: &PolicyContext) -> bool {
             ctx.tool_args.get("action").and_then(|value| value.as_str()),
             Some("ack") | Some("continue_worker")
         ),
-        "mcp_session" => matches!(
-            ctx.tool_args.get("action").and_then(|value| value.as_str()),
-            Some("call_tool")
-        ),
+        "mcp_session" => matches!(ctx.tool_args.get("action").and_then(|value| value.as_str()), Some("call_tool")),
         "http_request" => ctx
             .tool_args
             .get("method")
@@ -432,18 +429,9 @@ fn dangerous_shell_reason(command: &str) -> Option<String> {
 
 fn looks_destructive_shell_command(command: &str) -> bool {
     let lower = command.to_ascii_lowercase();
-    [
-        "rm -rf",
-        "git reset",
-        "git checkout --",
-        "git clean",
-        "chmod 777",
-        "mv ",
-        "del ",
-        "remove-item",
-    ]
-    .iter()
-    .any(|pattern| lower.contains(pattern))
+    ["rm -rf", "git reset", "git checkout --", "git clean", "chmod 777", "mv ", "del ", "remove-item"]
+        .iter()
+        .any(|pattern| lower.contains(pattern))
 }
 
 #[cfg(test)]
@@ -509,7 +497,10 @@ mod tests {
 
         c.tool_args = serde_json::json!({ "amount": 25.0 });
         let decision = engine.evaluate(&c, &rules);
-        assert!(matches!(decision, PolicyDecision::RequireApproval { .. }), "builtin external-side-effect guard should still escalate api_call");
+        assert!(
+            matches!(decision, PolicyDecision::RequireApproval { .. }),
+            "builtin external-side-effect guard should still escalate api_call"
+        );
     }
 
     #[test]
@@ -520,7 +511,9 @@ mod tests {
         c.permission_mode = "plan_only".into();
         c.tool_args = serde_json::json!({ "path": "notes.txt" });
         let decision = engine.evaluate(&c, &rules);
-        assert!(matches!(decision, PolicyDecision::RequireApproval { rule_id, .. } if rule_id == "builtin-plan-only-mutation"));
+        assert!(
+            matches!(decision, PolicyDecision::RequireApproval { rule_id, .. } if rule_id == "builtin-plan-only-mutation")
+        );
     }
 
     #[test]
@@ -531,7 +524,9 @@ mod tests {
         c.permission_mode = "workspace_write".into();
         c.tool_args = serde_json::json!({ "path": "/tmp/outside.txt" });
         let decision = engine.evaluate(&c, &rules);
-        assert!(matches!(decision, PolicyDecision::RequireApproval { rule_id, .. } if rule_id == "builtin-workspace-boundary"));
+        assert!(
+            matches!(decision, PolicyDecision::RequireApproval { rule_id, .. } if rule_id == "builtin-workspace-boundary")
+        );
     }
 
     #[test]
@@ -542,7 +537,9 @@ mod tests {
         c.permission_mode = "workspace_write".into();
         c.tool_args = serde_json::json!({ "path": "/workspace/project/.env" });
         let decision = engine.evaluate(&c, &rules);
-        assert!(matches!(decision, PolicyDecision::RequireApproval { rule_id, .. } if rule_id == "builtin-protected-path"));
+        assert!(
+            matches!(decision, PolicyDecision::RequireApproval { rule_id, .. } if rule_id == "builtin-protected-path")
+        );
     }
 
     #[test]

@@ -4,10 +4,10 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use russh::{client, keys::PublicKey};
 use russh::client::AuthResult;
+use russh::{client, keys::PublicKey};
 
-use crate::tools::{ParameterSchema, Tool, ToolResult};
+use crate::tools::{ParameterSchema, Tool, ToolResult, schema_string, schema_integer};
 
 pub struct SshExecTool;
 
@@ -43,6 +43,22 @@ impl Tool for SshExecTool {
             ParameterSchema::optional("timeout_secs", "integer", "Connection + execution timeout (default: 30)."),
             ParameterSchema::optional("stdin", "string", "Data to send to command stdin."),
         ]
+    }
+
+    fn output_schema(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
+            "type": "object",
+            "required": ["host", "command", "stdout", "stderr", "exit_code", "elapsed_ms"],
+            "properties": {
+                "host": schema_string(),
+                "command": schema_string(),
+                "stdout": schema_string(),
+                "stderr": schema_string(),
+                "exit_code": schema_integer(),
+                "elapsed_ms": schema_integer(),
+            },
+            "additionalProperties": true,
+        }))
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
@@ -88,10 +104,8 @@ impl Tool for SshExecTool {
             let private_key =
                 russh::keys::decode_secret_key(pem, None).map_err(|e| anyhow::anyhow!("parse private key: {}", e))?;
             // Wrap PrivateKey in Arc and use PrivateKeyWithHashAlg with SHA256
-            let keypair = russh::keys::PrivateKeyWithHashAlg::new(
-                Arc::new(private_key), 
-                Some(russh::keys::HashAlg::Sha256)
-            );
+            let keypair =
+                russh::keys::PrivateKeyWithHashAlg::new(Arc::new(private_key), Some(russh::keys::HashAlg::Sha256));
             session
                 .authenticate_publickey(username, keypair)
                 .await
@@ -155,5 +169,3 @@ impl Tool for SshExecTool {
         }
     }
 }
-
-

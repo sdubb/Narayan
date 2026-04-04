@@ -3,7 +3,7 @@
 
 use async_trait::async_trait;
 
-use crate::tools::{ParameterSchema, Tool, ToolResult};
+use crate::tools::{ParameterSchema, Tool, ToolResult, schema_string, schema_boolean, schema_integer};
 
 pub struct DiffTool;
 pub struct PatchTool;
@@ -28,6 +28,22 @@ impl Tool for DiffTool {
             ParameterSchema::optional("label_new", "string", "Label for new file in diff header (default: 'new')."),
         ]
     }
+
+    fn output_schema(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
+            "type": "object",
+            "required": ["patch", "insertions", "deletions", "unchanged", "has_changes"],
+            "properties": {
+                "patch": schema_string(),
+                "insertions": schema_integer(),
+                "deletions": schema_integer(),
+                "unchanged": schema_integer(),
+                "has_changes": schema_boolean(),
+            },
+            "additionalProperties": true,
+        }))
+    }
+
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         let old = if let Some(p) = args["old_path"].as_str() {
             tokio::fs::read_to_string(p).await.map_err(|e| anyhow::anyhow!("read old: {}", e))?

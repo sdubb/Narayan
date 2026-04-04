@@ -92,9 +92,8 @@ impl AgentManager {
         }
 
         // Extract the first pending role
-        let next_role_resp = pending_roles.first().cloned().ok_or_else(|| {
-            anyhow::anyhow!("Pending roles array is empty")
-        })?;
+        let next_role_resp =
+            pending_roles.first().cloned().ok_or_else(|| anyhow::anyhow!("Pending roles array is empty"))?;
         pending_roles.remove(0);
         agent.memory_ref = Self::build_memory_ref(&base_memory_ref, &pending_roles);
         self.store.upsert_agent_definition(&agent).await?;
@@ -147,11 +146,7 @@ impl AgentManager {
                 tenant_id: tenant_id.to_string(),
                 version: 1,
                 status: crate::agent::definition::RoleStatus::Draft,
-                name: next_role_resp
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("untitled role")
-                    .to_string(),
+                name: next_role_resp.get("name").and_then(|v| v.as_str()).unwrap_or("untitled role").to_string(),
                 trigger: Default::default(),
                 purpose: actions.join(", "),
                 role_category: crate::agent::definition::RoleCategory::General,
@@ -293,16 +288,16 @@ impl AgentManager {
         // ── Atomically create agent, goal, and goal instance in a single transaction ────────
         // This ensures consistency: if any operation fails, all are rolled back.
         // Critical for compliance (auditing), financial segments, and consistency guarantees.
-        let _tx = self.store.begin_transaction().await
-            .map_err(|e| anyhow::anyhow!("failed to start transaction: {}", e))?;
-        
+        let _tx =
+            self.store.begin_transaction().await.map_err(|e| anyhow::anyhow!("failed to start transaction: {}", e))?;
+
         // NOTE: Implementation would require transaction-aware upsert variants (_tx versions).
         // For now, these are standard calls with the transaction initiated.
         // Refactoring to _tx methods is a follow-up improvement.
         self.store.upsert_agent(&agent_state).await?;
         self.store.upsert_goal(&goal).await?;
         self.store.upsert_goal_instance(&gi).await?;
-        
+
         // TODO: Explicit tx.commit() once _tx variants are implemented
 
         tracing::info!(goal_id = %goal.id, agent_id = %agent_state.id, gi_id = %gi.id, "goal created with unified instance tracking");
@@ -323,23 +318,79 @@ impl AgentManager {
         let agent_id = new_id();
         let gi_id = new_id();
 
+        // Always seed the run from the freshest saved role so we do not launch
+        // from a stale plan-mode snapshot if the role was updated moments ago.
+        let role = self.store.get_agent_role(&tenant_id, &role.id).await?.unwrap_or_else(|| role.clone());
+
+        if role.execution_guidelines.compiled_workflow.is_none()
+            && !matches!(
+                role.execution_guidelines.execution_strategy,
+                crate::agent::definition::ExecutionStrategy::CoordinatorShell
+            )
+        {
+            anyhow::bail!(
+                "role '{}' is not ready to run yet; plan mode must save a compiled workflow artifact first",
+                role.name
+            );
+        }
+
         let handle = self.workspace_manager.create(&tenant_id, &agent_id).await?;
         let workspace_path = handle.local_path_str();
 
-        let mut agent_state = AgentState::new(
-            agent_id.clone(),
-            tenant_id.clone(),
-            role.purpose.clone(),
-            workspace_path,
-        );
+        let mut agent_state =
+            AgentState::new(agent_id.clone(), tenant_id.clone(), role.purpose.clone(), workspace_path);
         agent_state.conversation_id = conversation_id;
-        
-        // Inject role metadata for AgentLoop and Planner
+
+        // Inject role metadata for AgentLoop and compiled workflow runtime
         agent_state.metadata["role_id"] = serde_json::json!(role.id);
         agent_state.metadata["role_name"] = serde_json::json!(role.name);
         agent_state.metadata["agent_definition_id"] = serde_json::json!(role.agent_id);
         agent_state.metadata["input_data"] = input_data.clone();
         agent_state.metadata["goal_instance_id"] = serde_json::json!(gi_id);
+        if let Some(compiled) = role.execution_guidelines.compiled_workflow.as_ref() {
+            agent_state.metadata["workflow_version"] =
+                serde_json::json!(if compiled.workflow_version.trim().is_empty() {
+                    compiled.version.clone()
+                } else {
+                    compiled.workflow_version.clone()
+                });
+            agent_state.metadata["parent_workflow_version"] = serde_json::json!(compiled.parent_workflow_version);
+            agent_state.metadata["tool_registry_version"] = serde_json::json!(compiled.tool_registry_version);
+            agent_state.metadata["recompile_policy"] =
+                serde_json::to_value(&compiled.recompile_policy).unwrap_or_default();
+            agent_state.metadata["recompile_count"] = serde_json::json!(0);
+            agent_state.metadata["variant_policy"] = serde_json::to_value(&compiled.variant_policy).unwrap_or_default();
+            if let Some(metadata) = compiled.metadata.as_object() {
+                if let Some(value) = metadata.get("plan_mode_session_id").cloned() {
+                    agent_state.metadata["plan_mode_session_id"] = value;
+                }
+                if let Some(value) = metadata.get("plan_mode_goal_fingerprint").cloned() {
+                    agent_state.metadata["plan_mode_goal_fingerprint"] = value;
+                }
+                if let Some(value) = metadata.get("plan_mode_repair_version").cloned() {
+                    agent_state.metadata["plan_mode_repair_version"] = value;
+                }
+                if let Some(value) = metadata.get("plan_mode_repair_root_session_id").cloned() {
+                    agent_state.metadata["plan_mode_repair_root_session_id"] = value;
+                }
+                if let Some(value) = metadata.get("plan_mode_reused_from_session_id").cloned() {
+                    agent_state.metadata["plan_mode_reused_from_session_id"] = value;
+                }
+            }
+        }
+        agent_state.metadata["workflow_outline"] = serde_json::json!({
+            "steps": role
+                .execution_guidelines
+                .workflow_outline
+                .iter()
+                .map(|step| serde_json::json!({
+                    "description": step.description.clone(),
+                    "tool": step.tool.clone(),
+                    "tool_args": step.args_template.clone(),
+                    "success_criteria": step.success_criteria.clone(),
+                }))
+                .collect::<Vec<_>>()
+        });
 
         let gi = GoalInstance {
             id: gi_id,

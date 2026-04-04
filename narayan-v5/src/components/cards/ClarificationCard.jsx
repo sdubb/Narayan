@@ -6,11 +6,35 @@ import { agents } from '../../api';
 
 function normalizeQuestion(question, index) {
   if (typeof question === 'string') {
-    return { id: `q_${index}`, prompt: question, placeholder: 'Your answer...', helperText: '', options: [], required: true, secret: false, connectorType: '', actionLabel: '' };
+    return {
+      id: `q_${index}`,
+      prompt: question,
+      placeholder: 'Your answer...',
+      helperText: '',
+      options: [],
+      required: true,
+      secret: false,
+      connectorType: '',
+      actionLabel: '',
+      questionType: 'text',
+      multiSelect: false,
+    };
   }
   const options = Array.isArray(question?.options)
     ? question.options.map(o => typeof o === 'string' ? o : o?.label).filter(Boolean)
     : [];
+  const questionType = String(question?.question_type || question?.type || '').trim().toLowerCase();
+  const derivedType = questionType.includes('card_open')
+    ? 'card_open'
+    : questionType.includes('multi_select') || question?.multi_select || question?.multiSelect
+      ? 'multi_select'
+      : questionType.includes('approval') || questionType.includes('decision')
+        ? (options.length > 0 ? 'mcq' : 'text')
+      : questionType.includes('text')
+        ? 'text'
+        : questionType.includes('mcq') || questionType.includes('choice') || options.length > 0
+        ? 'mcq'
+        : 'text';
   return {
     id: question?.id || `q_${index}`,
     prompt: question?.prompt || question?.question || `Question ${index + 1}`,
@@ -21,21 +45,69 @@ function normalizeQuestion(question, index) {
     secret: Boolean(question?.secret),
     connectorType: question?.connector_type || question?.connectorType || '',
     actionLabel: question?.action_label || question?.actionLabel || '',
+    cardType: question?.card_type || question?.cardType || '',
+    requiredFields: Array.isArray(question?.required_fields)
+      ? question.required_fields
+      : Array.isArray(question?.requiredFields)
+        ? question.requiredFields
+        : [],
+    bindingTarget: question?.binding_target || question?.bindingTarget || '',
+    resumeToken: question?.resume_token || question?.resumeToken || '',
+    questionType: derivedType,
+    multiSelect: Boolean(question?.multi_select || question?.multiSelect || derivedType === 'multi_select'),
   };
 }
 
 export default function ClarificationCard({ agentId, questions, onDone, onNavigateSettings }) {
   const normalized = questions.map(normalizeQuestion);
   const [answers, setAnswers] = useState(normalized.map(() => ''));
+  const [selectedOptions, setSelectedOptions] = useState(normalized.map(() => []));
   const [loading, setLoading] = useState(false);
   const [submitted, setSubmitted] = useState(false);
   const [err, setErr] = useState('');
 
+  function openSetup(q) {
+    onNavigateSettings?.({
+      cardType: q.cardType,
+      bindingTarget: q.bindingTarget,
+      requiredFields: q.requiredFields,
+      resumeToken: q.resumeToken,
+      connectorType: q.connectorType,
+    });
+  }
+
   useEffect(() => {
     setAnswers(normalized.map(() => ''));
+    setSelectedOptions(normalized.map(() => []));
     setSubmitted(false);
     setErr('');
   }, [questions]);
+
+  function updateOptionAnswer(index, option, multiSelect) {
+    if (!multiSelect) {
+      setAnswers(prev => {
+        const next = [...prev];
+        next[index] = option;
+        return next;
+      });
+      return;
+    }
+
+    setSelectedOptions(prevSelected => {
+      const current = Array.isArray(prevSelected[index]) ? prevSelected[index] : [];
+      const nextSelected = current.includes(option)
+        ? current.filter(item => item !== option)
+        : [...current, option];
+      setAnswers(prev => {
+        const next = [...prev];
+        next[index] = nextSelected.join(', ');
+        return next;
+      });
+      const updated = [...prevSelected];
+      updated[index] = nextSelected;
+      return updated;
+    });
+  }
 
   async function submit() {
     setLoading(true); setErr('');
@@ -47,7 +119,11 @@ export default function ClarificationCard({ agentId, questions, onDone, onNaviga
     finally { setLoading(false); }
   }
 
-  const hasMissing = normalized.some((q, i) => q.required && !answers[i]?.trim());
+  const hasMissing = normalized.some((q, i) => {
+    if (!q.required) return false;
+    if (q.questionType === 'card_open') return false;
+    return !answers[i]?.trim();
+  });
 
   if (submitted) {
     return (
@@ -77,32 +153,50 @@ export default function ClarificationCard({ agentId, questions, onDone, onNaviga
               <p className="text-sm text-tx-1 font-medium">{q.prompt}</p>
               {q.secret && <span className="badge bg-warn-soft text-warn border border-warn/20"><Lock size={9} /> secret</span>}
               {q.connectorType && <span className="badge bg-info-soft text-info border border-info/20"><Plug size={9} /> {q.connectorType}</span>}
+              {q.cardType && <span className="badge bg-accent-soft text-accent border border-accent/20">{q.cardType.replace(/_/g, ' ')}</span>}
+              {q.questionType && <span className="badge bg-bg-card text-tx-3 border border-border">{q.questionType.replace(/_/g, ' ')}</span>}
             </div>
             {q.helperText && <p className="text-xs text-tx-3">{q.helperText}</p>}
-            {q.connectorType && onNavigateSettings && (
-              <button onClick={onNavigateSettings} className="inline-flex items-center gap-1.5 text-xs font-medium text-accent hover:text-accent-text transition-colors">
-                {q.actionLabel || `Connect ${q.connectorType} in Settings`} <ArrowRight size={10} />
+            <div className="flex flex-wrap items-center gap-2 text-[11px] text-tx-4">
+              {q.bindingTarget && <span>Binding target: {q.bindingTarget}</span>}
+              {q.requiredFields.length > 0 && <span>Required: {q.requiredFields.join(', ')}</span>}
+              {q.resumeToken && <span className="font-mono">Resume: {q.resumeToken}</span>}
+            </div>
+            {q.questionType === 'card_open' && (q.connectorType || q.cardType || q.bindingTarget) && onNavigateSettings && (
+              <button onClick={() => openSetup(q)} className="inline-flex items-center gap-1.5 text-xs font-medium text-accent hover:text-accent-text transition-colors">
+                {q.actionLabel || `Open ${q.cardType ? q.cardType.replace(/_/g, ' ') : q.connectorType} setup`} <ArrowRight size={10} />
               </button>
             )}
-            <input
-              value={answers[i]}
-              onChange={e => { const n = [...answers]; n[i] = e.target.value; setAnswers(n); }}
-              onKeyDown={e => { if (e.key === 'Enter') submit(); }}
-              type={q.secret ? 'password' : 'text'}
-              placeholder={q.placeholder}
-              className="input-field"
-            />
-            {q.options.length > 0 && (
+            {q.questionType !== 'card_open' && (
+              <input
+                value={answers[i]}
+                onChange={e => { const n = [...answers]; n[i] = e.target.value; setAnswers(n); }}
+                onKeyDown={e => { if (e.key === 'Enter') submit(); }}
+                type={q.secret ? 'password' : 'text'}
+                placeholder={q.placeholder}
+                className="input-field"
+              />
+            )}
+            {q.options.length > 0 && q.questionType !== 'card_open' && (
               <div className="flex flex-wrap gap-2">
                 {q.options.map(opt => (
-                  <button key={opt} onClick={() => { const n = [...answers]; n[i] = opt; setAnswers(n); }}
+                  <button key={opt} onClick={() => updateOptionAnswer(i, opt, q.multiSelect)}
                     className={clsx('rounded-full border px-2.5 py-1 text-xs transition-colors',
-                      answers[i] === opt ? 'border-accent bg-accent-soft text-accent' : 'border-border text-tx-3 hover:border-border-md'
+                      q.multiSelect
+                        ? selectedOptions[i]?.includes(opt)
+                          ? 'border-accent bg-accent-soft text-accent'
+                          : 'border-border text-tx-3 hover:border-border-md'
+                        : answers[i] === opt
+                          ? 'border-accent bg-accent-soft text-accent'
+                          : 'border-border text-tx-3 hover:border-border-md'
                     )}>
                     {opt}
                   </button>
                 ))}
               </div>
+            )}
+            {q.questionType === 'card_open' && !(q.connectorType || q.cardType || q.bindingTarget) && (
+              <p className="text-xs text-tx-4">Open the matching setup card in settings, then come back here to continue.</p>
             )}
           </div>
         ))}

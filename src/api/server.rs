@@ -118,6 +118,7 @@ pub fn build_router(
         // Plan mode
         .route("/plan-mode/templates", get(list_plan_mode_templates))
         .route("/plan-mode/sessions", post(start_plan_mode_session))
+        .route("/plan-mode/sessions/{id}", get(get_plan_mode_session))
         .route("/plan-mode/sessions/{id}/turn", post(plan_mode_turn))
         .route("/plan-mode/sessions/{id}/test", post(test_plan_mode_session))
         .route("/plan-mode/sessions/{id}/revise", post(revise_plan_mode_session))

@@ -1,37 +1,51 @@
-use std::sync::Arc;
-
-use anyhow::Result;
-use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    agent::prompts::{build_conversation_history, is_direct_response_goal, JobType, PlannerPrompt},
-    gateway::{GatewayRequest, LlmGateway, TaskComplexity},
-    providers::Message,
-    state::AgentState,
-    storage::PostgresStore,
+    agent::workflow_compiler::{legacy_args_template_from_compiled_step, CompiledWorkflow, TypedExpression},
+    gateway::LlmRole,
 };
 
-fn truncate_for_log(value: &str, max_chars: usize) -> String {
-    let mut out = String::with_capacity(value.len().min(max_chars));
-    for ch in value.chars().take(max_chars) {
-        out.push(ch);
-    }
-    if value.chars().count() > max_chars {
-        out.push_str("...(truncated)");
-    }
-    out
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum StepCondition {
+    Deterministic(StructuredCondition),
+    Expression(TypedExpression),
+    // Semantic(String), // Future expansion
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StepCondition {
-    pub reference: String,
-    pub operator: String,
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StructuredCondition {
+    pub left: String,
+    pub operator: ConditionOp,
     #[serde(default)]
-    pub value: Option<serde_json::Value>,
+    pub right: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ConditionOp {
+    Exists,
+    NotExists,
+    Equals,
+    NotEquals,
+    GreaterThan,
+    LessThan,
+    GreaterThanEquals,
+    LessThanEquals,
+    NotEmpty,
+    Empty,
+    IsTruthy,
+    IsFalsy,
+    Contains,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SkipReason {
+    ConditionFalse,
+    UpstreamSkipped,
+    NoInput,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PlannedStep {
     pub index: usize,
     pub description: String,
@@ -41,6 +55,13 @@ pub struct PlannedStep {
     pub success_criteria: String,
     #[serde(default)]
     pub condition: Option<StepCondition>,
+    #[serde(default)]
+    pub foreach: Option<String>,
+    /// DAG dependency edges — indices of predecessor steps that must
+    /// complete before this step can execute. Empty = no dependencies
+    /// (or linear execution where the engine infers sequential deps).
+    #[serde(default)]
+    pub depends_on: Vec<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,17 +103,56 @@ impl Plan {
             .workflow_outline
             .iter()
             .enumerate()
-            .map(|(i, ws)| PlannedStep {
-                index: i,
-                description: ws.description.clone(),
-                tool: ws.tool.clone(),
-                tool_args: ws.args_template.as_ref().map(|t| render_template(t, input_data)),
-                success_criteria: if ws.success_criteria.trim().is_empty() {
-                    format!("step {} complete", i + 1)
-                } else {
-                    ws.success_criteria.clone()
-                },
-                condition: ws.condition.clone(),
+            .map(|(i, ws)| {
+                let is_llm_worker = ws.tool.as_deref() == Some("llm_worker")
+                    || (ws.tool.is_none() && ws.condition.is_none() && ws.foreach.is_none());
+                let tool = ws.tool.clone().or_else(|| {
+                    if ws.condition.is_some() || ws.foreach.is_some() {
+                        None
+                    } else {
+                        Some(crate::agent::workflow_compiler::LLM_WORKER_TOOL_NAME.into())
+                    }
+                });
+                let tool_args = ws.args_template.as_ref().map(|t| render_template(t, input_data)).or_else(|| {
+                    if ws.condition.is_some() || ws.foreach.is_some() {
+                        None
+                    } else if is_llm_worker {
+                        let role = crate::agent::workflow_compiler::infer_llm_role(&ws.description);
+                        let generation =
+                            crate::agent::workflow_compiler::llm_generation_for_hint(&ws.description, &role);
+                        Some(serde_json::json!({
+                            "instruction": ws.description,
+                            "response_format": "json",
+                            "llm_role": role,
+                            "execution_intent": generation.execution_intent,
+                            "budget_tier": generation.budget_tier,
+                            "temperature": generation.temperature,
+                            "max_tokens": generation.max_tokens,
+                            "cost_budget_usd": generation.cost_budget_usd,
+                            "output_schema": crate::agent::workflow_compiler::llm_output_schema(&role),
+                        }))
+                    } else {
+                        Some(serde_json::json!({
+                            "instruction": ws.description,
+                            "response_format": "text",
+                        }))
+                    }
+                });
+
+                PlannedStep {
+                    index: i,
+                    description: ws.description.clone(),
+                    tool,
+                    tool_args,
+                    success_criteria: if ws.success_criteria.trim().is_empty() {
+                        format!("step {} complete", i + 1)
+                    } else {
+                        ws.success_criteria.clone()
+                    },
+                    condition: ws.condition.clone(),
+                    foreach: ws.foreach.clone(),
+                    depends_on: ws.depends_on.clone(),
+                }
             })
             .collect();
         Plan {
@@ -100,6 +160,63 @@ impl Plan {
             job_type: Some(role.role_category.as_str().into()),
             steps,
             rationale: "deterministic plan from workflow outline".into(),
+        }
+    }
+
+    /// Build a deterministic Plan directly from the compiled workflow artifact.
+    /// This is the runtime path for the new compiler-first execution model.
+    pub fn from_compiled_workflow(workflow: &CompiledWorkflow, role: &crate::agent::definition::AgentRole) -> Self {
+        let steps = workflow
+            .steps
+            .iter()
+            .enumerate()
+            .map(|(index, step)| {
+                let mut tool_args = legacy_args_template_from_compiled_step(step);
+                if step.tool.as_deref() == Some(crate::agent::workflow_compiler::LLM_WORKER_TOOL_NAME) {
+                    let role = step.llm_role.clone().unwrap_or(LlmRole::Drafter);
+                    let generation = step
+                        .llm_generation
+                        .clone()
+                        .unwrap_or_else(|| crate::agent::workflow_compiler::llm_generation_for_hint(&step.id, &role));
+                    if let Some(map) = tool_args.as_object_mut() {
+                        map.insert("llm_role".into(), serde_json::json!(role));
+                        map.insert("execution_intent".into(), serde_json::json!(generation.execution_intent));
+                        map.insert("budget_tier".into(), serde_json::json!(generation.budget_tier));
+                        map.insert("temperature".into(), serde_json::json!(generation.temperature));
+                        map.insert("max_tokens".into(), serde_json::json!(generation.max_tokens));
+                        map.insert("cost_budget_usd".into(), serde_json::json!(generation.cost_budget_usd));
+                        map.insert("response_format".into(), serde_json::json!("json"));
+                        map.insert("output_schema".into(), step.output_schema.clone());
+                    }
+                }
+
+                PlannedStep {
+                    index,
+                    description: format!("{}: {:?}", step.id, step.dsl_type),
+                    tool: step.tool.clone(),
+                    tool_args: Some(tool_args),
+                    success_criteria: if step.success_criteria.is_empty() {
+                        format!("step {} complete", index + 1)
+                    } else {
+                        step.success_criteria.join("; ")
+                    },
+                    condition: step.condition.clone(),
+                    foreach: None,
+                    depends_on: step
+                        .depends_on
+                        .iter()
+                        .filter_map(|dep| dep.strip_prefix("step_").and_then(|value| value.parse::<usize>().ok()))
+                        .map(|value| value.saturating_sub(1))
+                        .collect(),
+                }
+            })
+            .collect();
+
+        Plan {
+            goal: role.purpose.clone(),
+            job_type: Some(role.role_category.as_str().into()),
+            steps,
+            rationale: "deterministic plan from compiled workflow".into(),
         }
     }
 }
@@ -141,423 +258,9 @@ fn render_template(template: &serde_json::Value, input_data: &serde_json::Value)
     }
 }
 
-#[async_trait]
-pub trait Planner: Send + Sync {
-    async fn create_plan(&self, state: &AgentState, context: &str, available_tools: &[&str]) -> Result<Plan>;
-
-    async fn revise_plan(&self, plan: &Plan, state: &AgentState, feedback: &str) -> Result<Plan>;
-
-    async fn research_for_workflow(
-        &self,
-        state: &AgentState,
-        context: &str,
-        available_tools: &[&str],
-    ) -> Result<AdaptiveResearchMemo>;
-}
-
-pub struct LlmPlanner {
-    gateway: Arc<dyn LlmGateway>,
-    store: Option<Arc<PostgresStore>>,
-}
-
-struct RolePlannerContext {
-    prompt_context: String,
-    job_type: JobType,
-}
-
-impl LlmPlanner {
-    pub fn new(gateway: Arc<dyn LlmGateway>) -> Self {
-        Self { gateway, store: None }
-    }
-
-    pub fn with_store(mut self, store: Arc<PostgresStore>) -> Self {
-        self.store = Some(store);
-        self
-    }
-
-    async fn conversation_history(&self, state: &AgentState) -> String {
-        let conv_id = match &state.conversation_id {
-            Some(id) => id,
-            None => return String::new(),
-        };
-        let store = match &self.store {
-            Some(s) => s,
-            None => return String::new(),
-        };
-        match store.list_agents_in_conversation(&state.tenant_id, conv_id).await {
-            Ok(agents) => build_conversation_history(&agents, &state.id),
-            Err(e) => {
-                tracing::warn!(agent_id = %state.id, error = %e, "failed to load conversation history for planner");
-                String::new()
-            }
-        }
-    }
-
-    /// Load role context from AgentDefinition + AgentRole if the agent's metadata
-    /// carries a role_id.  Returns a formatted string injected into the planner
-    /// prompt so it knows the scoped connectors, guidelines, and output spec.
-    async fn load_role_context(&self, state: &AgentState) -> Option<RolePlannerContext> {
-        let store = self.store.as_ref()?;
-        let role_id = state.metadata.get("role_id").and_then(|v| v.as_str())?;
-
-        let role = store.get_agent_role(&state.tenant_id, role_id).await.ok()??;
-        let job_type = JobType::from_role_category(&role.role_category);
-        let workflow_hints = role.execution_guidelines.workflow_hints();
-        let preferred_tool_categories = role.execution_guidelines.preferred_tool_categories();
-        let preferred_connector_categories = role.execution_guidelines.preferred_connector_categories();
-
-        let mut parts: Vec<String> = Vec::new();
-        parts.push(format!("Role category: {}", role.role_category.as_str()));
-
-        if !role.connectors.is_empty() {
-            parts.push(format!("Available connectors for this role: {}", role.connectors.join(", ")));
-        }
-        if let Ok(tenant_wasm_tools) = store.list_tenant_wasm_tools(&state.tenant_id).await {
-            let names: Vec<String> =
-                tenant_wasm_tools.into_iter().filter(|tool| tool.enabled).map(|tool| tool.name).collect();
-            if !names.is_empty() {
-                parts.push(format!("Registered tenant WASM tools (strictly sandboxed): {}", names.join(", ")));
-            }
-        }
-        let mut role_tools = Vec::new();
-        let mut allowed_wasm_tools = Vec::new();
-        for tool_name in &role.tools {
-            if let Some(name) = tool_name.strip_prefix("wasm_tool:") {
-                if !name.trim().is_empty() {
-                    allowed_wasm_tools.push(name.trim().to_string());
-                }
-            } else {
-                role_tools.push(tool_name.clone());
-            }
-        }
-        allowed_wasm_tools.sort();
-        allowed_wasm_tools.dedup();
-        if !role_tools.is_empty() {
-            parts.push(format!("Specific tools for this role: {}", role_tools.join(", ")));
-        }
-        if !allowed_wasm_tools.is_empty() {
-            parts.push(format!("Allowed registered WASM tools for this role: {}", allowed_wasm_tools.join(", ")));
-        }
-        if !role.execution_guidelines.is_empty() {
-            parts.push(format!("Execution guidelines:\n{}", role.execution_guidelines.to_prompt()));
-        }
-        if !workflow_hints.is_empty() {
-            parts.push(format!("Preferred workflow order for this role:\n- {}", workflow_hints.join("\n- ")));
-        }
-        if !preferred_tool_categories.is_empty() {
-            parts.push(format!("Preferred tool categories for this role: {}", preferred_tool_categories.join(", ")));
-        }
-        if !preferred_connector_categories.is_empty() {
-            parts.push(format!(
-                "Preferred connector categories for this role: {}",
-                preferred_connector_categories.join(", ")
-            ));
-        }
-        if !role.output_spec.description.is_empty() {
-            parts.push(format!("Expected output: {}", role.output_spec.description));
-        }
-        parts.push(format!("Memory scope: {:?}", role.memory_scope).to_lowercase());
-        parts.push(format!(
-            "Execution limits: max_steps={}, max_retries={}, timeout_secs={}, max_cost_usd={}",
-            role.execution_limits.max_steps,
-            role.execution_limits.max_retries,
-            role.execution_limits.timeout_secs,
-            role.execution_limits.max_cost_usd.map(|value| format!("{value:.2}")).unwrap_or_else(|| "none".into())
-        ));
-        // Load agent constraints
-        if let Ok(Some(agent)) = store.get_agent_definition(&state.tenant_id, &role.agent_id).await {
-            if !agent.constraints.is_empty() {
-                parts.push(format!("Hard constraints (must follow):\n- {}", agent.constraints.join("\n- ")));
-            }
-            if !agent.persona.is_empty() {
-                parts.push(format!("Persona: {}", agent.persona));
-            }
-        }
-
-        Some(RolePlannerContext { prompt_context: parts.join("\n\n"), job_type })
-    }
-}
-
-fn clean_json_response(raw: &str) -> &str {
-    raw.trim().trim_start_matches("```json").trim_start_matches("```").trim_end_matches("```").trim()
-}
-
-#[async_trait]
-impl Planner for LlmPlanner {
-    async fn create_plan(&self, state: &AgentState, context: &str, available_tools: &[&str]) -> Result<Plan> {
-        if is_direct_response_goal(&state.goal) {
-            tracing::info!(
-                agent_id = %state.id,
-                goal = %state.goal,
-                "planner selected direct-response fast path"
-            );
-            return Ok(Plan {
-                goal: state.goal.clone(),
-                job_type: Some("general".into()),
-                rationale: "Simple conversational request; answer the user directly without tools.".into(),
-                steps: vec![PlannedStep {
-                    index: 0,
-                    description: "Answer the user's message directly in chat.".into(),
-                    tool: None,
-                    tool_args: None,
-                    success_criteria: "User receives a complete direct answer.".into(),
-                    condition: None,
-                }],
-            });
-        }
-
-        let role_context = self.load_role_context(state).await;
-        let job_type =
-            role_context.as_ref().map(|ctx| ctx.job_type.clone()).unwrap_or_else(|| JobType::detect(&state.goal));
-
-        let system = PlannerPrompt::system(&job_type);
-        let manifest = crate::tools::selector::tool_manifest_from_names(available_tools);
-        let conv_history = self.conversation_history(state).await;
-
-        let user = PlannerPrompt::user_create(
-            state,
-            context,
-            &manifest,
-            &conv_history,
-            role_context.as_ref().map(|ctx| ctx.prompt_context.as_str()),
-        );
-
-        tracing::debug!(
-            agent_id = %state.id,
-            job_type = job_type.label(),
-            "creating plan"
-        );
-        tracing::info!(
-            agent_id = %state.id,
-            goal = %state.goal,
-            job_type = job_type.label(),
-            context = %truncate_for_log(context, 400),
-            manifest = %truncate_for_log(&manifest, 1200),
-            "planner request prepared"
-        );
-
-        let request = GatewayRequest::new(
-            state.id.clone(),
-            state.tenant_id.clone(),
-            TaskComplexity::Complex,
-            vec![Message::system(system), Message::user(user)],
-        );
-
-        let resp = self.gateway.chat(request).await?;
-        let raw = resp.content.unwrap_or_default();
-        tracing::info!(
-            agent_id = %state.id,
-            response = %truncate_for_log(&raw, 1200),
-            "planner response received"
-        );
-
-        // Strip markdown code fences if model wrapped the JSON
-        let cleaned = clean_json_response(&raw);
-
-        match serde_json::from_str::<Plan>(cleaned) {
-            Ok(mut plan) => {
-                normalize_plan(&mut plan);
-                tracing::info!(
-                    agent_id = %state.id,
-                    steps    = plan.steps.len(),
-                    job_type = job_type.label(),
-                    "plan created"
-                );
-                Ok(plan)
-            }
-            Err(e) => {
-                tracing::warn!(
-                    agent_id = %state.id,
-                    error    = %e,
-                    raw      = %&raw[..raw.len().min(200)],
-                    "planner returned unparseable JSON — using single-step fallback"
-                );
-                Ok(Plan {
-                    goal: state.goal.clone(),
-                    job_type: Some(job_type.label().to_string()),
-                    rationale: String::new(),
-                    steps: vec![PlannedStep {
-                        index: 0,
-                        description: state.goal.clone(),
-                        tool: None,
-                        tool_args: None,
-                        success_criteria: String::new(),
-                        condition: None,
-                    }],
-                })
-            }
-        }
-    }
-
-    async fn revise_plan(&self, plan: &Plan, state: &AgentState, feedback: &str) -> Result<Plan> {
-        let user = PlannerPrompt::user_revise(plan, feedback, state);
-        let job_type =
-            self.load_role_context(state).await.map(|ctx| ctx.job_type).unwrap_or_else(|| JobType::detect(&state.goal));
-        let system = PlannerPrompt::system(&job_type);
-
-        let request = GatewayRequest::new(
-            state.id.clone(),
-            state.tenant_id.clone(),
-            TaskComplexity::Medium,
-            vec![Message::system(system), Message::user(user)],
-        );
-
-        let resp = self.gateway.chat(request).await?;
-        let raw = resp.content.unwrap_or_default();
-        let cleaned = clean_json_response(&raw);
-
-        match serde_json::from_str::<Plan>(cleaned) {
-            Ok(mut revised) => {
-                normalize_plan(&mut revised);
-                tracing::info!(
-                    agent_id  = %state.id,
-                    new_steps = revised.steps.len(),
-                    "plan revised"
-                );
-                Ok(revised)
-            }
-            Err(_) => {
-                tracing::warn!(agent_id = %state.id, "plan revision failed to parse, keeping original");
-                Ok(plan.clone())
-            }
-        }
-    }
-
-    async fn research_for_workflow(
-        &self,
-        state: &AgentState,
-        context: &str,
-        available_tools: &[&str],
-    ) -> Result<AdaptiveResearchMemo> {
-        let role_context = self.load_role_context(state).await;
-        let job_type =
-            role_context.as_ref().map(|ctx| ctx.job_type.clone()).unwrap_or_else(|| JobType::detect(&state.goal));
-        let conv_history = self.conversation_history(state).await;
-        let manifest = crate::tools::selector::tool_manifest_from_names(available_tools);
-
-        let system = format!(
-            "{}\n\nYou are in adaptive planning research mode. Study the task and return a JSON synthesis memo only. \
-Do not produce executable steps yet. The memo must capture durable findings, assumptions, risks, and workflow hints \
-that can later be compiled into a deterministic workflow outline.",
-            PlannerPrompt::system(&job_type)
-        );
-        let user = format!(
-            "Goal:\n{}\n\nResearch context:\n{}\n\nAvailable tools:\n{}\n\nConversation history:\n{}\n\nRole context:\n{}\n\n\
-Return strict JSON with this shape:\n{{\n  \"summary\": \"...\",\n  \"findings\": [\"...\"],\n  \"assumptions\": [\"...\"],\n  \"risks\": [\"...\"],\n  \"workflow_hints\": [\"...\"]\n}}\n\
-Focus on what must be true for a deterministic workflow to succeed. Keep findings concrete and implementation-facing.",
-            state.goal,
-            context,
-            manifest,
-            if conv_history.trim().is_empty() { "none" } else { &conv_history },
-            role_context.as_ref().map(|ctx| ctx.prompt_context.as_str()).unwrap_or("none"),
-        );
-
-        tracing::debug!(agent_id = %state.id, job_type = job_type.label(), "creating adaptive research memo");
-        tracing::info!(
-            agent_id = %state.id,
-            goal = %state.goal,
-            job_type = job_type.label(),
-            context = %truncate_for_log(context, 500),
-            "adaptive research request prepared"
-        );
-
-        let request = GatewayRequest::new(
-            state.id.clone(),
-            state.tenant_id.clone(),
-            TaskComplexity::Medium,
-            vec![Message::system(system), Message::user(user)],
-        );
-
-        let resp = self.gateway.chat(request).await?;
-        let raw = resp.content.unwrap_or_default();
-        tracing::info!(
-            agent_id = %state.id,
-            response = %truncate_for_log(&raw, 1200),
-            "adaptive research memo received"
-        );
-
-        match serde_json::from_str::<AdaptiveResearchMemo>(clean_json_response(&raw)) {
-            Ok(memo) => Ok(memo),
-            Err(error) => {
-                tracing::warn!(
-                    agent_id = %state.id,
-                    error = %error,
-                    raw = %truncate_for_log(&raw, 200),
-                    "adaptive research memo failed to parse, using fallback synthesis"
-                );
-                Ok(AdaptiveResearchMemo {
-                    summary: format!("Adaptive planning memo for goal: {}", state.goal),
-                    findings: vec![context.lines().next().unwrap_or_default().trim().to_string()]
-                        .into_iter()
-                        .filter(|value| !value.is_empty())
-                        .collect(),
-                    assumptions: vec![],
-                    risks: vec!["Research memo fallback was generated from unstructured model output.".into()],
-                    workflow_hints: vec!["Compile the memo into bounded deterministic workflow steps before execution.".into()],
-                })
-            }
-        }
-    }
-}
-
-fn normalize_plan(plan: &mut Plan) {
-    for step in &mut plan.steps {
-        let normalized = step.tool.as_deref().map(str::trim).map(str::to_lowercase);
-        if matches!(normalized.as_deref(), Some("") | Some("null") | Some("none")) {
-            step.tool = None;
-        }
-        if let Some(condition) = step.condition.as_mut() {
-            condition.reference = condition.reference.trim().to_string();
-            condition.operator = condition.operator.trim().to_ascii_lowercase();
-            if condition.reference.is_empty() || condition.operator.is_empty() {
-                step.condition = None;
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
-
-    use async_trait::async_trait;
-
     use super::*;
-    use crate::providers::ChatResponse;
-
-    struct MockGateway {
-        responses: Mutex<Vec<ChatResponse>>,
-    }
-
-    impl MockGateway {
-        fn from_contents(contents: Vec<&str>) -> Self {
-            Self {
-                responses: Mutex::new(
-                    contents
-                        .into_iter()
-                        .map(|content| ChatResponse {
-                            content: Some(content.to_string()),
-                            tool_calls: vec![],
-                            input_tokens: 0,
-                            output_tokens: 0,
-                        })
-                        .collect(),
-                ),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl LlmGateway for MockGateway {
-        async fn chat(&self, _request: GatewayRequest) -> Result<ChatResponse> {
-            let mut responses = self.responses.lock().expect("responses lock should succeed");
-            Ok(responses.remove(0))
-        }
-    }
-
-    fn make_state() -> AgentState {
-        AgentState::new("agent-1".into(), "tenant-1".into(), "fix CI pipeline".into(), "/tmp/ws".into())
-    }
 
     fn make_role() -> crate::agent::definition::AgentRole {
         let mut role = crate::agent::definition::AgentRole::new(
@@ -573,73 +276,9 @@ mod tests {
             args_template: Some(serde_json::json!({ "path": "{input.file_path}" })),
             success_criteria: "source file inspected".into(),
             condition: None,
+            ..Default::default()
         }];
         role
-    }
-
-    #[tokio::test]
-    async fn test_create_plan_parses_valid_json_response() {
-        let planner = LlmPlanner::new(Arc::new(MockGateway::from_contents(vec![
-            r#"{
-            "goal":"fix CI pipeline",
-            "job_type":"software_engineer",
-            "steps":[
-                {"index":0,"description":"Inspect failing workflow","tool":"file_read","tool_args":{"path":".github/workflows/ci.yml"},"success_criteria":"workflow reviewed"}
-            ],
-            "rationale":"understand the failure before changing code"
-        }"#,
-        ])));
-
-        let plan = planner
-            .create_plan(&make_state(), "previous failure in CI", &["file_read", "shell"])
-            .await
-            .expect("plan should parse");
-
-        assert_eq!(plan.goal, "fix CI pipeline");
-        assert_eq!(plan.job_type.as_deref(), Some("software_engineer"));
-        assert_eq!(plan.steps.len(), 1);
-        assert_eq!(plan.steps[0].tool.as_deref(), Some("file_read"));
-    }
-
-    #[tokio::test]
-    async fn test_create_plan_falls_back_to_single_step_when_json_is_invalid() {
-        let planner = LlmPlanner::new(Arc::new(MockGateway::from_contents(vec!["not valid json"])));
-        let state = make_state();
-
-        let plan = planner.create_plan(&state, "", &["shell"]).await.expect("fallback plan should be returned");
-
-        assert_eq!(plan.goal, state.goal);
-        assert_eq!(plan.steps.len(), 1);
-        assert_eq!(plan.steps[0].description, state.goal);
-        assert!(plan.steps[0].tool.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_revise_plan_returns_original_when_revision_json_is_invalid() {
-        let planner = LlmPlanner::new(Arc::new(MockGateway::from_contents(vec!["{bad json"])));
-        let state = make_state();
-        let original = Plan {
-            goal: state.goal.clone(),
-            job_type: Some("software_engineer".into()),
-            steps: vec![PlannedStep {
-                index: 0,
-                description: "Inspect failing workflow".into(),
-                tool: Some("file_read".into()),
-                tool_args: None,
-                success_criteria: "workflow reviewed".into(),
-                condition: None,
-            }],
-            rationale: "inspect first".into(),
-        };
-
-        let revised = planner
-            .revise_plan(&original, &state, "change remaining work")
-            .await
-            .expect("original plan should be retained");
-
-        assert_eq!(revised.goal, original.goal);
-        assert_eq!(revised.steps.len(), original.steps.len());
-        assert_eq!(revised.steps[0].description, original.steps[0].description);
     }
 
     #[test]

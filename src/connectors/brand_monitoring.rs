@@ -1,6 +1,6 @@
 //! Brand Protection & Monitoring connector — website surveillance and change detection.
 //!
-//! Triggers: website content changed, defacement detected, competitor announcement, 
+//! Triggers: website content changed, defacement detected, competitor announcement,
 //!          social mention detected, uptime issue.
 //! Delivers: escalation alerts, incident creation, notification delivery.
 
@@ -139,12 +139,12 @@ impl Connector for BrandMonitoringConnector {
         // Deliver alert outputs to configured channels
         // This could be: Slack, email, PagerDuty, ticketing system, etc.
         let notification_channels = config.settings.get("notification_channels").and_then(|v| v.as_array()).cloned();
-        
+
         if let Some(channels) = notification_channels {
             for channel in channels {
                 let channel_type = channel.get("type").and_then(|v| v.as_str()).unwrap_or("email");
                 let channel_target = channel.get("target").and_then(|v| v.as_str()).unwrap_or("default");
-                
+
                 match channel_type {
                     "slack" => {
                         // Slack webhook delivery
@@ -193,16 +193,14 @@ impl Connector for BrandMonitoringConnector {
     async fn validate_config(&self, config: &ConnectorConfig) -> Result<()> {
         // Validate that monitored URLs are accessible
         let urls = config.settings.get("monitored_urls").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-        
+
         if urls.is_empty() {
             anyhow::bail!("No monitored URLs configured");
         }
 
         // Test connectivity to at least one URL
-        let test_url = urls
-            .first()
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Invalid monitored URL format"))?;
+        let test_url =
+            urls.first().and_then(|v| v.as_str()).ok_or_else(|| anyhow::anyhow!("Invalid monitored URL format"))?;
 
         let resp = self.http.head(test_url).send().await?;
         if !resp.status().is_success() && resp.status().as_u16() != 401 && resp.status().as_u16() != 403 {

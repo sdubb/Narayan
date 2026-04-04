@@ -15,7 +15,7 @@ use chrono::{DateTime, Utc};
 use croner::Cron;
 
 use crate::{
-    agent::{AgentManager, AgentRole},
+    agent::{definition::ExecutionStrategy, AgentManager, AgentRole},
     state::TriggerSource,
     storage::PostgresStore,
 };
@@ -69,6 +69,19 @@ impl ScheduleTicker {
     }
 
     async fn process_role(&self, role: &AgentRole) -> Result<()> {
+        let role = self.store.get_agent_role(&role.tenant_id, &role.id).await?.unwrap_or_else(|| role.clone());
+
+        if !role_ready_for_schedule(&role) {
+            let retry_at = Utc::now() + chrono::Duration::seconds(60);
+            self.store.update_role_next_run_at(&role.id, retry_at).await?;
+            tracing::info!(
+                role_id = %role.id,
+                retry_at = %retry_at,
+                "scheduled role is not ready yet; delaying until its compiled workflow is saved"
+            );
+            return Ok(());
+        }
+
         let cron_str = role.trigger.cron.as_deref().unwrap_or("0 9 * * *");
         let now = Utc::now();
 
@@ -80,7 +93,7 @@ impl ScheduleTicker {
             .manager
             .create_role_run(
                 role.tenant_id.clone(),
-                role,
+                &role,
                 serde_json::json!({ "scheduled_at": now.to_rfc3339() }),
                 TriggerSource::Schedule { cron: cron_str.to_string(), scheduled_at: now },
                 None, // conversation_id
@@ -99,6 +112,11 @@ impl ScheduleTicker {
         );
         Ok(())
     }
+}
+
+fn role_ready_for_schedule(role: &AgentRole) -> bool {
+    matches!(role.execution_guidelines.execution_strategy, ExecutionStrategy::CoordinatorShell)
+        || role.execution_guidelines.compiled_workflow.is_some()
 }
 
 /// Compute the next occurrence of a cron expression after `after`.
@@ -127,6 +145,7 @@ fn compute_next_run(cron_str: &str, after: DateTime<Utc>, timezone: Option<&str>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::definition::{AgentRole, ExecutionStrategy};
     use chrono::TimeZone;
 
     #[test]
@@ -159,6 +178,61 @@ mod tests {
         let now = Utc::now();
         assert!(compute_next_run("not a cron", now, None).is_err());
     }
+
+    #[test]
+    fn test_role_ready_for_schedule_requires_compiled_workflow() {
+        let mut role = AgentRole::new("role-1".into(), "agent-1".into(), "tenant-1".into(), "Primary".into());
+        role.execution_guidelines.execution_strategy = ExecutionStrategy::DeterministicWorkflow;
+
+        assert!(!role_ready_for_schedule(&role));
+
+        role.execution_guidelines.workflow_outline.push(crate::agent::definition::WorkflowStep {
+            description: "inspect database".into(),
+            tool: None,
+            args_template: None,
+            success_criteria: "outline exists".into(),
+            condition: None,
+            foreach: None,
+            depends_on: vec![],
+            ..Default::default()
+        });
+
+        assert!(!role_ready_for_schedule(&role));
+    }
+
+    #[test]
+    fn test_role_ready_for_schedule_accepts_compiled_workflow() {
+        let mut role = AgentRole::new("role-1".into(), "agent-1".into(), "tenant-1".into(), "Primary".into());
+        role.execution_guidelines.execution_strategy = ExecutionStrategy::DeterministicWorkflow;
+        role.execution_guidelines.compiled_workflow = Some(crate::agent::workflow_compiler::CompiledWorkflow {
+            workflow_id: "wf_test".into(),
+            version: "v2".into(),
+            workflow_version: "v2".into(),
+            parent_workflow_version: None,
+            recompile_reason: None,
+            dsl_version: "v1".into(),
+            binding_version: "v1".into(),
+            runtime_version: "v1".into(),
+            tool_registry_version: "registry_test".into(),
+            entry_step: "step_1".into(),
+            execution: crate::agent::workflow_compiler::ExecutionMode::Sequential,
+            steps: vec![],
+            state_schema: serde_json::json!({}),
+            resources: std::collections::BTreeMap::new(),
+            metadata: serde_json::json!({}),
+            tool_capabilities: std::collections::BTreeMap::new(),
+            binding_rules: vec![],
+            variant_policy: None,
+            execution_constraints: crate::agent::workflow_compiler::ExecutionConstraints::default(),
+            data_strategy: crate::agent::workflow_compiler::DataStrategy::default(),
+            determinism: crate::agent::workflow_compiler::DeterminismConfig::default(),
+            scheduler: crate::agent::workflow_compiler::SchedulerConfig::default(),
+            recompile_policy: crate::agent::workflow_compiler::RecompilePolicy::default(),
+            expression_functions: std::collections::BTreeMap::new(),
+            permissions: std::collections::BTreeMap::new(),
+            execution_snapshot: None,
+        });
+
+        assert!(role_ready_for_schedule(&role));
+    }
 }
-
-

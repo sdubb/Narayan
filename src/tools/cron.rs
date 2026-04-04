@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 
-use crate::tools::{ParameterSchema, Tool, ToolResult};
+use crate::tools::{ParameterSchema, Tool, ToolResult, schema_string, schema_boolean};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CronJob {
@@ -40,6 +40,21 @@ impl Tool for CronAddTool {
             ParameterSchema::optional("id", "string", "Optional job ID (auto-generated if omitted)."),
         ]
     }
+
+
+    fn output_schema(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
+            "type": "object",
+            "required": ["added", "id", "schedule"],
+            "properties": {
+                "added": schema_boolean(),
+                "id": schema_string(),
+                "schedule": schema_string(),
+            },
+            "additionalProperties": true,
+        }))
+    }
+
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         let schedule = match args["schedule"].as_str() {
             Some(s) => s,

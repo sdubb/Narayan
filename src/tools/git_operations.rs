@@ -3,7 +3,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tokio::process::Command;
 
-use crate::tools::{ParameterSchema, Tool, ToolResult};
+use crate::tools::{ParameterSchema, Tool, ToolResult, schema_string, schema_integer};
 
 pub struct GitOperationsTool;
 
@@ -31,6 +31,20 @@ impl Tool for GitOperationsTool {
             ParameterSchema::optional("args", "string", "Extra args passed directly to git."),
         ]
     }
+
+    fn output_schema(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
+            "type": "object",
+            "required": ["stdout", "stderr", "exit_code"],
+            "properties": {
+                "stdout": schema_string(),
+                "stderr": schema_string(),
+                "exit_code": schema_integer(),
+            },
+            "additionalProperties": true,
+        }))
+    }
+
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         let op = match args["operation"].as_str() {
             Some(o) => o,

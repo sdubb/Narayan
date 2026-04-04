@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use crate::tools::{ParameterSchema, Tool, ToolResult};
+use crate::tools::{ParameterSchema, Tool, ToolResult, schema_string, schema_boolean};
 pub struct ProxyConfigTool;
 #[async_trait]
 impl Tool for ProxyConfigTool {
@@ -17,6 +17,35 @@ impl Tool for ProxyConfigTool {
             ParameterSchema::optional("no_proxy", "string", "Comma-separated list of hosts to bypass proxy."),
         ]
     }
+
+    fn output_schema(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
+            "oneOf": [
+                {
+                    "type": "object",
+                    "required": ["configured"],
+                    "properties": { "configured": schema_boolean() },
+                    "additionalProperties": true,
+                },
+                {
+                    "type": "object",
+                    "required": ["cleared"],
+                    "properties": { "cleared": schema_boolean() },
+                    "additionalProperties": true,
+                },
+                {
+                    "type": "object",
+                    "required": ["http_proxy", "no_proxy"],
+                    "properties": {
+                        "http_proxy": serde_json::json!({ "type": ["string", "null"] }),
+                        "no_proxy": serde_json::json!({ "type": ["string", "null"] }),
+                    },
+                    "additionalProperties": true,
+                }
+            ]
+        }))
+    }
+
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         let action = match args["action"].as_str() {
             Some(a) => a,

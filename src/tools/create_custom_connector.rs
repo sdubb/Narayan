@@ -16,7 +16,7 @@
 
 use async_trait::async_trait;
 
-use crate::tools::{ParameterSchema, Tool, ToolResult};
+use crate::tools::{ParameterSchema, Tool, ToolResult, schema_string};
 
 pub struct CreateCustomConnectorTool;
 
@@ -109,6 +109,37 @@ impl Tool for CreateCustomConnectorTool {
     }
 
     /// Fallback — executor intercepts in production, parses docs, saves to DB.
+
+    fn output_schema(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
+            "oneOf": [
+                {
+                    "type": "object",
+                    "required": ["status", "name", "category", "message"],
+                    "properties": {
+                        "status": serde_json::json!({ "type": "string", "const": "created" }),
+                        "name": schema_string(),
+                        "category": schema_string(),
+                        "message": schema_string(),
+                    },
+                    "additionalProperties": true,
+                },
+                {
+                    "type": "object",
+                    "required": ["status", "name", "category", "creation_path", "note"],
+                    "properties": {
+                        "status": serde_json::json!({ "type": "string", "const": "pending" }),
+                        "name": schema_string(),
+                        "category": schema_string(),
+                        "creation_path": schema_string(),
+                        "note": schema_string(),
+                    },
+                    "additionalProperties": true,
+                }
+            ]
+        }))
+    }
+
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         let name = args["name"].as_str().unwrap_or("");
         let category = args["category"].as_str().unwrap_or("");

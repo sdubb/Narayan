@@ -133,7 +133,9 @@ pub async fn continue_worker_from_parent(
     store.upsert_agent(&child).await?;
 
     for message_id in &request.ack_message_ids {
-        let _ = store.mark_agent_message_delivered_for_recipient(&request.tenant_id, &request.parent_agent_id, message_id).await;
+        let _ = store
+            .mark_agent_message_delivered_for_recipient(&request.tenant_id, &request.parent_agent_id, message_id)
+            .await;
     }
 
     swarm.push(child.id.clone()).await?;
@@ -208,9 +210,17 @@ impl Tool for MessageInboxTool {
             ParameterSchema::optional("task_id", "string", "Associated session task ID."),
             ParameterSchema::optional("worker_type", "string", "Worker type for continue_worker."),
             ParameterSchema::optional("write_scope", "array", "Write scope ownership for continue_worker."),
-            ParameterSchema::optional("ack_message_ids", "array", "Parent inbox message IDs to mark delivered during continue_worker."),
+            ParameterSchema::optional(
+                "ack_message_ids",
+                "array",
+                "Parent inbox message IDs to mark delivered during continue_worker.",
+            ),
             ParameterSchema::optional("metadata", "object", "Structured metadata for continue_worker."),
         ]
+    }
+
+    fn output_schema(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({ "type": "object", "additionalProperties": true }))
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
@@ -234,7 +244,12 @@ impl Tool for MessageInboxTool {
                 let messages = match direction.as_str() {
                     "inbox" => {
                         self.store
-                            .list_agent_inbox_messages(&tenant_id, &agent_id, optional_bool(&args, "undelivered_only"), limit)
+                            .list_agent_inbox_messages(
+                                &tenant_id,
+                                &agent_id,
+                                optional_bool(&args, "undelivered_only"),
+                                limit,
+                            )
                             .await?
                     }
                     "sent" => self.store.list_agent_sent_messages(&tenant_id, &agent_id, limit).await?,
@@ -254,7 +269,8 @@ impl Tool for MessageInboxTool {
                     Ok(value) => value,
                     Err(message) => return Ok(ToolResult::err(message)),
                 };
-                let Some(message) = self.store.get_agent_message_for_agent(&tenant_id, &agent_id, &message_id).await? else {
+                let Some(message) = self.store.get_agent_message_for_agent(&tenant_id, &agent_id, &message_id).await?
+                else {
                     return Ok(ToolResult::err(format!("message '{}' not found", message_id)));
                 };
                 Ok(ToolResult::ok(serde_json::json!({
@@ -311,4 +327,3 @@ impl Tool for MessageInboxTool {
         }
     }
 }
-

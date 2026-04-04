@@ -516,12 +516,14 @@ mod tests {
             job_type: Some("software_engineer".into()),
             steps: (0..n)
                 .map(|i| crate::agent::planner::PlannedStep {
+                    foreach: None,
                     index: i,
                     description: format!("step {i}"),
                     tool: Some("shell".into()),
                     tool_args: None,
                     success_criteria: "done".into(),
                     condition: None,
+                    depends_on: vec![],
                 })
                 .collect(),
             rationale: "test".into(),
@@ -532,6 +534,7 @@ mod tests {
         StepResult {
             step_index: 0,
             success: true,
+            skipped: false,
             output: "STEP COMPLETE".into(),
             final_answer_candidate: Some("STEP COMPLETE".into()),
             tool_results: vec![ToolResult::ok(serde_json::json!({"ok": true}))],
@@ -545,6 +548,7 @@ mod tests {
         StepResult {
             step_index: 0,
             success: false,
+            skipped: false,
             output: "STEP FAILED: timeout".into(),
             final_answer_candidate: None,
             tool_results: vec![ToolResult::err("timeout")],

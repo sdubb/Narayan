@@ -5,10 +5,7 @@
 use crate::{
     compliance::sla::{EscalationAction, EscalationRule, SlaPolicy, SlaPriority},
     connectors::{
-        freshdesk::FreshdeskConnector,
-        gorgias::GorgiasConnector,
-        intercom::IntercomConnector,
-        twilio::TwilioConnector,
+        freshdesk::FreshdeskConnector, gorgias::GorgiasConnector, intercom::IntercomConnector, twilio::TwilioConnector,
         zendesk::ZendeskConnector,
     },
     policy::rules::{PolicyAction, PolicyCondition, PolicyRule, PolicyRuleSet},

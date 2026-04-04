@@ -19,16 +19,13 @@ use crate::{
         executor::StepResult,
         planner::Plan,
         preflight::PreflightResult,
-        r#loop::{AgentLoop, StepOutcome},
         prompts::StepHistory,
+        r#loop::{AgentLoop, StepOutcome},
         test_helpers::*,
     },
     events::EventBus,
     knowledge::graph::KnowledgeGraph,
-    memory::{
-        embeddings::StubEmbeddingModel,
-        vector::InMemoryVectorStore,
-    },
+    memory::{embeddings::StubEmbeddingModel, vector::InMemoryVectorStore},
     segments::AgentServices,
     state::{AgentState, AgentStatus},
     tools::default_registry,
@@ -36,13 +33,8 @@ use crate::{
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
-fn make_agent_loop(
-    planner: MockPlanner,
-    executor: MockExecutor,
-    evaluator: MockEvaluator,
-) -> AgentLoop {
+fn make_agent_loop(executor: MockExecutor, evaluator: MockEvaluator) -> AgentLoop {
     AgentLoop::new(
-        Arc::new(planner),
         Arc::new(executor),
         Arc::new(evaluator),
         Arc::new(MockReflector::new()),
@@ -92,6 +84,7 @@ fn make_step_result(step_index: usize, output: &str) -> StepResult {
     StepResult {
         step_index,
         success: true,
+        skipped: false,
         output: output.into(),
         final_answer_candidate: Some(output.into()),
         tool_results: Vec::new(),
@@ -107,21 +100,14 @@ fn make_step_result(step_index: usize, output: &str) -> StepResult {
 /// → Step Execution → Completion, ensuring all subsystems compose correctly.
 #[tokio::test]
 async fn test_full_lifecycle_plan_to_completion() -> Result<()> {
-    let planner = MockPlanner::new();
     let executor = MockExecutor::from_responses(vec![
         make_step_result(0, "Read input.txt: hello world"),
         make_step_result(1, "Wrote summary to output.txt"),
     ]);
-    let evaluator = MockEvaluator::from_responses(vec![
-        EvalVerdict::Continue,
-        EvalVerdict::Continue,
-    ]);
+    let evaluator = MockEvaluator::from_responses(vec![EvalVerdict::Continue, EvalVerdict::Continue]);
 
-    let agent_loop = make_agent_loop(planner, executor, evaluator);
-    let mut state = make_state_with_workflow(
-        "Read input and write summary",
-        simple_workflow_steps(),
-    );
+    let agent_loop = make_agent_loop(executor, evaluator);
+    let mut state = make_state_with_workflow("Read input and write summary", simple_workflow_steps());
     let mut plan: Option<Plan> = None;
     let mut history = StepHistory::new();
 
@@ -131,21 +117,14 @@ async fn test_full_lifecycle_plan_to_completion() -> Result<()> {
         StepOutcome::Continue { .. } => {}
         other => panic!("expected Continue after preflight, got {:?}", other),
     }
-    assert!(
-        state.started_at.is_some(),
-        "started_at should be stamped after preflight"
-    );
+    assert!(state.started_at.is_some(), "started_at should be stamped after preflight");
 
     // Step 2: Planning + first step execution
     // The loop should pick up the workflow_outline and build a plan
     let outcome = agent_loop.run_step(&mut state, &mut plan, &mut history).await?;
     assert!(plan.is_some(), "plan should be created from workflow_outline");
     let the_plan = plan.as_ref().unwrap();
-    assert_eq!(
-        the_plan.steps.len(),
-        2,
-        "plan should have 2 steps from workflow"
-    );
+    assert_eq!(the_plan.steps.len(), 2, "plan should have 2 steps from workflow");
 
     // The first run_step after planning should execute step 0
     match outcome {
@@ -164,11 +143,7 @@ async fn test_full_lifecycle_plan_to_completion() -> Result<()> {
                 StepOutcome::Continue { .. } => {
                     // One more for evaluation to trigger completion
                     let outcome = agent_loop.run_step(&mut state, &mut plan, &mut history).await?;
-                    assert!(
-                        matches!(outcome, StepOutcome::Complete),
-                        "expected Complete, got {:?}",
-                        outcome
-                    );
+                    assert!(matches!(outcome, StepOutcome::Complete), "expected Complete, got {:?}", outcome);
                 }
                 other => panic!("expected Complete or Continue, got {:?}", other),
             }
@@ -181,13 +156,9 @@ async fn test_full_lifecycle_plan_to_completion() -> Result<()> {
     assert_eq!(state.status, AgentStatus::Completed);
 
     // Step outputs should be persisted
-    let step_outputs = state.metadata.get("step_outputs")
-        .and_then(|v| v.as_array())
-        .expect("step_outputs should be in metadata");
-    assert!(
-        !step_outputs.is_empty(),
-        "step_outputs should have entries"
-    );
+    let step_outputs =
+        state.metadata.get("step_outputs").and_then(|v| v.as_array()).expect("step_outputs should be in metadata");
+    assert!(!step_outputs.is_empty(), "step_outputs should have entries");
 
     Ok(())
 }
@@ -198,7 +169,6 @@ async fn test_full_lifecycle_plan_to_completion() -> Result<()> {
 /// is present — enforcing the deterministic-execution invariant.
 #[tokio::test]
 async fn test_no_workflow_outline_fails_deterministically() -> Result<()> {
-    let planner = MockPlanner::new();
     let executor = MockExecutor::new();
     let evaluator = MockEvaluator::new();
 
@@ -229,17 +199,10 @@ async fn test_no_workflow_outline_fails_deterministically() -> Result<()> {
                 "failure reason should mention deterministic requirement, got: {reason}"
             );
         }
-        other => panic!(
-            "expected Failed for missing workflow_outline, got {:?}",
-            other
-        ),
+        other => panic!("expected Failed for missing workflow_outline, got {:?}", other),
     }
 
-    assert_eq!(
-        state.status,
-        AgentStatus::Failed,
-        "state should be Failed without workflow_outline"
-    );
+    assert_eq!(state.status, AgentStatus::Failed, "state should be Failed without workflow_outline");
 
     Ok(())
 }
@@ -250,17 +213,11 @@ async fn test_no_workflow_outline_fails_deterministically() -> Result<()> {
 /// message with the correct result contract (status, findings, confidence).
 #[tokio::test]
 async fn test_child_completion_notifies_parent() -> Result<()> {
-    let planner = MockPlanner::new();
-    let executor = MockExecutor::from_responses(vec![
-        make_step_result(0, "Research completed: found 3 key findings"),
-    ]);
-    let evaluator = MockEvaluator::from_responses(vec![
-        EvalVerdict::Continue,
-    ]);
+    let executor = MockExecutor::from_responses(vec![make_step_result(0, "Research completed: found 3 key findings")]);
+    let evaluator = MockEvaluator::from_responses(vec![EvalVerdict::Continue]);
 
     let event_bus = Arc::new(EventBus::new());
     let agent_loop = AgentLoop::new(
-        Arc::new(planner),
         Arc::new(executor),
         Arc::new(evaluator),
         Arc::new(MockReflector::new()),
@@ -306,7 +263,7 @@ async fn test_child_completion_notifies_parent() -> Result<()> {
     let mut history = StepHistory::new();
 
     // Subscribe to parent's events BEFORE the child completes
-    let mut parent_rx = event_bus.subscribe(&parent_id);
+    let _parent_rx = event_bus.subscribe(&parent_id);
 
     // Run through preflight
     let outcome = agent_loop.run_step(&mut state, &mut plan, &mut history).await?;
@@ -325,31 +282,16 @@ async fn test_child_completion_notifies_parent() -> Result<()> {
         steps_run += 1;
     }
 
-    assert_eq!(
-        state.status,
-        AgentStatus::Completed,
-        "child should reach Completed"
-    );
+    assert_eq!(state.status, AgentStatus::Completed, "child should reach Completed");
 
     // Verify child is flagged as a child
     assert!(state.is_child(), "state.is_child() should be true");
-    assert_eq!(
-        state.parent_agent_id.as_deref(),
-        Some(parent_id.as_str()),
-        "parent_agent_id should still be set"
-    );
+    assert_eq!(state.parent_agent_id.as_deref(), Some(parent_id.as_str()), "parent_agent_id should still be set");
 
     // Check that the delegation context was preserved
-    let delegation_ctx = state.metadata.get("delegation_context")
-        .expect("delegation_context should exist");
-    assert_eq!(
-        delegation_ctx["worker_type"], "research",
-        "worker_type should be preserved"
-    );
-    assert_eq!(
-        delegation_ctx["task_id"], "task-pricing-research",
-        "task_id should be preserved"
-    );
+    let delegation_ctx = state.metadata.get("delegation_context").expect("delegation_context should exist");
+    assert_eq!(delegation_ctx["worker_type"], "research", "worker_type should be preserved");
+    assert_eq!(delegation_ctx["task_id"], "task-pricing-research", "task_id should be preserved");
 
     Ok(())
 }
@@ -360,17 +302,11 @@ async fn test_child_completion_notifies_parent() -> Result<()> {
 /// during a normal agent lifecycle (preflight → plan → step → complete).
 #[tokio::test]
 async fn test_event_bus_receives_lifecycle_events() -> Result<()> {
-    let planner = MockPlanner::new();
-    let executor = MockExecutor::from_responses(vec![
-        make_step_result(0, "Step completed successfully"),
-    ]);
-    let evaluator = MockEvaluator::from_responses(vec![
-        EvalVerdict::Continue,
-    ]);
+    let executor = MockExecutor::from_responses(vec![make_step_result(0, "Step completed successfully")]);
+    let evaluator = MockEvaluator::from_responses(vec![EvalVerdict::Continue]);
 
     let event_bus = Arc::new(EventBus::new());
     let agent_loop = AgentLoop::new(
-        Arc::new(planner),
         Arc::new(executor),
         Arc::new(evaluator),
         Arc::new(MockReflector::new()),
@@ -414,10 +350,7 @@ async fn test_event_bus_receives_lifecycle_events() -> Result<()> {
     }
 
     // Should have at least preflight and planning events
-    assert!(
-        !events.is_empty(),
-        "event bus should have received at least one event during lifecycle"
-    );
+    assert!(!events.is_empty(), "event bus should have received at least one event during lifecycle");
 
     Ok(())
 }

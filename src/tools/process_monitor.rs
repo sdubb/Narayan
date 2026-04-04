@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 
-use crate::tools::{ParameterSchema, Tool, ToolResult};
+use crate::tools::{ParameterSchema, Tool, ToolResult, schema_string, schema_boolean, schema_integer, schema_array, schema_number};
 
 pub struct ProcessMonitorTool;
 
@@ -23,6 +23,102 @@ impl Tool for ProcessMonitorTool {
             ParameterSchema::optional("top_n", "integer", "Number of top CPU/mem processes (default: 10)."),
             ParameterSchema::optional("sort_by", "string", "Sort for 'top': cpu | memory (default: cpu)."),
         ]
+    }
+
+    fn output_schema(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
+            "oneOf": [
+                {
+                    "type": "object",
+                    "required": ["cpu_usage_pct", "total_memory_mb", "used_memory_mb", "total_swap_mb", "used_swap_mb", "process_count", "uptime_secs", "os", "kernel"],
+                    "properties": {
+                        "cpu_usage_pct": schema_number(),
+                        "total_memory_mb": schema_integer(),
+                        "used_memory_mb": schema_integer(),
+                        "total_swap_mb": schema_integer(),
+                        "used_swap_mb": schema_integer(),
+                        "process_count": schema_integer(),
+                        "uptime_secs": schema_integer(),
+                        "os": serde_json::json!({ "type": ["string", "null"] }),
+                        "kernel": serde_json::json!({ "type": ["string", "null"] }),
+                    },
+                    "additionalProperties": true,
+                },
+                {
+                    "type": "object",
+                    "required": ["processes", "count"],
+                    "properties": {
+                        "processes": schema_array(serde_json::json!({
+                            "type": "object",
+                            "required": ["pid", "name", "cpu_pct", "memory_mb", "status"],
+                            "properties": {
+                                "pid": schema_integer(),
+                                "name": schema_string(),
+                                "cpu_pct": schema_number(),
+                                "memory_mb": schema_integer(),
+                                "status": schema_string(),
+                                "exe": serde_json::json!({ "type": ["string", "null"] }),
+                            },
+                            "additionalProperties": true,
+                        })),
+                        "count": schema_integer(),
+                    },
+                    "additionalProperties": true,
+                },
+                {
+                    "type": "object",
+                    "required": ["query", "processes", "count"],
+                    "properties": {
+                        "query": schema_string(),
+                        "processes": schema_array(serde_json::json!({
+                            "type": "object",
+                            "required": ["pid", "name", "cpu_pct", "memory_mb", "status"],
+                            "properties": {
+                                "pid": schema_integer(),
+                                "name": schema_string(),
+                                "cpu_pct": schema_number(),
+                                "memory_mb": schema_integer(),
+                                "status": schema_string(),
+                                "exe": serde_json::json!({ "type": ["string", "null"] }),
+                            },
+                            "additionalProperties": true,
+                        })),
+                        "count": schema_integer(),
+                    },
+                    "additionalProperties": true,
+                },
+                {
+                    "type": "object",
+                    "required": ["sort_by", "processes"],
+                    "properties": {
+                        "sort_by": schema_string(),
+                        "processes": schema_array(serde_json::json!({
+                            "type": "object",
+                            "required": ["pid", "name", "cpu_pct", "memory_mb", "status"],
+                            "properties": {
+                                "pid": schema_integer(),
+                                "name": schema_string(),
+                                "cpu_pct": schema_number(),
+                                "memory_mb": schema_integer(),
+                                "status": schema_string(),
+                                "exe": serde_json::json!({ "type": ["string", "null"] }),
+                            },
+                            "additionalProperties": true,
+                        })),
+                    },
+                    "additionalProperties": true,
+                },
+                {
+                    "type": "object",
+                    "required": ["pid", "killed"],
+                    "properties": {
+                        "pid": schema_integer(),
+                        "killed": schema_boolean(),
+                    },
+                    "additionalProperties": true,
+                }
+            ]
+        }))
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {

@@ -3,27 +3,33 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { TrendingUp, Clock, DollarSign, Zap, ChevronDown, ChevronUp } from 'lucide-react';
 import { savings as savingsApi } from '../../api';
 
-// ── Number formatters ──────────────────────────────────────────────────────
-function formatHours(h) {
-  if (h < 1)   return `${Math.round(h * 60)} min`;
-  if (h < 100) return `${h.toFixed(1)} hrs`;
-  return `${Math.round(h)} hrs`;
+function safeNumber(value, fallback = 0) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
 }
 
-function formatMoney(usd) {
+function formatHours(value) {
+  const hours = safeNumber(value);
+  if (hours < 1) return `${Math.round(hours * 60)} min`;
+  if (hours < 100) return `${hours.toFixed(1)} hrs`;
+  return `${Math.round(hours)} hrs`;
+}
+
+function formatMoney(value) {
+  const usd = safeNumber(value);
   if (usd >= 1_000_000) return `$${(usd / 1_000_000).toFixed(1)}M`;
-  if (usd >= 1_000)     return `$${(usd / 1_000).toFixed(1)}k`;
+  if (usd >= 1_000) return `$${(usd / 1_000).toFixed(1)}k`;
   return `$${usd.toFixed(0)}`;
 }
 
-function formatRoi(x) {
-  if (x <= 0)    return '—';
-  if (x >= 1000) return `${Math.round(x / 100) * 100}×`;
-  if (x >= 100)  return `${Math.round(x / 10) * 10}×`;
-  return `${Math.round(x)}×`;
+function formatRoi(value) {
+  const roi = safeNumber(value);
+  if (roi <= 0) return '—';
+  if (roi >= 1000) return `${Math.round(roi / 100) * 100}x`;
+  if (roi >= 100) return `${Math.round(roi / 10) * 10}x`;
+  return `${Math.round(roi)}x`;
 }
 
-// ── Stat tile ──────────────────────────────────────────────────────────────
 function Stat({ icon: Icon, label, value, sub, color = 'text-tx-1', delay = 0 }) {
   return (
     <motion.div
@@ -44,12 +50,15 @@ function Stat({ icon: Icon, label, value, sub, color = 'text-tx-1', delay = 0 })
   );
 }
 
-// ── Role breakdown row ─────────────────────────────────────────────────────
 function RoleRow({ role, maxHours }) {
-  const pct = maxHours > 0 ? (role.human_hours_saved / maxHours) * 100 : 0;
+  const hoursSaved = safeNumber(role?.human_hours_saved);
+  const costSaved = safeNumber(role?.human_cost_saved_usd);
+  const runs = safeNumber(role?.runs);
+  const pct = maxHours > 0 ? (hoursSaved / maxHours) * 100 : 0;
+
   return (
     <div className="flex items-center gap-3 py-1.5">
-      <p className="text-[12px] text-tx-2 truncate w-40 shrink-0">{role.role_name}</p>
+      <p className="text-[12px] text-tx-2 truncate w-40 shrink-0">{role?.role_name || 'Role'}</p>
       <div className="flex-1 h-1.5 rounded-full bg-bg-active overflow-hidden">
         <motion.div
           className="h-full rounded-full bg-accent/60"
@@ -58,37 +67,45 @@ function RoleRow({ role, maxHours }) {
           transition={{ duration: 0.4, ease: 'easeOut' }}
         />
       </div>
-      <p className="text-[11px] text-tx-3 w-16 text-right shrink-0">
-        {formatHours(role.human_hours_saved)}
-      </p>
-      <p className="text-[11px] text-tx-4 w-16 text-right shrink-0">
-        {formatMoney(role.human_cost_saved_usd)} saved
-      </p>
+      <p className="text-[11px] text-tx-3 w-16 text-right shrink-0">{formatHours(hoursSaved)}</p>
+      <p className="text-[11px] text-tx-4 w-16 text-right shrink-0">{formatMoney(costSaved)} saved</p>
       <p className="text-[10px] text-tx-5 w-10 text-right shrink-0">
-        {role.runs} run{role.runs !== 1 ? 's' : ''}
+        {runs} run{runs !== 1 ? 's' : ''}
       </p>
     </div>
   );
 }
 
-// ── Main component ─────────────────────────────────────────────────────────
 export default function SavingsCard({ className = '' }) {
-  const [data,     setData]     = useState(null);
-  const [loading,  setLoading]  = useState(true);
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
   const [expanded, setExpanded] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
     savingsApi.getSummary()
-      .then(d => { if (!cancelled) { setData(d); setLoading(false); } })
-      .catch(() => { if (!cancelled) setLoading(false); });
+      .then(d => {
+        if (!cancelled) {
+          setData(d || null);
+          setLoading(false);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setLoading(false);
+      });
     return () => { cancelled = true; };
   }, []);
 
-  // Don't render if no data or nothing saved yet
-  if (loading || !data || data.total_runs === 0) return null;
+  const totalRuns = safeNumber(data?.total_runs);
+  const totalHumanHours = safeNumber(data?.total_human_hours);
+  const totalHumanCostUsd = safeNumber(data?.total_human_cost_usd);
+  const totalAiCostUsd = safeNumber(data?.total_ai_cost_usd);
+  const roiMultiple = safeNumber(data?.roi_multiple);
+  const byRole = Array.isArray(data?.by_role) ? data.by_role : [];
 
-  const maxHours = Math.max(...(data.by_role?.map(r => r.human_hours_saved) ?? [1]), 1);
+  if (loading || !data || totalRuns === 0) return null;
+
+  const maxHours = Math.max(...byRole.map(role => safeNumber(role?.human_hours_saved)), 1);
 
   return (
     <motion.div
@@ -97,29 +114,28 @@ export default function SavingsCard({ className = '' }) {
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.25 }}
     >
-      {/* Header bar */}
       <div className="px-5 py-4 border-b border-border flex items-center gap-2">
         <div className="size-6 rounded-lg bg-ok-soft border border-ok/20 flex items-center justify-center">
           <TrendingUp size={12} className="text-ok" />
         </div>
         <p className="text-[13px] font-semibold text-tx-1">Work saved by Narayan</p>
-        <p className="ml-auto text-[11px] text-tx-4">{data.total_runs} completed run{data.total_runs !== 1 ? 's' : ''}</p>
+        <p className="ml-auto text-[11px] text-tx-4">
+          {totalRuns} completed run{totalRuns !== 1 ? 's' : ''}
+        </p>
       </div>
 
-      {/* Main stats */}
       <div className="px-5 py-4 grid grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-4">
         <Stat
           icon={Clock}
           label="Human hours saved"
-          value={formatHours(data.total_human_hours)}
-          sub={`≈ ${(data.total_human_hours / 8).toFixed(1)} work days`}
+          value={formatHours(totalHumanHours)}
+          sub={`~ ${(totalHumanHours / 8).toFixed(1)} work days`}
           color="text-accent"
-          delay={0}
         />
         <Stat
           icon={DollarSign}
           label="Equivalent staff cost"
-          value={formatMoney(data.total_human_cost_usd)}
+          value={formatMoney(totalHumanCostUsd)}
           sub="at market rates"
           color="text-ok"
           delay={0.05}
@@ -127,21 +143,20 @@ export default function SavingsCard({ className = '' }) {
         <Stat
           icon={Zap}
           label="ROI multiple"
-          value={formatRoi(data.roi_multiple)}
-          sub={`$${data.total_ai_cost_usd.toFixed(2)} AI cost`}
+          value={formatRoi(roiMultiple)}
+          sub={`$${totalAiCostUsd.toFixed(2)} AI cost`}
           color="text-warn"
           delay={0.1}
         />
         <Stat
           icon={TrendingUp}
           label="Avg per run"
-          value={formatHours(data.total_human_hours / data.total_runs)}
-          sub={`${formatMoney(data.total_human_cost_usd / data.total_runs)} saved / run`}
+          value={formatHours(totalHumanHours / Math.max(totalRuns, 1))}
+          sub={`${formatMoney(totalHumanCostUsd / Math.max(totalRuns, 1))} saved / run`}
           delay={0.15}
         />
       </div>
 
-      {/* ROI bar */}
       <div className="px-5 pb-3">
         <div className="flex items-center gap-2 text-[11px] text-tx-4 mb-1.5">
           <span>AI cost</span>
@@ -149,29 +164,25 @@ export default function SavingsCard({ className = '' }) {
           <span>Human equivalent</span>
         </div>
         <div className="flex h-2 rounded-full overflow-hidden gap-px">
-          {/* AI cost portion — tiny sliver */}
           <div
             className="bg-tx-4/40 shrink-0"
             style={{
-              width: data.roi_multiple > 0
-                ? `${Math.max(2, 100 / (data.roi_multiple + 1))}%`
-                : '50%'
+              width: roiMultiple > 0 ? `${Math.max(2, 100 / (roiMultiple + 1))}%` : '50%',
             }}
           />
           <div className="flex-1 bg-ok/50 rounded-r-full" />
         </div>
         <p className="text-[10px] text-tx-5 mt-1">
-          Every $1 spent on AI replaced {formatRoi(data.roi_multiple)} in staff time
+          Every $1 spent on AI replaced {formatRoi(roiMultiple)} in staff time
         </p>
       </div>
 
-      {/* Role breakdown toggle */}
-      {data.by_role?.length > 0 && (
+      {byRole.length > 0 && (
         <>
           <button
+            type="button"
             onClick={() => setExpanded(e => !e)}
-            className="w-full flex items-center gap-2 px-5 py-2.5 border-t border-border
-                       text-[11px] text-tx-4 hover:text-tx-2 hover:bg-bg-hover transition-colors"
+            className="w-full flex items-center gap-2 px-5 py-2.5 border-t border-border text-[11px] text-tx-4 hover:text-tx-2 hover:bg-bg-hover transition-colors"
           >
             {expanded ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
             {expanded ? 'Hide' : 'Show'} breakdown by role
@@ -194,8 +205,8 @@ export default function SavingsCard({ className = '' }) {
                     <span className="w-16 text-right shrink-0">Saved</span>
                     <span className="w-10 text-right shrink-0">Runs</span>
                   </div>
-                  {data.by_role.map(role => (
-                    <RoleRow key={role.role_id} role={role} maxHours={maxHours} />
+                  {byRole.map(role => (
+                    <RoleRow key={role.role_id || role.role_name} role={role} maxHours={maxHours} />
                   ))}
                 </div>
               </motion.div>

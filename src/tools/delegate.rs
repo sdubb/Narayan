@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::tools::{ParameterSchema, Tool, ToolResult};
+use crate::tools::{ParameterSchema, Tool, ToolResult, schema_string, schema_array};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DelegateArgs {
@@ -100,6 +100,19 @@ impl Tool for DelegateTool {
             ),
         ]
     }
+
+    fn output_schema(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
+            "type": "object",
+            "required": ["child_agent_ids", "message"],
+            "properties": {
+                "child_agent_ids": schema_array(schema_string()),
+                "message": schema_string(),
+            },
+            "additionalProperties": true,
+        }))
+    }
+
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         let DelegateArgs { tenant_id, parent_id, sub_goals, worker_type, task_id, write_scope, continue_child_id } =
             match parse_delegate_args(&args) {

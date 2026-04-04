@@ -1,10 +1,13 @@
 pub mod agent_chat;
 pub mod clarifier;
+pub mod dag;
+pub mod dag_engine;
 pub mod definition;
 pub mod evaluator;
 pub mod executor;
 pub mod r#loop;
 pub mod manager;
+pub mod orchestrator;
 pub mod plan_mode;
 pub mod plan_mode_steps;
 pub mod planner;
@@ -13,7 +16,10 @@ pub mod prompts;
 pub mod reflector;
 pub mod role_chat;
 pub mod savings;
+pub mod step_artifacts;
+pub mod template_vars;
 pub mod templates;
+pub mod workflow_compiler;
 
 #[allow(unused_imports)]
 pub use agent_chat::{AgentChatManager, AgentChatMessage, AgentChatRequest};
@@ -39,7 +45,6 @@ pub use manager::AgentManager;
 #[allow(unused_imports)]
 pub use plan_mode::PlanModeManager;
 #[allow(unused_imports)]
-pub use planner::LlmPlanner;
 #[allow(unused_imports)]
 pub use preflight::LlmPreflight;
 #[allow(unused_imports)]
@@ -50,10 +55,18 @@ pub use reflector::LlmReflector;
 pub use role_chat::RoleChatManager;
 #[allow(unused_imports)]
 pub use templates::{all_templates, find_template, RoleTemplate};
+#[allow(unused_imports)]
+pub use workflow_compiler::{
+    BindingRule, CompiledStep, CompiledWorkflow, CompilerCardRequest, CompilerError, CompilerResult, DataSignature,
+    DataStrategy, DeterminismConfig, DslStepType, ExecutionConstraints, ExecutionMode, ExecutionPolicy,
+    ExpressionFunctionSpec, IdempotencyClass, PrimitiveType, ResourceBinding, ResumeBehavior, SchedulerConfig,
+    TypeSpec, VariantFallbackMode, VariantMatchRule, WorkflowCompiler, WorkflowVariant, WorkflowVariantOverrides,
+    WorkflowVariantPolicy, WorkflowVariantSelection,
+};
 
+#[cfg(test)]
+mod integration_tests;
 #[cfg(test)]
 pub(crate) mod test_helpers;
 #[cfg(test)]
 pub(crate) mod tests;
-#[cfg(test)]
-mod integration_tests;

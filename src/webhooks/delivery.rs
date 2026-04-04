@@ -152,6 +152,7 @@ fn event_type_name(event: &AgentEvent) -> String {
         AgentEvent::ClarificationNeeded { .. } => "clarification_needed",
         AgentEvent::ClarificationReceived { .. } => "clarification_received",
         AgentEvent::PlanningStarted { .. } => "planning_started",
+        AgentEvent::RecompileRequested { .. } => "recompile_requested",
         AgentEvent::PlanCreated { .. } => "plan_created",
         AgentEvent::StepStarted { .. } => "step_started",
         AgentEvent::ToolCalled { .. } => "tool_called",

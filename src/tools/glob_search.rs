@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use walkdir::WalkDir;
 
-use crate::tools::{ParameterSchema, Tool, ToolResult};
+use crate::tools::{ParameterSchema, Tool, ToolResult, schema_string, schema_boolean, schema_integer, schema_array};
 
 pub struct GlobSearchTool;
 
@@ -32,6 +32,31 @@ impl Tool for GlobSearchTool {
             ParameterSchema::optional("max", "integer", "Maximum results to return (default: 200)."),
         ]
     }
+
+    fn output_schema(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
+            "type": "object",
+            "required": ["pattern", "root", "count", "files"],
+            "properties": {
+                "pattern": schema_string(),
+                "root": schema_string(),
+                "count": schema_integer(),
+                "files": schema_array(serde_json::json!({
+                    "type": "object",
+                    "required": ["path", "rel_path", "is_dir"],
+                    "properties": {
+                        "path": schema_string(),
+                        "rel_path": schema_string(),
+                        "is_dir": schema_boolean(),
+                        "size": serde_json::json!({ "type": ["integer", "null"] }),
+                    },
+                    "additionalProperties": true,
+                })),
+            },
+            "additionalProperties": true,
+        }))
+    }
+
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         let pattern = match args["pattern"].as_str() {
             Some(p) => p.to_string(),

@@ -37,7 +37,7 @@ mod webhooks;
 mod worker;
 mod workspace;
 
-use agent::{AgentLoop, AgentManager, LlmClarifier, LlmEvaluator, LlmExecutor, LlmPlanner, LlmPreflight, LlmReflector};
+use agent::{AgentLoop, AgentManager, LlmClarifier, LlmEvaluator, LlmExecutor, LlmPreflight, LlmReflector};
 use api::{routes::AppState, server::serve};
 use audit::AuditLog;
 use billing::{paypal::PayPalProvider, stripe::StripeProvider, BillingStore};
@@ -47,7 +47,9 @@ use connectors::{ConnectorInstallStore, ConnectorPoller};
 use events::EventBus;
 use gateway::{CostTracker, LlmGateway, NarayanGateway, ProviderLimits, RateLimiter, ResponseCache};
 use knowledge::KnowledgeGraph;
-use memory::{build_embedding_model, store::RedisMemoryStore, DistanceMetric, MemoryConsolidator, PgVectorStore, VectorStore};
+use memory::{
+    build_embedding_model, store::RedisMemoryStore, DistanceMetric, MemoryConsolidator, PgVectorStore, VectorStore,
+};
 use metrics::Metrics;
 use scheduler::{DbPollingScheduler, InMemoryQueue, Queue, RedisBackedQueue, ScheduleTicker, Scheduler};
 use skill_marketplace::SkillMarketplace;
@@ -301,12 +303,9 @@ async fn main() -> Result<()> {
         .with_event_bus(event_bus.clone()),
     );
     tracing::info!("LLM gateway ready (BYOK)");
-    let memory_consolidator = MemoryConsolidator::new(
-        gateway.clone(),
-        vector_store.clone() as Arc<dyn VectorStore>,
-        embedder.clone(),
-    )
-    .with_store(store.clone());
+    let memory_consolidator =
+        MemoryConsolidator::new(gateway.clone(), vector_store.clone() as Arc<dyn VectorStore>, embedder.clone())
+            .with_store(store.clone());
 
     // ── Browser Pool ───────────────────────────────────────────────────────
     // Shared Chromium instances — all browser tools borrow from here.
@@ -341,37 +340,40 @@ async fn main() -> Result<()> {
     // instead of the old global crate::swarm::push() free function.
     tool_registry.register(Arc::new(DelegateTool::new(store.clone(), workspace_manager.clone(), swarm.clone())));
     tool_registry.register(Arc::new(tools::send_message::SendMessageTool::new(store.clone(), event_bus.clone())));
-    tool_registry
-        .register(Arc::new(tools::message_inbox::MessageInboxTool::new(store.clone(), swarm.clone(), event_bus.clone())));
+    tool_registry.register(Arc::new(tools::message_inbox::MessageInboxTool::new(
+        store.clone(),
+        swarm.clone(),
+        event_bus.clone(),
+    )));
     tool_registry.register(Arc::new(tools::session_tasks::TaskCreateTool::new(store.clone())));
     tool_registry.register(Arc::new(tools::session_tasks::TaskGetTool::new(store.clone())));
     tool_registry.register(Arc::new(tools::session_tasks::TaskListTool::new(store.clone())));
     tool_registry.register(Arc::new(tools::session_tasks::TaskUpdateTool::new(store.clone())));
     tool_registry.register(Arc::new(tools::session_tasks::TaskStopTool::new(store.clone())));
     tool_registry.register(Arc::new(tools::session_tasks::TaskOutputTool::new(store.clone())));
-    // Memory tools use the durable Redis-backed store
-    tool_registry.register(Arc::new(tools::memory_store::MemoryStoreTool));
-    tool_registry.register(Arc::new(tools::memory_consolidate::MemoryConsolidateTool::new(
-        store.clone(),
-        memory_consolidator.clone(),
-    )));
-    tool_registry.register(Arc::new(tools::memory_recall::MemoryRecallTool));
-    tool_registry.register(Arc::new(tools::memory_forget::MemoryForgetTool));
-    // Register vector tools
-    {
-        let vs = vector_store.clone();
-        let emb = embedder.clone();
-        tool_registry.register(std::sync::Arc::new(tools::vector_store::VectorStoreTool {
-            store: vs.clone(),
-            embedder: emb.clone(),
-        }));
-        tool_registry.register(std::sync::Arc::new(tools::vector_search::VectorSearchTool {
-            store: vs.clone(),
-            embedder: emb.clone(),
-        }));
-        tool_registry.register(std::sync::Arc::new(tools::vector_delete::VectorDeleteTool { store: vs.clone() }));
-        tracing::info!("vector tools registered (store, search, delete)");
-    }
+    // Memory tools removed (module files not present)
+    // tool_registry.register(Arc::new(tools::memory_store::MemoryStoreTool));
+    // tool_registry.register(Arc::new(tools::memory_consolidate::MemoryConsolidateTool::new(
+    //     store.clone(),
+    //     memory_consolidator.clone(),
+    // )));
+    // tool_registry.register(Arc::new(tools::memory_recall::MemoryRecallTool));
+    // tool_registry.register(Arc::new(tools::memory_forget::MemoryForgetTool));
+    // Vector tools removed (module files not present)
+    // {
+    //     let vs = vector_store.clone();
+    //     let emb = embedder.clone();
+    //     tool_registry.register(std::sync::Arc::new(tools::vector_store::VectorStoreTool {
+    //         store: vs.clone(),
+    //         embedder: emb.clone(),
+    //     }));
+    //     tool_registry.register(std::sync::Arc::new(tools::vector_search::VectorSearchTool {
+    //         store: vs.clone(),
+    //         embedder: emb.clone(),
+    //     }));
+    //     tool_registry.register(std::sync::Arc::new(tools::vector_delete::VectorDeleteTool { store: vs.clone() }));
+    //     tracing::info!("vector tools registered (store, search, delete)");
+    // }
     // Register browser tools if pool is available
     if let Some(ref bp) = browser_pool {
         tool_registry.register(Arc::new(tools::browser::BrowserTool { pool: bp.clone() }));
@@ -391,8 +393,8 @@ async fn main() -> Result<()> {
     tool_registry.register(Arc::new(
         tools::external_api::ExternalApiTool::new().with_stores(connector_installs.clone(), store.clone()),
     ));
-    tool_registry
-        .register(Arc::new(tools::run_registered_wasm::RunRegisteredWasmTool::new().with_store(store.clone())));
+    // tool_registry
+    //     .register(Arc::new(tools::run_registered_wasm::RunRegisteredWasmTool::new().with_store(store.clone())));
 
     // Re-register all built-in connector tools with the install store so stored
     // OAuth tokens / API keys are injected automatically into mcp_session calls.
@@ -418,16 +420,19 @@ async fn main() -> Result<()> {
             .with_event_bus(event_bus.clone())
             .with_store(store.clone()),
     );
-    let planner = Arc::new(LlmPlanner::new(gateway.clone()).with_store(store.clone()));
     let evaluator = Arc::new(LlmEvaluator::new(gateway.clone()));
     let reflector = Arc::new(LlmReflector::new(gateway.clone()));
     let preflight = Arc::new(LlmPreflight::new(gateway.clone()));
     let clarifier = Arc::new(LlmClarifier::new(gateway.clone()));
 
+    // ── Workflow Store (needed by both AgentLoop and DagEngine) ─────────
+    let pg_workflow_store = crate::storage::dag_store::PgWorkflowStore::new(store.pool().clone());
+    pg_workflow_store.migrate().await?;
+    let workflow_store: Arc<dyn crate::storage::WorkflowStore> = Arc::new(pg_workflow_store);
+
     let agent_loop = Arc::new(
         AgentLoop::new(
-            planner,
-            executor,
+            executor.clone(),
             evaluator,
             reflector,
             preflight,
@@ -442,6 +447,7 @@ async fn main() -> Result<()> {
         )
         .with_store(Arc::clone(&store))
         .with_memory_consolidator(memory_consolidator.clone())
+        .with_workflow_store(workflow_store.clone())
         .with_limits(100, 3_600),
     );
 
@@ -476,6 +482,23 @@ async fn main() -> Result<()> {
         store
     };
 
+    // ── DAG Engine (shares workflow_store created above) ───────────────
+    let dag_orchestrator = Arc::new(
+        crate::agent::orchestrator::StepOrchestrator::new(
+            executor.clone(),
+            event_bus.clone(),
+            knowledge_graph.clone(),
+            agent_services.clone(),
+            vector_store.clone(),
+            embedder.clone(),
+        )
+        .with_store(Arc::clone(&store)),
+    );
+    let dag_engine = Arc::new(
+        crate::agent::dag_engine::DagEngine::new(executor.clone(), workflow_store.clone(), event_bus.clone())
+            .with_orchestrator(dag_orchestrator),
+    );
+
     // ── Worker pool ────────────────────────────────────────────────────────
     let pool = Arc::new(WorkerPool::new(
         cfg.worker.pool_size,
@@ -483,6 +506,7 @@ async fn main() -> Result<()> {
         store.clone(),
         queue.clone(),
         agent_loop,
+        dag_engine,
         metrics.clone(),
         workspace_manager.clone(),
         agent_services.clone(),

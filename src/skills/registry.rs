@@ -33,24 +33,36 @@ impl SkillStep {
     pub fn to_planned_step(&self, index: usize) -> PlannedStep {
         match self {
             Self::Text(text) => PlannedStep {
+                foreach: None,
                 index,
                 description: text.clone(),
-                tool: None,
-                tool_args: None,
+                tool: Some(crate::agent::workflow_compiler::LLM_WORKER_TOOL_NAME.into()),
+                tool_args: Some(serde_json::json!({
+                    "instruction": text,
+                    "response_format": "text",
+                })),
                 success_criteria: format!("step {} complete", index + 1),
                 condition: None,
+                depends_on: vec![],
             },
             Self::Detailed(step) => PlannedStep {
+                foreach: None,
                 index,
                 description: step.description.clone(),
-                tool: step.tool.clone(),
-                tool_args: step.tool_args.clone(),
+                tool: step.tool.clone().or_else(|| Some(crate::agent::workflow_compiler::LLM_WORKER_TOOL_NAME.into())),
+                tool_args: step.tool_args.clone().or_else(|| {
+                    Some(serde_json::json!({
+                        "instruction": step.description,
+                        "response_format": "text",
+                    }))
+                }),
                 success_criteria: if step.success_criteria.trim().is_empty() {
                     format!("step {} complete", index + 1)
                 } else {
                     step.success_criteria.clone()
                 },
                 condition: None,
+                depends_on: vec![],
             },
         }
     }

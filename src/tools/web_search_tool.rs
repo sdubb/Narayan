@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use crate::tools::{ParameterSchema, Tool, ToolResult};
+use crate::tools::{ParameterSchema, Tool, ToolResult, schema_string, schema_integer, schema_array};
 
 /// Web search via SerpAPI (set SERPAPI_KEY env var) or falls back to DuckDuckGo Instant.
 pub struct WebSearchTool {
@@ -35,7 +35,10 @@ impl Tool for WebSearchTool {
         Some("{ query, count, results }. results is an array of { title, url, snippet } records.".into())
     }
     fn when_to_use(&self) -> Option<String> {
-        Some("Use for web discovery, broad search, and finding public sources when the exact URL is not already known.".into())
+        Some(
+            "Use for web discovery, broad search, and finding public sources when the exact URL is not already known."
+                .into(),
+        )
     }
     fn when_not_to_use(&self) -> Option<String> {
         Some("Avoid when you already know the URL, when local files contain the answer, or when you need to fetch a specific page directly.".into())
@@ -47,6 +50,31 @@ impl Tool for WebSearchTool {
             ParameterSchema::optional("region", "string", "Region code, e.g. 'us' (default: 'us')."),
         ]
     }
+
+
+    fn output_schema(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
+            "type": "object",
+            "required": ["query", "count", "results"],
+            "properties": {
+                "query": schema_string(),
+                "count": schema_integer(),
+                "results": schema_array(serde_json::json!({
+                    "type": "object",
+                    "required": ["title", "url", "snippet"],
+                    "properties": {
+                        "title": schema_string(),
+                        "url": schema_string(),
+                        "snippet": schema_string(),
+                    },
+                    "additionalProperties": true,
+                })),
+                "source": schema_string(),
+            },
+            "additionalProperties": true,
+        }))
+    }
+
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         let query = match args["query"].as_str() {
             Some(q) => q,

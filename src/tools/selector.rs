@@ -27,26 +27,7 @@ const RUNTIME_BLOCKED_TOOLS: &[&str] = &["create_workspace_tool"];
 
 /// Tools always included regardless of job type or step.
 /// Every agent needs these for basic operation.
-const ALWAYS_INCLUDE: &[&str] = &[
-    "shell",
-    "file_read",
-    "file_write",
-    "memory_recall",
-    "memory_store",
-    "memory_consolidate",
-    "data_engine",
-    "ask_user",
-    "delegate",
-    "task_list",
-    "task_update",
-    "plane_guard",
-    "vector_search",
-    "list_connectors_in_category",
-    "tool_search",
-    "request_more_connectors",
-    "create_custom_connector",
-    "request_more_tools",
-];
+const ALWAYS_INCLUDE: &[&str] = &["ask_user", "delegate", "tool_search", "request_more_tools"];
 
 const PLAN_POOL_TOOLS: &[&str] = &[
     "ask_user",
@@ -113,20 +94,19 @@ const VERIFICATION_POOL_TOOLS: &[&str] = &[
     "tool_search",
 ];
 
-const TEAMMATE_POOL_TOOLS: &[&str] =
-    &[
-        "ask_user",
-        "send_message",
-        "message_inbox",
-        "task_create",
-        "task_get",
-        "task_list",
-        "task_update",
-        "task_output",
-        "tool_search",
-        "memory_consolidate",
-        "memory_recall",
-    ];
+const TEAMMATE_POOL_TOOLS: &[&str] = &[
+    "ask_user",
+    "send_message",
+    "message_inbox",
+    "task_create",
+    "task_get",
+    "task_list",
+    "task_update",
+    "task_output",
+    "tool_search",
+    "memory_consolidate",
+    "memory_recall",
+];
 
 fn pool_allows(pool: ToolPool, tool_name: &str) -> bool {
     let allowed = match pool {
@@ -327,7 +307,15 @@ pub fn tool_manifest(registry: &ToolRegistry) -> String {
         ),
         (
             "memory",
-            &["memory_store", "memory_consolidate", "memory_recall", "memory_forget", "vector_store", "vector_search", "vector_delete"],
+            &[
+                "memory_store",
+                "memory_consolidate",
+                "memory_recall",
+                "memory_forget",
+                "vector_store",
+                "vector_search",
+                "vector_delete",
+            ],
         ),
         ("infra", &["docker", "kubernetes", "ssh_exec", "process_monitor"]),
         (
@@ -338,7 +326,16 @@ pub fn tool_manifest(registry: &ToolRegistry) -> String {
         ("security", &["crypto_tool", "plane_guard", "request_credential"]),
         (
             "automation",
-            &["schedule", "cron_add", "cron_list", "cron_remove", "cron_run", "delegate", "enter_worktree", "exit_worktree"],
+            &[
+                "schedule",
+                "cron_add",
+                "cron_list",
+                "cron_remove",
+                "cron_run",
+                "delegate",
+                "enter_worktree",
+                "exit_worktree",
+            ],
         ),
     ];
 
@@ -408,13 +405,24 @@ pub fn tool_manifest_from_names(names: &[&str]) -> String {
         ),
         (
             "memory",
-            &["memory_store", "memory_consolidate", "memory_recall", "memory_forget", "vector_store", "vector_search", "vector_delete"],
+            &[
+                "memory_store",
+                "memory_consolidate",
+                "memory_recall",
+                "memory_forget",
+                "vector_store",
+                "vector_search",
+                "vector_delete",
+            ],
         ),
         ("infra", &["docker", "kubernetes", "ssh_exec", "process_monitor"]),
         ("integration", &["mcp_session", "search_mcp_registry", "api_call", "http_request", "register_api_tool"]),
         ("communication", &["email", "notification", "pushover", "ask_user", "send_message"]),
         ("security", &["crypto_tool", "plane_guard", "request_credential"]),
-        ("automation", &["schedule", "cron_add", "cron_list", "cron_remove", "delegate", "enter_worktree", "exit_worktree"]),
+        (
+            "automation",
+            &["schedule", "cron_add", "cron_list", "cron_remove", "delegate", "enter_worktree", "exit_worktree"],
+        ),
     ];
 
     let all_known: std::collections::HashSet<&str> = groups.iter().flat_map(|(_, ns)| ns.iter().copied()).collect();
@@ -445,12 +453,14 @@ mod tests {
     fn test_always_include_present() {
         let registry = default_registry();
         let step = PlannedStep {
+            foreach: None,
             index: 0,
             description: "do something generic".into(),
             tool: None,
             tool_args: None,
             success_criteria: String::new(),
             condition: None,
+            depends_on: vec![],
         };
         let job_type = JobType::detect("build a web app");
         let specs = select_tools_for_step(&registry, &step, &job_type, &[], &[]);
@@ -463,12 +473,14 @@ mod tests {
     fn test_planner_hint_included() {
         let registry = default_registry();
         let step = PlannedStep {
+            foreach: None,
             index: 0,
             description: "encrypt data".into(),
             tool: Some("crypto_tool".into()),
             tool_args: None,
             success_criteria: String::new(),
             condition: None,
+            depends_on: vec![],
         };
         let job_type = JobType::detect("encrypt some data");
         let specs = select_tools_for_step(&registry, &step, &job_type, &[], &[]);
@@ -480,6 +492,7 @@ mod tests {
     fn test_max_tools_cap() {
         let registry = default_registry();
         let step = PlannedStep {
+            foreach: None,
             index: 0,
             description:
                 "do everything with docker kubernetes ssh web browser file compression image pdf crypto spreadsheet"
@@ -488,6 +501,7 @@ mod tests {
             tool_args: None,
             success_criteria: String::new(),
             condition: None,
+            depends_on: vec![],
         };
         let job_type = JobType::detect("build a web app");
         let specs = select_tools_for_step(&registry, &step, &job_type, &[], &[]);
@@ -498,12 +512,14 @@ mod tests {
     fn test_role_scoped_tools_are_honored() {
         let registry = default_registry();
         let step = PlannedStep {
+            foreach: None,
             index: 0,
             description: "fetch a page and summarize it".into(),
             tool: None,
             tool_args: None,
             success_criteria: String::new(),
             condition: None,
+            depends_on: vec![],
         };
         let job_type = JobType::General;
         let specs = select_tools_for_step(&registry, &step, &job_type, &["web_fetch".into()], &[]);
@@ -515,12 +531,14 @@ mod tests {
     fn test_role_tool_categories_expand_toolset() {
         let registry = default_registry();
         let step = PlannedStep {
+            foreach: None,
             index: 0,
             description: "inspect an api response".into(),
             tool: None,
             tool_args: None,
             success_criteria: String::new(),
             condition: None,
+            depends_on: vec![],
         };
         let specs = select_tools_for_step(&registry, &step, &JobType::General, &[], &["integration".into()]);
         let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
@@ -531,12 +549,14 @@ mod tests {
     fn test_role_tool_category_respects_per_category_cap() {
         let registry = default_registry();
         let step = PlannedStep {
+            foreach: None,
             index: 0,
             description: "handle integrations broadly".into(),
             tool: None,
             tool_args: None,
             success_criteria: String::new(),
             condition: None,
+            depends_on: vec![],
         };
         let specs = select_tools_for_step(&registry, &step, &JobType::General, &[], &["integration".into()]);
         let integration_count = specs

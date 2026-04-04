@@ -70,6 +70,10 @@ pub struct AgentState {
     /// When the current heartbeat lease expires.
     #[serde(default)]
     pub lease_expires_at: Option<DateTime<Utc>>,
+    /// DAG workflow execution ID. When present, the AgentLoop routes
+    /// to the DagEngine instead of linear step-by-step execution.
+    #[serde(default)]
+    pub workflow_id: Option<String>,
 }
 
 impl AgentState {
@@ -97,6 +101,7 @@ impl AgentState {
             plan_rejection_count: 0,
             claimed_by: None,
             lease_expires_at: None,
+            workflow_id: None,
         }
     }
 

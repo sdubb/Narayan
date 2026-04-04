@@ -3,7 +3,7 @@
 
 use async_trait::async_trait;
 
-use crate::tools::{ParameterSchema, Tool, ToolResult};
+use crate::tools::{ParameterSchema, Tool, ToolResult, schema_string, schema_boolean};
 
 pub struct NotificationTool;
 
@@ -30,6 +30,19 @@ impl Tool for NotificationTool {
             ParameterSchema::optional("color", "string", "Sidebar colour hex for Slack attachments (e.g. '#10b981')."),
             ParameterSchema::optional("urgent", "boolean", "Mark as urgent / high-priority (default: false)."),
         ]
+    }
+
+    fn output_schema(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
+            "type": "object",
+            "required": ["sent", "provider", "status"],
+            "properties": {
+                "sent": schema_boolean(),
+                "provider": schema_string(),
+                "status": schema_string(),
+            },
+            "additionalProperties": true,
+        }))
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {

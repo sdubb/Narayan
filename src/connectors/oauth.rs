@@ -578,17 +578,14 @@ pub async fn validate_connector(
     // 1. Load installed connector config
     let config = match state.connector_installs.get(&tenant.tenant_id, &connector_type).await {
         Ok(Some(cfg)) => cfg,
-        Ok(None) => return err(StatusCode::NOT_FOUND, 
-            format!("Connector '{}' not installed", connector_type)),
-        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, 
-            format!("Failed to load connector: {}", e)),
+        Ok(None) => return err(StatusCode::NOT_FOUND, format!("Connector '{}' not installed", connector_type)),
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to load connector: {}", e)),
     };
 
     // 2. Get connector from registry
     let connector = match state.connector_registry.get(&connector_type) {
         Some(c) => c,
-        None => return err(StatusCode::NOT_FOUND, 
-            format!("Unknown connector type: {}", connector_type)),
+        None => return err(StatusCode::NOT_FOUND, format!("Unknown connector type: {}", connector_type)),
     };
 
     let credentials = if let Some(token) = state.connector_installs.decrypt_token(&config) {
@@ -624,11 +621,15 @@ pub async fn validate_connector(
                 connector_type
             );
 
-            (StatusCode::OK, Json(serde_json::json!({
-                "valid": true,
-                "connector": connector_type,
-                "tested_at": chrono::Utc::now().to_rfc3339(),
-            }))).into_response()
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "valid": true,
+                    "connector": connector_type,
+                    "tested_at": chrono::Utc::now().to_rfc3339(),
+                })),
+            )
+                .into_response()
         }
         Err(e) => {
             tracing::warn!(

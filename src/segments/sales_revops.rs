@@ -3,11 +3,7 @@
 
 use crate::{
     compliance::sla::{EscalationAction, EscalationRule, SlaPolicy, SlaPriority},
-    connectors::{
-        salesforce::SalesforceConnector,
-        shipstation::ShipStationConnector,
-        shopify::ShopifyConnector,
-    },
+    connectors::{salesforce::SalesforceConnector, shipstation::ShipStationConnector, shopify::ShopifyConnector},
     policy::rules::{PolicyAction, PolicyCondition, PolicyRule, PolicyRuleSet},
     segments::{
         registry::{SegmentPlugin, SegmentServices, SharedDeps},

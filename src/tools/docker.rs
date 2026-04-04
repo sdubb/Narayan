@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use bollard::Docker;
 use futures_util::StreamExt;
 
-use crate::tools::{ParameterSchema, Tool, ToolResult};
+use crate::tools::{ParameterSchema, Tool, ToolResult, schema_string, schema_boolean, schema_integer, schema_array};
 
 pub struct DockerTool;
 
@@ -39,6 +39,97 @@ impl Tool for DockerTool {
             ParameterSchema::optional("build_context", "string", "Build context directory path."),
             ParameterSchema::optional("tag", "string", "Image tag for build."),
         ]
+    }
+
+    fn output_schema(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
+            "oneOf": [
+                {
+                    "type": "object",
+                    "required": ["containers", "count"],
+                    "properties": {
+                        "containers": schema_array(serde_json::json!({
+                            "type": "object",
+                            "required": ["id", "image", "names", "status", "state"],
+                            "properties": {
+                                "id": schema_string(),
+                                "image": schema_string(),
+                                "names": schema_array(schema_string()),
+                                "status": schema_string(),
+                                "state": schema_string(),
+                            },
+                            "additionalProperties": true,
+                        })),
+                        "count": schema_integer(),
+                    },
+                    "additionalProperties": true,
+                },
+                {
+                    "type": "object",
+                    "required": ["pulled", "image", "status"],
+                    "properties": {
+                        "pulled": schema_boolean(),
+                        "image": schema_string(),
+                        "status": schema_string(),
+                    },
+                    "additionalProperties": true,
+                },
+                {
+                    "type": "object",
+                    "required": ["started", "container_id", "detached"],
+                    "properties": {
+                        "started": schema_boolean(),
+                        "container_id": schema_string(),
+                        "detached": schema_boolean(),
+                    },
+                    "additionalProperties": true,
+                },
+                {
+                    "type": "object",
+                    "required": ["exec_id", "output"],
+                    "properties": {
+                        "exec_id": schema_string(),
+                        "output": schema_string(),
+                    },
+                    "additionalProperties": true,
+                },
+                {
+                    "type": "object",
+                    "required": ["container_id", "logs"],
+                    "properties": {
+                        "container_id": schema_string(),
+                        "logs": schema_string(),
+                    },
+                    "additionalProperties": true,
+                },
+                {
+                    "type": "object",
+                    "required": ["stopped", "container_id"],
+                    "properties": {
+                        "stopped": schema_boolean(),
+                        "container_id": schema_string(),
+                    },
+                    "additionalProperties": true,
+                },
+                {
+                    "type": "object",
+                    "required": ["removed", "container_id"],
+                    "properties": {
+                        "removed": schema_boolean(),
+                        "container_id": schema_string(),
+                    },
+                    "additionalProperties": true,
+                },
+                {
+                    "type": "object",
+                    "required": ["Id"],
+                    "properties": {
+                        "Id": schema_string(),
+                    },
+                    "additionalProperties": true,
+                }
+            ]
+        }))
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
@@ -199,8 +290,7 @@ impl Tool for DockerTool {
                 };
                 let tail = args["tail"].as_u64().unwrap_or(100);
                 use bollard::query_parameters::LogsOptions;
-                let opts =
-                    LogsOptions { stdout: true, stderr: true, tail: tail.to_string(), ..Default::default() };
+                let opts = LogsOptions { stdout: true, stderr: true, tail: tail.to_string(), ..Default::default() };
                 let mut log = String::new();
                 let mut stream = docker.logs(cid, Some(opts));
                 while let Some(Ok(line)) = stream.next().await {

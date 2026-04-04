@@ -2,6 +2,7 @@ pub mod cache;
 pub mod cost;
 pub mod gateway;
 pub mod limiter;
+pub mod llm_controls;
 pub mod router;
 
 #[allow(unused_imports)]
@@ -12,6 +13,8 @@ pub use cost::{CostTracker, SpendCheck, TenantUsage};
 pub use gateway::{GatewayRequest, LlmGateway, NarayanGateway};
 #[allow(unused_imports)]
 pub use limiter::{ProviderLimits, RateLimiter};
+#[allow(unused_imports)]
+pub use llm_controls::{LlmBudgetTier, LlmExecutionIntent, LlmGenerationConfig, LlmRole};
 #[allow(unused_imports)]
 pub use router::TaskComplexity;
 

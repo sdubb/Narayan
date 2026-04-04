@@ -52,6 +52,14 @@ const CONNECTOR_LABELS = {
 
 const label = n => CONNECTOR_LABELS[n] || n;
 
+function formatLabel(value) {
+  return String(value || '')
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
+    .replace(/_/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 // ── Confidence dot ──────────────────────────────────────────────────────────
 function ConfidenceDot({ colour }) {
   const cls = { green:'bg-ok', amber:'bg-warn', red:'bg-err' }[colour] || 'bg-tx-4';
@@ -69,6 +77,13 @@ function StepRow({ step, confidence }) {
           <span className="inline-block mt-1 font-mono text-[10px] text-tx-4 bg-bg-active rounded px-1.5 py-0.5">
             {step.tool}
           </span>
+        )}
+        {(step.llm_role || step.execution_intent || step.budget_tier || step.llm_generation) && (
+          <div className="mt-1 flex flex-wrap gap-1">
+            {(step.llm_role || step.llm_generation?.role) && <span className="badge bg-vio-soft text-vio border border-vio/20">{formatLabel(step.llm_role || step.llm_generation?.role)}</span>}
+            {(step.execution_intent || step.llm_generation?.execution_intent) && <span className="badge bg-info-soft text-info border border-info/20">{formatLabel(step.execution_intent || step.llm_generation?.execution_intent)}</span>}
+            {(step.budget_tier || step.llm_generation?.budget_tier) && <span className="badge bg-accent-soft text-accent border border-accent/20">{formatLabel(step.budget_tier || step.llm_generation?.budget_tier)}</span>}
+          </div>
         )}
       </div>
     </div>
@@ -237,6 +252,8 @@ export default function PlanApprovalCard({ agentId, plan, replanning, onDone, on
   const rationale      = plan?.rationale          || '';
   const stepCount      = plan?.stepCount          || steps.length;
   const jobType        = plan?.jobType            || '';
+  const runtimePolicy  = plan?.runtimePolicy      || plan?.runtime_policy || '';
+  const researchSummary = plan?.researchSummary   || plan?.research_summary || '';
 
   const [feedback, setFeedback]           = useState('');
   const [loading, setLoading]             = useState(null);
@@ -419,6 +436,23 @@ export default function PlanApprovalCard({ agentId, plan, replanning, onDone, on
 
       <div className="px-4 py-4 space-y-4">
         {rationale && <p className="text-xs text-tx-2 leading-relaxed">{rationale}</p>}
+
+        {(runtimePolicy || researchSummary) && (
+          <div className="space-y-2 rounded-xl border border-border bg-bg px-3 py-2.5">
+            {runtimePolicy && (
+              <div>
+                <p className="text-[10px] uppercase tracking-wide text-tx-4">Runtime policy</p>
+                <p className="mt-1 text-[11px] text-tx-2 leading-relaxed whitespace-pre-wrap">{runtimePolicy}</p>
+              </div>
+            )}
+            {researchSummary && (
+              <div>
+                <p className="text-[10px] uppercase tracking-wide text-tx-4">Research summary</p>
+                <p className="mt-1 text-[11px] text-tx-2 leading-relaxed whitespace-pre-wrap">{researchSummary}</p>
+              </div>
+            )}
+          </div>
+        )}
 
         <div className="rounded-lg border border-border/60 bg-bg px-3 py-2 space-y-1">
           <p className="text-[11px] font-medium text-tx-1">Governance</p>

@@ -5,7 +5,7 @@ import {
   Bot, User, Loader2, X, Sparkles, ArrowRight, Download,
   MessageSquare, Layers3, Activity, Users, AlertTriangle, FileText, Image, Code, File,
 } from 'lucide-react';
-import { agentDefs as agentDefsApi, workspace as workspaceApi } from '../../api';
+import { agentDefs as agentDefsApi, agentMessages as agentMessagesApi, workspace as workspaceApi } from '../../api';
 
 function humanize(value) {
   if (value == null || value === '') return 'None';
@@ -252,6 +252,10 @@ export default function AgentChatDrawer({
   const [agentState, setAgentState] = useState(agent);
   const [roles, setRoles] = useState(initialRoles || []);
   const [runs, setRuns] = useState([]);
+  const [inboxMessages, setInboxMessages] = useState([]);
+  const [childWorkers, setChildWorkers] = useState([]);
+  const [continueDrafts, setContinueDrafts] = useState({});
+  const [continuingChildId, setContinuingChildId] = useState('');
   const [peerAgents, setPeerAgents] = useState([]);
   const [workspaceFiles, setWorkspaceFiles] = useState([]);
   const bottomRef = useRef(null);
@@ -275,6 +279,10 @@ export default function AgentChatDrawer({
     setInput('');
     setError('');
     setSending(false);
+    setInboxMessages([]);
+    setChildWorkers([]);
+    setContinueDrafts({});
+    setContinuingChildId('');
   }, [agentId, agentName]);
 
   useEffect(() => {
@@ -285,12 +293,18 @@ export default function AgentChatDrawer({
       setContextLoading(true);
       setContextError('');
       try {
-        const summary = await agentDefsApi.summary(agentId);
+        const [summary, inboxRes, childRes] = await Promise.all([
+          agentDefsApi.summary(agentId),
+          agentMessagesApi.list(agentId, { direction: 'inbox', undelivered_only: false, limit: 25 }).catch(() => ({ messages: [] })),
+          agentMessagesApi.listChildren(agentId).catch(() => ({ children: [] })),
+        ]);
 
         if (cancelled) return;
         setAgentState(summary?.agent || agent || null);
         setRoles(summary?.roles || initialRoles || []);
         setRuns(summary?.recent_runs || []);
+        setInboxMessages(inboxRes?.messages || []);
+        setChildWorkers(childRes?.children || []);
         setPeerAgents(summary?.peers || []);
         setWorkspaceFiles(summary?.workspace_files?.files || []);
       } catch (e) {
@@ -400,6 +414,67 @@ export default function AgentChatDrawer({
       const safeName = (agentData.name || agentName).replace(/[^a-z0-9_-]+/gi, '-').replace(/-+/g, '-').replace(/^-|-$/g, '') || 'agent';
       await downloadBlob(blob, `${safeName}-workspace-files.tar.zst`);
     } catch {}
+  }
+
+  async function refreshInbox() {
+    if (!agentId) return;
+    try {
+      const [inboxRes, childRes] = await Promise.all([
+        agentMessagesApi.list(agentId, { direction: 'inbox', undelivered_only: false, limit: 25 }),
+        agentMessagesApi.listChildren(agentId),
+      ]);
+      setInboxMessages(inboxRes?.messages || []);
+      setChildWorkers(childRes?.children || []);
+    } catch {}
+  }
+
+  async function handleAckMessage(messageId) {
+    if (!agentId || !messageId) return;
+    try {
+      await agentMessagesApi.ack(agentId, messageId);
+      await refreshInbox();
+    } catch (e) {
+      setError(e.message || 'Failed to acknowledge message');
+    }
+  }
+
+  function updateContinueDraft(childId, field, value) {
+    setContinueDrafts(prev => ({
+      ...prev,
+      [childId]: {
+        ...(prev[childId] || {}),
+        [field]: value,
+      },
+    }));
+  }
+
+  async function handleContinueChild(child) {
+    if (!agentId || !child?.id) return;
+    const draft = continueDrafts[child.id] || {};
+    const body = (draft.body || '').trim();
+    if (!body || continuingChildId) return;
+
+    setContinuingChildId(child.id);
+    setError('');
+    try {
+      await agentMessagesApi.continueChild(agentId, child.id, {
+        subject: draft.subject || `Continue ${child.goal || 'worker'}`,
+        body,
+        task_id: child.task_id || child.current_task_id || null,
+        worker_type: draft.worker_type || child.worker_type || null,
+        write_scope: draft.write_scope || [],
+        ack_message_ids: draft.ack_message_ids || [],
+        metadata: {
+          source: 'agent_chat_drawer',
+        },
+      });
+      setContinueDrafts(prev => ({ ...prev, [child.id]: { ...prev[child.id], body: '' } }));
+      await refreshInbox();
+    } catch (e) {
+      setError(e.message || 'Failed to continue worker');
+    } finally {
+      setContinuingChildId('');
+    }
   }
 
   return (
@@ -622,6 +697,127 @@ export default function AgentChatDrawer({
                 })}
               </div>
             )}
+          </SectionCard>
+
+          <SectionCard
+            title="Inbox & workers"
+            subtitle="Unread instructions, follow-ups, and child agents that need another turn."
+            icon={MessageSquare}
+            action={
+              <button
+                type="button"
+                onClick={refreshInbox}
+                className="text-[11px] px-2.5 py-1.5 rounded-full border border-border bg-bg-card text-tx-3 hover:text-accent hover:border-accent/40 hover:bg-accent-soft/20 transition-colors"
+              >
+                Refresh
+              </button>
+            }
+          >
+            <div className="space-y-4">
+              <div>
+                <div className="flex items-center justify-between gap-2 mb-2">
+                  <p className="text-[10px] uppercase tracking-wide text-tx-4">Inbox</p>
+                  <span className="text-[10px] text-tx-4">{inboxMessages.length} message{inboxMessages.length === 1 ? '' : 's'}</span>
+                </div>
+                {inboxMessages.length === 0 ? (
+                  <div className="rounded-xl border border-dashed border-border bg-bg px-3 py-4 text-xs text-tx-4">
+                    No inbox messages right now.
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {inboxMessages.map(msg => (
+                      <div key={msg.id} className="rounded-xl border border-border bg-bg px-3 py-2.5">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <p className="text-sm font-semibold text-tx-1 truncate">{msg.subject || msg.message_kind || 'Message'}</p>
+                            <p className="text-[11px] text-tx-3 mt-1 leading-relaxed whitespace-pre-wrap break-words">
+                              {msg.body || JSON.stringify(msg.metadata || {}, null, 2)}
+                            </p>
+                          </div>
+                          {!msg.delivered_at && (
+                            <button
+                              type="button"
+                              onClick={() => handleAckMessage(msg.id)}
+                              className="shrink-0 inline-flex items-center gap-1 px-2 py-1 text-[11px] rounded-lg border border-ok/20 bg-ok-soft text-ok hover:bg-ok/15 transition-colors"
+                            >
+                              Acknowledge
+                            </button>
+                          )}
+                        </div>
+                        <div className="mt-2 text-[10px] text-tx-4 flex flex-wrap gap-x-2 gap-y-1">
+                          <span>{msg.task_id ? `Task ${msg.task_id}` : 'No task id'}</span>
+                          <span>{msg.sender_agent_id ? `From ${msg.sender_agent_id}` : 'No sender'}</span>
+                          <span>{msg.delivered_at ? 'Read' : 'Unread'}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div>
+                <div className="flex items-center justify-between gap-2 mb-2">
+                  <p className="text-[10px] uppercase tracking-wide text-tx-4">Child workers</p>
+                  <span className="text-[10px] text-tx-4">{childWorkers.length} child{childWorkers.length === 1 ? '' : 'ren'}</span>
+                </div>
+                {childWorkers.length === 0 ? (
+                  <div className="rounded-xl border border-dashed border-border bg-bg px-3 py-4 text-xs text-tx-4">
+                    No child workers yet.
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {childWorkers.map(child => {
+                      const draft = continueDrafts[child.id] || {};
+                      return (
+                        <div key={child.id} className="rounded-xl border border-border bg-bg px-3 py-2.5 space-y-2">
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <p className="text-sm font-semibold text-tx-1 truncate">{child.goal || child.name || child.id}</p>
+                              <p className="text-[11px] text-tx-3 mt-1 leading-relaxed">
+                                {child.status || 'unknown'}{typeof child.current_step === 'number' ? ` · step ${child.current_step}` : ''}
+                              </p>
+                            </div>
+                            <span className="text-[10px] px-2 py-0.5 rounded border border-border bg-bg-card text-tx-3">
+                              {child.id.slice(0, 8)}
+                            </span>
+                          </div>
+                          <div className="grid gap-2">
+                            <input
+                              type="text"
+                              value={draft.subject || ''}
+                              onChange={e => updateContinueDraft(child.id, 'subject', e.target.value)}
+                              placeholder="Follow-up subject"
+                              className="w-full rounded-lg border border-border bg-bg-card px-3 py-2 text-xs text-tx-1 placeholder:text-tx-4 outline-none focus:border-accent/40"
+                            />
+                            <textarea
+                              value={draft.body || ''}
+                              onChange={e => updateContinueDraft(child.id, 'body', e.target.value)}
+                              placeholder="Continue worker with a clear next instruction..."
+                              rows={3}
+                              className="w-full resize-none rounded-lg border border-border bg-bg-card px-3 py-2 text-xs text-tx-1 placeholder:text-tx-4 outline-none focus:border-accent/40"
+                            />
+                          </div>
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-[10px] text-tx-4">
+                              Direct follow-up instruction to this child worker.
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => handleContinueChild(child)}
+                              disabled={continuingChildId === child.id || !(draft.body || '').trim()}
+                              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-accent text-white hover:bg-accent-text disabled:opacity-40 transition-colors"
+                            >
+                              {continuingChildId === child.id ? <Loader2 size={11} className="animate-spin" /> : <ArrowRight size={11} />}
+                              Continue worker
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
           </SectionCard>
 
           <SectionCard

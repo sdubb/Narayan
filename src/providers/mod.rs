@@ -4,6 +4,8 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+use crate::gateway::llm_controls::LlmGenerationConfig;
+
 fn truncate_for_log(value: &str, max_chars: usize) -> String {
     let mut out = String::with_capacity(value.len().min(max_chars));
     for ch in value.chars().take(max_chars) {
@@ -86,7 +88,12 @@ pub struct ProviderCatalogEntry {
 #[async_trait]
 pub trait Provider: Send + Sync {
     fn name(&self) -> &str;
-    async fn chat(&self, messages: Vec<Message>, tools: Vec<ToolSpec>) -> Result<ChatResponse>;
+    async fn chat(
+        &self,
+        messages: Vec<Message>,
+        tools: Vec<ToolSpec>,
+        generation: Option<&LlmGenerationConfig>,
+    ) -> Result<ChatResponse>;
 }
 
 // ── Anthropic provider ─────────────────────────────────────────────────────
@@ -108,7 +115,12 @@ impl Provider for AnthropicProvider {
         "anthropic"
     }
 
-    async fn chat(&self, messages: Vec<Message>, tools: Vec<ToolSpec>) -> Result<ChatResponse> {
+    async fn chat(
+        &self,
+        messages: Vec<Message>,
+        tools: Vec<ToolSpec>,
+        generation: Option<&LlmGenerationConfig>,
+    ) -> Result<ChatResponse> {
         let client = reqwest::Client::new();
 
         // Convert tools to Anthropic format
@@ -123,9 +135,19 @@ impl Provider for AnthropicProvider {
             })
             .collect();
 
+        let generation = generation.cloned().unwrap_or_else(|| {
+            crate::gateway::llm_controls::LlmGenerationConfig::new(
+                crate::gateway::llm_controls::LlmRole::Drafter,
+                crate::gateway::llm_controls::LlmExecutionIntent::Balanced,
+                crate::gateway::llm_controls::LlmBudgetTier::High,
+            )
+            .with_limits(4096, 0.2)
+        });
+
         let mut payload = serde_json::json!({
             "model": self.model,
-            "max_tokens": 4096,
+            "max_tokens": generation.max_tokens,
+            "temperature": generation.temperature,
             "messages": messages
                 .iter()
                 .filter(|m| !matches!(m.role, Role::System))
@@ -183,14 +205,12 @@ impl Provider for AnthropicProvider {
             .collect();
 
         // Extract text content, skip tool_use blocks
-        let content = resp["content"]
-            .as_array()
-            .and_then(|arr| {
-                arr.iter()
-                    .find(|item| item["type"].as_str() == Some("text"))
-                    .and_then(|text_block| text_block["text"].as_str())
-                    .map(String::from)
-            });
+        let content = resp["content"].as_array().and_then(|arr| {
+            arr.iter()
+                .find(|item| item["type"].as_str() == Some("text"))
+                .and_then(|text_block| text_block["text"].as_str())
+                .map(String::from)
+        });
 
         let input_tokens = resp["usage"]["input_tokens"].as_u64().unwrap_or(0) as u32;
         let output_tokens = resp["usage"]["output_tokens"].as_u64().unwrap_or(0) as u32;
@@ -224,7 +244,12 @@ impl Provider for OpenAiProvider {
         "openai"
     }
 
-    async fn chat(&self, messages: Vec<Message>, tools: Vec<ToolSpec>) -> Result<ChatResponse> {
+    async fn chat(
+        &self,
+        messages: Vec<Message>,
+        tools: Vec<ToolSpec>,
+        generation: Option<&LlmGenerationConfig>,
+    ) -> Result<ChatResponse> {
         let client = reqwest::Client::new();
 
         let oai_tools: Vec<serde_json::Value> = tools
@@ -241,9 +266,20 @@ impl Provider for OpenAiProvider {
             })
             .collect();
 
+        let generation = generation.cloned().unwrap_or_else(|| {
+            crate::gateway::llm_controls::LlmGenerationConfig::new(
+                crate::gateway::llm_controls::LlmRole::Drafter,
+                crate::gateway::llm_controls::LlmExecutionIntent::Balanced,
+                crate::gateway::llm_controls::LlmBudgetTier::High,
+            )
+            .with_limits(4096, 0.2)
+        });
+
         let mut payload = serde_json::json!({
             "model": self.model,
             "messages": messages.iter().map(|m| serde_json::json!({ "role": m.role, "content": m.content })).collect::<Vec<_>>(),
+            "max_tokens": generation.max_tokens,
+            "temperature": generation.temperature,
         });
 
         if self.model.contains("gpt-oss") {
@@ -332,8 +368,13 @@ impl Provider for OllamaProvider {
         "ollama"
     }
 
-    async fn chat(&self, messages: Vec<Message>, tools: Vec<ToolSpec>) -> Result<ChatResponse> {
-        self.inner.chat(messages, tools).await
+    async fn chat(
+        &self,
+        messages: Vec<Message>,
+        tools: Vec<ToolSpec>,
+        generation: Option<&LlmGenerationConfig>,
+    ) -> Result<ChatResponse> {
+        self.inner.chat(messages, tools, generation).await
     }
 }
 

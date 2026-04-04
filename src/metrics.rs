@@ -15,10 +15,10 @@ pub struct Metrics {
     pub goals_total: AtomicU64,
     pub llm_calls_total: AtomicU64,
     pub llm_cache_hits: AtomicU64,
-    pub response_cache_hits: AtomicU64,      // LLM response cache hits
-    pub response_cache_misses: AtomicU64,    // LLM response cache misses
-    pub audit_bridge_lags: AtomicU64,        // Number of times audit bridge lagged
-    pub audit_events_dropped: AtomicU64,     // Total audit events lost to lag
+    pub response_cache_hits: AtomicU64,   // LLM response cache hits
+    pub response_cache_misses: AtomicU64, // LLM response cache misses
+    pub audit_bridge_lags: AtomicU64,     // Number of times audit bridge lagged
+    pub audit_events_dropped: AtomicU64,  // Total audit events lost to lag
     pub input_tokens_total: AtomicU64,
     pub output_tokens_total: AtomicU64,
     pub started_at: Instant,
@@ -134,7 +134,11 @@ impl Metrics {
         let hits = self.response_cache_hits.load(Ordering::Relaxed) as f64;
         let misses = self.response_cache_misses.load(Ordering::Relaxed) as f64;
         let total = hits + misses;
-        if total == 0.0 { 0.0 } else { hits / total }
+        if total == 0.0 {
+            0.0
+        } else {
+            hits / total
+        }
     }
 
     /// Record an audit bridge lag event — called when events are dropped.

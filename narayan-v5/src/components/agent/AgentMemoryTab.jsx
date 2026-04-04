@@ -8,7 +8,14 @@ export default function AgentMemoryTab({ agentId }) {
   const [consolidating, setConsolidating] = useState(false);
   const [result, setResult] = useState(null);
 
-  useEffect(() => { load(); }, [agentId]);
+  useEffect(() => {
+    if (!agentId) {
+      setTopics([]);
+      setLoading(false);
+      return;
+    }
+    load();
+  }, [agentId]);
 
   async function load() {
     setLoading(true);
@@ -23,6 +30,7 @@ export default function AgentMemoryTab({ agentId }) {
   }
 
   async function handleConsolidate() {
+    if (!agentId) return;
     setConsolidating(true);
     setResult(null);
     try {
@@ -39,6 +47,11 @@ export default function AgentMemoryTab({ agentId }) {
 
   return (
     <div className="space-y-4">
+      {!agentId && (
+        <div className="rounded-xl border border-border bg-bg-card p-4 text-center text-sm text-tx-4">
+          No live run selected yet.
+        </div>
+      )}
       <div className="flex items-center justify-between bg-bg-card p-4 rounded-xl border border-border">
         <div>
           <h3 className="text-sm font-semibold text-tx-1 flex items-center gap-2">
@@ -49,11 +62,11 @@ export default function AgentMemoryTab({ agentId }) {
         </div>
         <button
           onClick={handleConsolidate}
-          disabled={consolidating}
+          disabled={consolidating || !agentId}
           className="btn-primary flex items-center gap-2 text-xs py-1.5 px-3"
         >
           {consolidating ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />}
-          {consolidating ? 'Consolidating...' : 'Consolidate Now'}
+          {consolidating ? 'Consolidating...' : agentId ? 'Consolidate Now' : 'No live run'}
         </button>
       </div>
 

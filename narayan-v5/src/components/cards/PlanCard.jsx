@@ -3,9 +3,19 @@ import { motion, AnimatePresence } from 'framer-motion';
 import clsx from 'clsx';
 import { Layers, Cpu, ChevronDown, CheckCircle2 } from 'lucide-react';
 
+function formatLabel(value) {
+  return String(value || '')
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
+    .replace(/_/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 export default function PlanCard({ event }) {
   const [open, setOpen] = useState(true);
   const steps = event.steps || [];
+  const runtimePolicy = event.runtimePolicy || event.runtime_policy || '';
+  const researchSummary = event.researchSummary || event.research_summary || '';
 
   return (
     <motion.div
@@ -30,6 +40,23 @@ export default function PlanCard({ event }) {
       <div className="px-4 py-3">
         {event.rationale && (
           <p className="text-xs text-tx-2 leading-relaxed mb-3">{event.rationale}</p>
+        )}
+
+        {(runtimePolicy || researchSummary) && (
+          <div className="mb-3 space-y-2 rounded-xl border border-border bg-bg px-3 py-2.5">
+            {runtimePolicy && (
+              <div>
+                <p className="text-[10px] uppercase tracking-wide text-tx-4">Runtime policy</p>
+                <p className="text-[11px] text-tx-2 leading-relaxed mt-1 whitespace-pre-wrap">{runtimePolicy}</p>
+              </div>
+            )}
+            {researchSummary && (
+              <div>
+                <p className="text-[10px] uppercase tracking-wide text-tx-4">Research summary</p>
+                <p className="text-[11px] text-tx-2 leading-relaxed mt-1 whitespace-pre-wrap">{researchSummary}</p>
+              </div>
+            )}
+          </div>
         )}
 
         <button
@@ -69,6 +96,13 @@ export default function PlanCard({ event }) {
                         <span className="inline-block mt-1 font-mono text-[10px] text-tx-4 bg-bg-active rounded px-1.5 py-0.5">
                           {s.tool}
                         </span>
+                      )}
+                      {(s.llm_role || s.execution_intent || s.budget_tier || s.llm_generation) && (
+                        <div className="mt-1 flex flex-wrap gap-1">
+                          {(s.llm_role || s.llm_generation?.role) && <span className="badge bg-vio-soft text-vio border border-vio/20">{formatLabel(s.llm_role || s.llm_generation?.role)}</span>}
+                          {(s.execution_intent || s.llm_generation?.execution_intent) && <span className="badge bg-info-soft text-info border border-info/20">{formatLabel(s.execution_intent || s.llm_generation?.execution_intent)}</span>}
+                          {(s.budget_tier || s.llm_generation?.budget_tier) && <span className="badge bg-accent-soft text-accent border border-accent/20">{formatLabel(s.budget_tier || s.llm_generation?.budget_tier)}</span>}
+                        </div>
                       )}
                     </div>
                     {s.completed && <CheckCircle2 size={12} className="text-ok shrink-0 mt-0.5" />}

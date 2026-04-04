@@ -213,12 +213,14 @@ mod tests {
             goal: "fix CI pipeline".into(),
             job_type: Some("software_engineer".into()),
             steps: vec![PlannedStep {
+                foreach: None,
                 index: 0,
                 description: "Inspect failing workflow".into(),
                 tool: Some("file_read".into()),
                 tool_args: None,
                 success_criteria: "workflow reviewed".into(),
                 condition: None,
+                depends_on: vec![],
             }],
             rationale: "inspect first".into(),
         }
@@ -228,6 +230,7 @@ mod tests {
         StepResult {
             step_index: 0,
             success,
+            skipped: false,
             output: "ok".into(),
             final_answer_candidate: Some("ok".into()),
             tool_results: vec![],

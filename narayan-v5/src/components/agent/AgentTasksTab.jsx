@@ -6,7 +6,14 @@ export default function AgentTasksTab({ agentId }) {
   const [tasks, setTasks] = useState([]);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => { load(); }, [agentId]);
+  useEffect(() => {
+    if (!agentId) {
+      setTasks([]);
+      setLoading(false);
+      return;
+    }
+    load();
+  }, [agentId]);
 
   async function load() {
     setLoading(true);
@@ -18,6 +25,10 @@ export default function AgentTasksTab({ agentId }) {
     } finally {
       setLoading(false);
     }
+  }
+
+  if (!agentId) {
+    return <div className="py-8 text-center text-sm text-tx-4">No live run selected yet.</div>;
   }
 
   if (loading) {

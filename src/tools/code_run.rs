@@ -7,7 +7,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tokio::process::Command;
 
-use crate::tools::{ParameterSchema, Tool, ToolResult};
+use crate::tools::{ParameterSchema, Tool, ToolResult, schema_string, schema_integer};
 
 const MAX_OUTPUT: usize = 1_048_576;
 
@@ -45,6 +45,23 @@ impl Tool for CodeRunTool {
             ParameterSchema::optional("workspace", "string", "Working directory (default: current dir)."),
             ParameterSchema::optional("env", "object", "Extra environment variables."),
         ]
+    }
+
+
+
+    fn output_schema(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
+            "type": "object",
+            "required": ["stdout", "stderr", "exit_code", "elapsed_ms", "language"],
+            "properties": {
+                "stdout": schema_string(),
+                "stderr": schema_string(),
+                "exit_code": schema_integer(),
+                "elapsed_ms": schema_integer(),
+                "language": schema_string(),
+            },
+            "additionalProperties": true,
+        }))
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {

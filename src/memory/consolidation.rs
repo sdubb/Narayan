@@ -120,12 +120,7 @@ impl MemoryConsolidator {
         vector_store: Arc<dyn VectorStore>,
         embedder: Arc<dyn EmbeddingModel>,
     ) -> Arc<Self> {
-        Arc::new(Self {
-            gateway,
-            vector_store,
-            embedder,
-            store: None,
-        })
+        Arc::new(Self { gateway, vector_store, embedder, store: None })
     }
 
     pub fn with_store(mut self: Arc<Self>, store: Arc<PostgresStore>) -> Arc<Self> {
@@ -184,11 +179,8 @@ impl MemoryConsolidator {
         let topics = sanitize_topics(response.topics);
         let prune_keys = collect_prune_keys(&response.prune, &topics);
 
-        let mut final_topics = payload
-            .existing_topics
-            .into_iter()
-            .map(|topic| (topic.key.clone(), topic))
-            .collect::<BTreeMap<_, _>>();
+        let mut final_topics =
+            payload.existing_topics.into_iter().map(|topic| (topic.key.clone(), topic)).collect::<BTreeMap<_, _>>();
 
         for prune_key in &prune_keys {
             final_topics.remove(prune_key);
@@ -206,12 +198,7 @@ impl MemoryConsolidator {
             self.persist_vector_topic(state, &topic, &content).await?;
             final_topics.insert(
                 topic.key.clone(),
-                ExistingTopic {
-                    key: topic.key.clone(),
-                    title: topic.title.clone(),
-                    hook: topic.hook.clone(),
-                    content,
-                },
+                ExistingTopic { key: topic.key.clone(), title: topic.title.clone(), hook: topic.hook.clone(), content },
             );
             topics_saved.push(topic.key);
         }
@@ -233,8 +220,8 @@ impl MemoryConsolidator {
     }
 
     async fn build_payload(&self, state: &AgentState) -> Result<ConsolidationPromptPayload> {
-        let existing_index =
-            crate::tools::memory_store_internal::get(&scoped_memory_key(&state.id, MEMORY_INDEX_KEY)).unwrap_or_default();
+        let existing_index = crate::tools::memory_store_internal::get(&scoped_memory_key(&state.id, MEMORY_INDEX_KEY))
+            .unwrap_or_default();
         let existing_topics = existing_topics_for_agent(&state.id);
         let step_outputs = state
             .metadata
@@ -295,12 +282,7 @@ impl MemoryConsolidator {
                 .metadata
                 .get("key_findings")
                 .and_then(|value| value.as_array())
-                .map(|values| {
-                    values
-                        .iter()
-                        .filter_map(|value| value.as_str().map(str::to_string))
-                        .collect::<Vec<_>>()
-                })
+                .map(|values| values.iter().filter_map(|value| value.as_str().map(str::to_string)).collect::<Vec<_>>())
                 .unwrap_or_default(),
             step_outputs,
             worker_messages,
@@ -396,10 +378,7 @@ Return valid JSON only with this schema:\n\
 fn parse_response(raw: &str) -> Result<ConsolidationResponse> {
     let cleaned = raw.trim().trim_start_matches("```json").trim_start_matches("```").trim_end_matches("```").trim();
     serde_json::from_str(cleaned).with_context(|| {
-        format!(
-            "memory consolidation returned invalid JSON: {}",
-            raw.chars().take(300).collect::<String>()
-        )
+        format!("memory consolidation returned invalid JSON: {}", raw.chars().take(300).collect::<String>())
     })
 }
 
@@ -410,12 +389,7 @@ fn existing_topics_for_agent(agent_id: &str) -> Vec<ExistingTopic> {
         .filter_map(|(key, content)| {
             let topic_key = key.strip_prefix(&prefix)?.to_string();
             let (title, hook) = parse_title_hook(&content);
-            Some(ExistingTopic {
-                key: topic_key,
-                title,
-                hook,
-                content,
-            })
+            Some(ExistingTopic { key: topic_key, title, hook, content })
         })
         .collect::<Vec<_>>();
     topics.sort_by(|left, right| left.key.cmp(&right.key));
@@ -473,7 +447,9 @@ fn trim_large_json(value: serde_json::Value) -> serde_json::Value {
             };
             serde_json::Value::String(clipped)
         }
-        serde_json::Value::Array(items) => serde_json::Value::Array(items.into_iter().take(20).map(trim_large_json).collect()),
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.into_iter().take(20).map(trim_large_json).collect())
+        }
         serde_json::Value::Object(map) => {
             let mut out = serde_json::Map::new();
             for (index, (key, value)) in map.into_iter().enumerate() {
@@ -521,11 +497,8 @@ fn sanitize_topics(topics: Vec<TopicDraft>) -> Vec<TopicDraft> {
 }
 
 fn collect_prune_keys(prune: &[String], topics: &[TopicDraft]) -> BTreeSet<String> {
-    let mut out = prune
-        .iter()
-        .map(|value| topic_slug(value, value))
-        .filter(|value| !value.is_empty())
-        .collect::<BTreeSet<_>>();
+    let mut out =
+        prune.iter().map(|value| topic_slug(value, value)).filter(|value| !value.is_empty()).collect::<BTreeSet<_>>();
     for topic in topics {
         for superseded in &topic.supersedes {
             out.insert(superseded.clone());
@@ -557,16 +530,9 @@ fn render_index(topics: &BTreeMap<String, ExistingTopic>) -> String {
     topics
         .values()
         .map(|topic| {
-            let title = if topic.title.trim().is_empty() {
-                humanize_key(&topic.key)
-            } else {
-                topic.title.clone()
-            };
-            let hook = if topic.hook.trim().is_empty() {
-                "durable project memory".to_string()
-            } else {
-                topic.hook.clone()
-            };
+            let title = if topic.title.trim().is_empty() { humanize_key(&topic.key) } else { topic.title.clone() };
+            let hook =
+                if topic.hook.trim().is_empty() { "durable project memory".to_string() } else { topic.hook.clone() };
             format!("- [{}]({}) - {}", title.trim(), topic_memory_key(&topic.key), truncate(&hook, 140))
         })
         .collect::<Vec<_>>()
@@ -595,11 +561,7 @@ fn consolidation_summary(summary: &str, topics_saved: &[String], prune_keys: &BT
     } else if topics_saved.is_empty() && prune_keys.is_empty() {
         "memory consolidation found no durable updates".into()
     } else {
-        format!(
-            "consolidated {} topic(s) and pruned {} topic(s)",
-            topics_saved.len(),
-            prune_keys.len()
-        )
+        format!("consolidated {} topic(s) and pruned {} topic(s)", topics_saved.len(), prune_keys.len())
     }
 }
 
@@ -642,11 +604,7 @@ fn humanize_key(key: &str) -> String {
 }
 
 fn first_non_empty(values: &[&str]) -> Option<String> {
-    values
-        .iter()
-        .map(|value| value.trim())
-        .find(|value| !value.is_empty())
-        .map(str::to_string)
+    values.iter().map(|value| value.trim()).find(|value| !value.is_empty()).map(str::to_string)
 }
 
 fn truncate(value: &str, max_chars: usize) -> String {

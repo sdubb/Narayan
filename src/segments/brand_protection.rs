@@ -86,5 +86,3 @@ pub fn plugin(deps: &SharedDeps, tenant_id: &str) -> SegmentPlugin {
         sla_policies: vec![],
     }
 }
-
-

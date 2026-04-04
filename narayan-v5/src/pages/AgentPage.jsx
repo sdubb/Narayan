@@ -6,11 +6,14 @@ import {
   Zap, AlertCircle, CheckCircle2, XCircle, RotateCcw,
   Webhook, Calendar, Hand, GitBranch, Cpu, DollarSign,
   MessageSquare,
+  Activity,
 } from 'lucide-react';
 import { agentDefs as agentDefsApi } from '../api';
 import PlanModeChat from '../components/agent/PlanModeChat';
 import AgentChatDrawer from '../components/agent/AgentChatDrawer';
 import RoleChatDrawer from '../components/agent/RoleChatDrawer';
+import AgentTimeline from '../components/agent/AgentTimeline';
+import SwarmCanvas from '../components/agent/SwarmCanvas';
 import RunDetailDrawer from '../components/agent/RunDetailDrawer';
 import SavingsCard from '../components/cards/SavingsCard';
 import AgentMessagesTab from '../components/agent/AgentMessagesTab';
@@ -26,6 +29,11 @@ function timeAgo(iso) {
   if (h > 0)  return `${h}h ago`;
   if (m > 0)  return `${m}m ago`;
   return 'just now';
+}
+
+function safeNumber(value, fallback = 0) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
 }
 
 function TriggerIcon({ type }) {
@@ -60,6 +68,11 @@ function StatusDot({ status }) {
     cancelled: 'bg-tx-4',
   }[status] || 'bg-tx-4';
   return <span className={clsx('size-2 rounded-full inline-block shrink-0', cfg)} />;
+}
+
+function pickTimelineRun(goalInstances) {
+  if (!Array.isArray(goalInstances) || goalInstances.length === 0) return null;
+  return goalInstances.find((gi) => gi.status === 'running' || gi.status === 'pending') || goalInstances[0];
 }
 
 function RoleStatusBadge({ status }) {
@@ -105,6 +118,7 @@ function RoleCard({ role, agentId, onTrigger, onRefresh, onChat, onRunClick }) {
       setTimeout(() => {
         agentDefsApi.listRoleInstances(agentId, role.id, 10)
           .then(r => setInstances(r.goal_instances || []));
+        onRefresh?.();
       }, 1200);
     } catch {}
     finally { setTriggering(false); }
@@ -206,17 +220,17 @@ function RoleCard({ role, agentId, onTrigger, onRefresh, onChat, onRunClick }) {
                     >
                       <StatusDot status={inst.status} />
                       <span className="text-tx-2 capitalize">{inst.status.replace(/_/g, ' ')}</span>
-                      {inst.cost_usd > 0 && (
+                      {safeNumber(inst.cost_usd) > 0 && (
                         <span className="flex items-center gap-0.5 text-tx-4">
                           <DollarSign size={9} />
-                          {inst.cost_usd.toFixed(4)}
+                          {safeNumber(inst.cost_usd).toFixed(4)}
                         </span>
                       )}
-                      {inst.human_hours_saved > 0 && (
+                      {safeNumber(inst.human_hours_saved) > 0 && (
                         <span className="text-ok text-[10px]">
-                          +{inst.human_hours_saved < 1
-                            ? `${Math.round(inst.human_hours_saved * 60)}m`
-                            : `${inst.human_hours_saved.toFixed(1)}h`} saved
+                          +{safeNumber(inst.human_hours_saved) < 1
+                            ? `${Math.round(safeNumber(inst.human_hours_saved) * 60)}m`
+                            : `${safeNumber(inst.human_hours_saved).toFixed(1)}h`} saved
                         </span>
                       )}
                       <span className="ml-auto text-tx-4">{timeAgo(inst.created_at)}</span>
@@ -234,27 +248,30 @@ function RoleCard({ role, agentId, onTrigger, onRefresh, onChat, onRunClick }) {
 }
 
 // ── Main AgentPage ─────────────────────────────────────────────────────────
-export default function AgentPage({ agentId, onBack }) {
+export default function AgentPage({ agentId, onBack, onNavigateSettings = null }) {
   const [agent,       setAgent]      = useState(null);
   const [roles,       setRoles]      = useState([]);
+  const [goalInstances, setGoalInstances] = useState([]);
   const [loading,     setLoading]    = useState(true);
   const [error,       setError]      = useState('');
   const [showAddRole, setShowAddRole] = useState(false);
   const [showAgentChat, setShowAgentChat] = useState(false);
   const [chatRole,    setChatRole]   = useState(null); // { id, name } | null
   const [selectedRun, setSelectedRun] = useState(null); // goal_instance id | null
-  const [activeTab,   setActiveTab]  = useState('roles');
+  const [activeTab,   setActiveTab]  = useState('timeline');
 
   const load = useCallback(async () => {
     if (!agentId) return;
     setLoading(true);
     try {
-      const [agentRes, rolesRes] = await Promise.all([
+      const [agentRes, rolesRes, runsRes] = await Promise.all([
         agentDefsApi.get(agentId),
         agentDefsApi.listRoles(agentId),
+        agentDefsApi.listGoalInstances(agentId, 25),
       ]);
       setAgent(agentRes);
       setRoles(rolesRes.roles || []);
+      setGoalInstances(runsRes.goal_instances || []);
     } catch (e) {
       setError(e.message);
     } finally {
@@ -290,6 +307,15 @@ export default function AgentPage({ agentId, onBack }) {
   const activeRoles    = roles.filter(r => r.status === 'active');
   const inactiveRoles  = roles.filter(r => r.status !== 'active');
   const pendingRoles   = roles.filter(r => ['draft', 'testing'].includes(r.status));
+  const activeRun = pickTimelineRun(goalInstances);
+  const runtimeAgentId = activeRun?.agent_state_id || activeRun?.agent_id || null;
+  const runtimeStatus = activeRun?.status || agent.status || 'draft';
+  const runtimeAgent = runtimeAgentId ? {
+    ...agent,
+    id: runtimeAgentId,
+    goal: activeRun?.input_data?.description || agent.goal || agent.name,
+    status: runtimeStatus,
+  } : null;
 
   return (
     <>
@@ -364,6 +390,18 @@ export default function AgentPage({ agentId, onBack }) {
         {/* ── Tabs Header ──────────────────────────────────────── */}
         <div className="px-6 py-0 border-b border-border bg-bg flex items-center gap-6">
           <button
+            onClick={() => setActiveTab('timeline')}
+            className={clsx('py-3 text-sm font-medium border-b-2 transition-colors', activeTab === 'timeline' ? 'border-accent text-accent' : 'border-transparent text-tx-3 hover:text-tx-2')}
+          >
+            Timeline
+          </button>
+          <button
+            onClick={() => setActiveTab('swarm')}
+            className={clsx('py-3 text-sm font-medium border-b-2 transition-colors', activeTab === 'swarm' ? 'border-accent text-accent' : 'border-transparent text-tx-3 hover:text-tx-2')}
+          >
+            Swarm
+          </button>
+          <button
             onClick={() => setActiveTab('roles')}
             className={clsx('py-3 text-sm font-medium border-b-2 transition-colors', activeTab === 'roles' ? 'border-accent text-accent' : 'border-transparent text-tx-3 hover:text-tx-2')}
           >
@@ -392,9 +430,46 @@ export default function AgentPage({ agentId, onBack }) {
         {/* ── Tab Content ──────────────────────────────────────── */}
         <div className="px-6 py-5 space-y-5">
 
-          {activeTab === 'messages' && <AgentMessagesTab agentId={agentId} />}
-          {activeTab === 'tasks' && <AgentTasksTab agentId={agentId} />}
-          {activeTab === 'memory' && <AgentMemoryTab agentId={agentId} />}
+          {activeTab === 'timeline' && (
+            <div className="rounded-2xl border border-border bg-bg-card p-4">
+              {runtimeAgentId ? (
+                <AgentTimeline
+                  agentId={runtimeAgentId}
+                  initialStatus={runtimeStatus}
+                  onNavigateSettings={onNavigateSettings}
+                />
+              ) : (
+                <div className="flex flex-col items-center justify-center py-16 text-center">
+                  <div className="size-12 rounded-2xl bg-bg-active flex items-center justify-center mb-4">
+                    <Activity size={20} className="text-tx-4" />
+                  </div>
+                  <p className="text-sm font-medium text-tx-1 mb-1">No live run yet</p>
+                  <p className="text-xs text-tx-3 max-w-xs leading-relaxed">
+                    Trigger a role to start a runtime agent. The timeline will attach to that live run automatically.
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
+          {activeTab === 'swarm' && (
+            <div className="h-[70vh] rounded-2xl border border-border bg-bg-card overflow-hidden">
+              {runtimeAgent ? (
+                <SwarmCanvas parentAgent={runtimeAgent} onBack={() => setActiveTab('timeline')} />
+              ) : (
+                <div className="flex h-full items-center justify-center p-6 text-center">
+                  <div>
+                    <p className="text-sm font-medium text-tx-1 mb-1">No live swarm to inspect</p>
+                    <p className="text-xs text-tx-3 max-w-sm leading-relaxed">
+                      Once a role is running, this view will show the current runtime agent and its children.
+                    </p>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+          {activeTab === 'messages' && <AgentMessagesTab agentId={runtimeAgentId} />}
+          {activeTab === 'tasks' && <AgentTasksTab agentId={runtimeAgentId} />}
+          {activeTab === 'memory' && <AgentMemoryTab agentId={runtimeAgentId} />}
 
           {activeTab === 'roles' && roles.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-16 text-center">

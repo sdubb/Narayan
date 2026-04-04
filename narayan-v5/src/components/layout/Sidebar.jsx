@@ -28,12 +28,20 @@ function AgentItem({ agent, selected, expanded, onToggleExpand, onClick }) {
 
   return (
     <div>
-      <motion.button
+      <motion.div
         onClick={onClick}
+        role="button"
+        tabIndex={0}
+        onKeyDown={e => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            onClick?.(e);
+          }
+        }}
         layout
         layoutId={agent.id}
         className={clsx(
-          'w-full text-left rounded-lg transition-all group',
+          'w-full text-left rounded-lg transition-all group cursor-pointer',
           selected
             ? 'bg-bg-active border-l-2 border-l-accent pl-2.5 pr-3 py-2.5'
             : 'hover:bg-bg-hover px-3 py-2.5',
@@ -69,7 +77,7 @@ function AgentItem({ agent, selected, expanded, onToggleExpand, onClick }) {
             : <span className="italic">No roles yet</span>}
           <span className="ml-auto">{timeAgo(agent.updated_at)}</span>
         </div>
-      </motion.button>
+      </motion.div>
 
       {/* Expanded role list */}
       <AnimatePresence>

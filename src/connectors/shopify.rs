@@ -100,13 +100,7 @@ impl Connector for ShopifyConnector {
                 "note": output,
             }
         });
-        let resp = self
-            .http
-            .put(&url)
-            .header("X-Shopify-Access-Token", access_token)
-            .json(&body)
-            .send()
-            .await?;
+        let resp = self.http.put(&url).header("X-Shopify-Access-Token", access_token).json(&body).send().await?;
         if !resp.status().is_success() {
             anyhow::bail!("Shopify delivery failed: {}", resp.status());
         }
@@ -118,12 +112,7 @@ impl Connector for ShopifyConnector {
         let access_token = Self::access_token(config).ok_or_else(|| anyhow::anyhow!("missing access_token"))?;
 
         let url = format!("{}/shop.json", Self::api_base(&shop_domain));
-        let resp = self
-            .http
-            .get(&url)
-            .header("X-Shopify-Access-Token", access_token)
-            .send()
-            .await?;
+        let resp = self.http.get(&url).header("X-Shopify-Access-Token", access_token).send().await?;
         if !resp.status().is_success() {
             anyhow::bail!("Shopify auth validation failed: {}", resp.status());
         }

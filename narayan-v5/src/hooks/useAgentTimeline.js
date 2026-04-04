@@ -43,7 +43,7 @@ function replayToEvents(replay) {
 }
 
 function isTerminalStatus(status) {
-  return status === 'completed' || status === 'failed';
+  return ['completed', 'failed', 'cancelled', 'partially_complete'].includes(status);
 }
 
 function nextStatusFromEvent(type) {
@@ -72,6 +72,7 @@ function buildGroupedEvents(events) {
       stepCount: 0, rationale: '', jobType: '', steps: [],
       approvalNeeded: false, replanning: false,
       rejectionCount: 0, missingCredentials: [], stepConfidence: [],
+      runtimePolicy: '', researchSummary: '',
       judgementCount: 0,
     },
     steps: [],
@@ -97,6 +98,8 @@ function buildGroupedEvents(events) {
       grouped.plan.rationale = ev.rationale || '';
       grouped.plan.jobType   = ev.job_type  || '';
       grouped.plan.steps     = ev.steps     || [];
+      grouped.plan.runtimePolicy  = ev.runtime_policy  || '';
+      grouped.plan.researchSummary = ev.research_summary || '';
     }
     if (t === 'plan_approval_needed') {
       grouped.plan.approvalNeeded       = true;
@@ -108,6 +111,8 @@ function buildGroupedEvents(events) {
       grouped.plan.rejectionCount       = ev.rejection_count       || 0;
       grouped.plan.missingCredentials   = ev.missing_credentials   || [];
       grouped.plan.stepConfidence       = ev.step_confidence       || [];
+      grouped.plan.runtimePolicy        = ev.runtime_policy        || grouped.plan.runtimePolicy;
+      grouped.plan.researchSummary      = ev.research_summary      || grouped.plan.researchSummary;
     }
     if (t === 'plan_rejected') {
       grouped.plan.replanning     = true;
@@ -125,9 +130,16 @@ function buildGroupedEvents(events) {
     // Steps
     if (t === 'step_started') {
       currentStepIndex = grouped.steps.length;
+      const desc = ev.description || '';
+      const isItemMatch = desc.match(/(.+) \(Item \d+\/\d+\)$/);
+      const isJoinMatch = desc.startsWith('Join results for ');
+
       grouped.steps.push({
         index: ev.step_index ?? grouped.steps.length,
-        description: ev.description || '',
+        description: desc,
+        isForEachItem: !!isItemMatch,
+        forEachTitle: isItemMatch ? isItemMatch[1] : null,
+        isJoin: !!isJoinMatch,
         tools: [],
         policy: [],
         citations: [],
@@ -341,6 +353,18 @@ export function useAgentTimeline(agentId, initialStatus, { onStatusChange, onTer
           if (cancelled || !mountedRef.current) return;
           setIsThinking(false);
           if (error?.message?.includes('sign in again')) { setConnectionState('auth_lost'); return; }
+          if (error?.status === 404 || error?.status === 410 || error?.status === 403) {
+            setConnectionState('closed');
+            appendEvent({
+              type: 'stream_status',
+              ts: nowTs(),
+              summary: error?.status === 404
+                ? 'No live stream is available for this run yet.'
+                : 'The stream is no longer available.',
+              detail: error?.message || '',
+            });
+            return;
+          }
           appendEvent({ type: 'stream_error', ts: nowTs(), summary: error?.message || 'Stream error' });
           scheduleReconnect(error);
         },

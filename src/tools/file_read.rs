@@ -17,16 +17,24 @@ impl Tool for FileReadTool {
          Supports optional line range. Capped at 10 MiB."
     }
     fn input_contract(&self) -> Option<String> {
-        Some("{ path, start_line?, end_line?, encoding? }. path is required and may be absolute or workspace-relative.".into())
+        Some(
+            "{ path, start_line?, end_line?, encoding? }. path is required and may be absolute or workspace-relative."
+                .into(),
+        )
     }
     fn output_contract(&self) -> Option<String> {
-        Some("{ content, path, total_lines, size_bytes } or a directory listing payload if the path is a directory.".into())
+        Some(
+            "{ content, path, total_lines, size_bytes } or a directory listing payload if the path is a directory."
+                .into(),
+        )
     }
     fn when_to_use(&self) -> Option<String> {
         Some("Use to inspect file contents or list a directory before choosing a concrete file.".into())
     }
     fn when_not_to_use(&self) -> Option<String> {
-        Some("Avoid when you need to modify files or when the task is better expressed as a search or transform.".into())
+        Some(
+            "Avoid when you need to modify files or when the task is better expressed as a search or transform.".into(),
+        )
     }
     fn parameters_schema(&self) -> Vec<ParameterSchema> {
         vec![

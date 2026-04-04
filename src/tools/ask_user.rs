@@ -9,8 +9,8 @@ impl Tool for AskUserTool {
     }
     fn description(&self) -> &str {
         "Pause the agent and request input from the user. The agent enters 'clarifying' state. \
-         Use this for plain questions, secret credentials, human approvals, or connector/account setup \
-         like asking the user to connect Gmail/Google before continuing. \
+         Use this for plain questions, secret credentials, human approvals, or direct frontend card setup \
+         like opening a database, connector, MCP, or API auth card before continuing. \
          Prefer this over inventing placeholders or retrying without new information."
     }
     fn parameters_schema(&self) -> Vec<ParameterSchema> {
@@ -19,13 +19,13 @@ impl Tool for AskUserTool {
             ParameterSchema::optional(
                 "questions",
                 "array",
-                "Optional list of structured questions. Each item may include: id, type, prompt, placeholder, helper_text, options, multi_select, recommended, preview, required, secret, store_as_credential, connector_type, action_label.",
+                "Optional list of structured questions. Each item may include: id, type/question_type, prompt, placeholder, helper_text, options, multi_select, recommended, preview, required, secret, store_as_credential, connector_type, action_label, card_type, binding_target, resume_token.",
             ),
             ParameterSchema::optional("options", "array", "Optional list of answer options to present."),
             ParameterSchema::optional(
                 "type",
                 "string",
-                "Question type: clarification | approval | decision. Defaults to clarification.",
+                "Question mode: clarification | approval | decision | mcq | multi_select | text | card_open | hybrid. Defaults to clarification.",
             ),
             ParameterSchema::optional(
                 "multi_select",
@@ -64,6 +64,26 @@ impl Tool for AskUserTool {
                 "action_label",
                 "string",
                 "Optional call-to-action label for the frontend, e.g. 'Connect Gmail in Settings'.",
+            ),
+            ParameterSchema::optional(
+                "card_type",
+                "string",
+                "Optional setup card type to open directly: database, connector, mcp, or api_auth.",
+            ),
+            ParameterSchema::optional(
+                "required_fields",
+                "array",
+                "Required fields that the setup card should collect.",
+            ),
+            ParameterSchema::optional(
+                "binding_target",
+                "string",
+                "The workflow binding target this card will resolve.",
+            ),
+            ParameterSchema::optional(
+                "resume_token",
+                "string",
+                "Opaque token used to resume plan-mode compilation after card completion.",
             ),
         ]
     }
@@ -107,6 +127,16 @@ impl Tool for AskUserTool {
                 store_as_credential: args["store_as_credential"].as_str().map(str::to_string),
                 connector_type: args["connector_type"].as_str().map(str::to_string),
                 action_label: args["action_label"].as_str().map(str::to_string),
+                card_type: args["card_type"].as_str().map(str::to_string),
+                required_fields: args["required_fields"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|value| value.as_str().map(str::to_string))
+                    .collect(),
+                binding_target: args["binding_target"].as_str().map(str::to_string),
+                resume_token: args["resume_token"].as_str().map(str::to_string),
             }
             .normalized(0)]
         } else {

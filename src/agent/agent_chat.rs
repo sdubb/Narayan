@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -126,20 +126,13 @@ Rules:
 
         let mut other_agents = Vec::new();
         for other in agents.iter().filter(|other| other.id != agent_id).take(8) {
-            let role_count = self.store.list_roles_for_agent(tenant_id, &other.id).await.map(|roles| roles.len()).unwrap_or(0);
-            other_agents.push(format!(
-                "- {} [{}] roles={}",
-                other.name,
-                status_label(&other.status),
-                role_count
-            ));
+            let role_count =
+                self.store.list_roles_for_agent(tenant_id, &other.id).await.map(|roles| roles.len()).unwrap_or(0);
+            other_agents.push(format!("- {} [{}] roles={}", other.name, status_label(&other.status), role_count));
         }
 
-        let other_agents = if other_agents.is_empty() {
-            "No other agents found.".to_string()
-        } else {
-            other_agents.join("\n")
-        };
+        let other_agents =
+            if other_agents.is_empty() { "No other agents found.".to_string() } else { other_agents.join("\n") };
 
         Ok(format!(
             r#"Selected agent
@@ -205,7 +198,9 @@ pub(crate) fn trigger_summary(trigger: &crate::agent::definition::TriggerDef) ->
         }
         TriggerType::UserMessage => "user message".into(),
         TriggerType::Manual => "manual".into(),
-        TriggerType::WorkforceEvent => trigger.workforce_event_filter.clone().unwrap_or_else(|| "workforce event".into()),
+        TriggerType::WorkforceEvent => {
+            trigger.workforce_event_filter.clone().unwrap_or_else(|| "workforce event".into())
+        }
     }
 }
 

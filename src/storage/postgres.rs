@@ -185,21 +185,6 @@ impl PostgresStore {
             .execute(&self.pool)
             .await?;
 
-        // --- Migrations for Distributed Execution ---
-        sqlx::query("ALTER TABLE agents ADD COLUMN IF NOT EXISTS claimed_by TEXT").execute(&self.pool).await?;
-        sqlx::query("ALTER TABLE agents ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ")
-            .execute(&self.pool)
-            .await?;
-        sqlx::query("ALTER TABLE goal_instances ADD COLUMN IF NOT EXISTS current_step INTEGER NOT NULL DEFAULT 0")
-            .execute(&self.pool)
-            .await?;
-        sqlx::query("ALTER TABLE goal_instances ADD COLUMN IF NOT EXISTS total_steps INTEGER NOT NULL DEFAULT 0")
-            .execute(&self.pool)
-            .await?;
-        sqlx::query("ALTER TABLE goal_instances ADD COLUMN IF NOT EXISTS last_message TEXT")
-            .execute(&self.pool)
-            .await?;
-
         // ── Conversations ────────────────────────────────────────────────
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS conversations (
@@ -589,6 +574,26 @@ impl PostgresStore {
         .execute(&self.pool)
         .await?;
 
+        // --- Migrations for Distributed Execution ---
+        sqlx::query("ALTER TABLE agents ADD COLUMN IF NOT EXISTS claimed_by TEXT").execute(&self.pool).await?;
+        sqlx::query("ALTER TABLE agents ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("ALTER TABLE agents ADD COLUMN IF NOT EXISTS workflow_id TEXT").execute(&self.pool).await?;
+        sqlx::query("ALTER TABLE goal_instances ADD COLUMN IF NOT EXISTS current_step INTEGER NOT NULL DEFAULT 0")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("ALTER TABLE goal_instances ADD COLUMN IF NOT EXISTS total_steps INTEGER NOT NULL DEFAULT 0")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("ALTER TABLE goal_instances ADD COLUMN IF NOT EXISTS last_message TEXT")
+            .execute(&self.pool)
+            .await?;
+
+        // ── DAG Workflow tables ───────────────────────────────────────────
+        let wf_store = crate::storage::dag_store::PgWorkflowStore::new(self.pool.clone());
+        wf_store.migrate().await?;
+
         Ok(())
     }
 
@@ -601,8 +606,8 @@ impl PostgresStore {
                 id, tenant_id, goal, status, current_task, current_step,
                 workspace_path, memory_ref, next_run, created_at, updated_at,
                 started_at, plan, final_answer, metadata, parent_agent_id, pending_children,
-                conversation_id, plan_rejection_count, claimed_by, lease_expires_at
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
+                conversation_id, plan_rejection_count, claimed_by, lease_expires_at, workflow_id
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
             ON CONFLICT (id) DO UPDATE SET
                 goal                 = EXCLUDED.goal,
                 status               = EXCLUDED.status,
@@ -620,7 +625,8 @@ impl PostgresStore {
                 conversation_id      = EXCLUDED.conversation_id,
                 plan_rejection_count = EXCLUDED.plan_rejection_count,
                 claimed_by           = EXCLUDED.claimed_by,
-                lease_expires_at     = EXCLUDED.lease_expires_at
+                lease_expires_at     = EXCLUDED.lease_expires_at,
+                workflow_id          = EXCLUDED.workflow_id
         "#,
         )
         .bind(&state.id)
@@ -644,6 +650,7 @@ impl PostgresStore {
         .bind(state.plan_rejection_count as i32)
         .bind(&state.claimed_by)
         .bind(state.lease_expires_at)
+        .bind(&state.workflow_id)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -1771,6 +1778,37 @@ impl PostgresStore {
         Ok(rows.iter().map(row_to_goal_instance).collect())
     }
 
+    /// List goal instances for an agent definition by following its roles.
+    /// This is the correct aggregation for the agent page, because runtime
+    /// goal instances are keyed by role-derived executions rather than the
+    /// definition ID itself.
+    pub async fn list_goal_instances_for_agent_definition(
+        &self,
+        tenant_id: &str,
+        agent_definition_id: &str,
+        limit: i64,
+    ) -> Result<Vec<GoalInstance>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT gi.*
+            FROM goal_instances gi
+            LEFT JOIN agent_roles r
+              ON r.id = gi.role_id
+             AND r.tenant_id = gi.tenant_id
+            WHERE gi.tenant_id = $1
+              AND (r.agent_id = $2 OR gi.agent_id = $2)
+            ORDER BY gi.created_at DESC
+            LIMIT $3
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(agent_definition_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(row_to_goal_instance).collect())
+    }
+
     /// Update the result JSON on a goal instance (writes criteria_checks, step_outputs).
     pub async fn update_goal_instance_result(
         &self,
@@ -2339,6 +2377,7 @@ fn row_to_agent_state(row: &PgRow) -> AgentState {
         plan_rejection_count: row.try_get::<i32, _>("plan_rejection_count").ok().map(|v| v as u32).unwrap_or(0),
         claimed_by: row.try_get("claimed_by").ok().flatten(),
         lease_expires_at: row.try_get::<Option<DateTime<Utc>>, _>("lease_expires_at").ok().flatten(),
+        workflow_id: row.try_get("workflow_id").ok().flatten(),
     }
 }
 
@@ -2524,10 +2563,10 @@ fn row_to_agent_role(row: &PgRow) -> AgentRole {
             &row.try_get::<String, _>("role_category").unwrap_or_else(|_| "general".into()),
         ),
         execution_guidelines: row
-            .try_get::<Option<serde_json::Value>, _>("execution_guidelines")
+            .try_get::<Option<String>, _>("execution_guidelines")
             .ok()
             .flatten()
-            .and_then(|v| serde_json::from_value(v).ok())
+            .and_then(|v| serde_json::from_str(&v).ok())
             .unwrap_or_default(),
         connectors,
         tools,

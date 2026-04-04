@@ -166,8 +166,12 @@ export const agentMessages = {
   },
   get:      (agentId, messageId)   => req('GET', `/agents/${agentId}/messages/${messageId}`),
   ack:      (agentId, messageId)   => req('POST', `/agents/${agentId}/messages/${messageId}/ack`),
-  continueChild: (agentId, childId, instruction) =>
-    req('POST', `/agents/${agentId}/children/${childId}/continue`, { instruction }),
+  continueChild: (agentId, childId, payload) => {
+    if (typeof payload === 'string') {
+      return req('POST', `/agents/${agentId}/children/${childId}/continue`, { body: payload });
+    }
+    return req('POST', `/agents/${agentId}/children/${childId}/continue`, payload);
+  },
   listChildren: (agentId) => req('GET', `/agents/${agentId}/children`),
 };
 
@@ -374,6 +378,9 @@ export const planMode = {
       ...(templateId ? { template_id: templateId } : {}),
       ...(attachments.length ? { attachments } : {}),
     }),
+  // Fetch the persisted session state so the UI can render the current question queue and review summary
+  get: (sessionId) =>
+    req('GET', `/plan-mode/sessions/${sessionId}`),
   // Send a turn in the conversation — session tracks phase and history server-side
   turn: (sessionId, message, attachments = []) =>
     req('POST', `/plan-mode/sessions/${sessionId}/turn`, {
@@ -419,11 +426,15 @@ export function streamAgent(agentId, onEvent, onError) {
         signal:  ctrl.signal,
       });
       if (res.status === 401) {
-        onError?.(new Error('Session expired. Please sign in again.'));
+        const err = new Error('Session expired. Please sign in again.');
+        err.status = 401;
+        onError?.(err);
         return;
       }
       if (!res.ok) {
-        onError?.(new Error(`Stream failed: HTTP ${res.status}`));
+        const err = new Error(`Stream failed: HTTP ${res.status}`);
+        err.status = res.status;
+        onError?.(err);
         return;
       }
       const reader  = res.body.getReader();

@@ -1,6 +1,17 @@
 # Narayan Architecture
 
-_Last updated: April 2026. Reflects the plan-mode-first architecture, adaptive-planning-to-workflow compilation, deterministic execution, role-scoped tool pools, permission modes with enforcement policies, adaptive research compiler loop, session tasks, agent messaging, worktree gating, connector/MCP integration, memory consolidation, workspace quotas, and the tool-contract/output-schema layer._
+_Last updated: April 2026. Reflects the plan-mode-first architecture, adaptive-planning-to-workflow compilation, deterministic execution, role-scoped tool pools, permission modes with enforcement policies, adaptive research compiler loop, session tasks, agent messaging, worktree gating, connector/MCP integration, memory consolidation, workspace quotas, the tool-contract/output-schema layer, and the durable DAG engine with crash-resilient parallel execution._
+
+---
+
+## Recent Improvements
+
+These are the changes that should be easiest to notice from the last round of work:
+
+- Durable DAG workflow execution now supports parallel fan-out/fan-in instead of only linear step execution.
+- Workflow steps now carry dependency edges, retry policy, and schema validation metadata.
+- Plan mode now persists the selected database name back into the session intent, which prevents the same database-selection question from looping after the user already answered it.
+- Connector clarification now prefers exact installed names, so the resolver is less likely to keep re-asking vague follow-up questions.
 
 ---
 
@@ -18,7 +29,7 @@ Workspace storage is quota-aware at the tenant plan layer. Free, paid, and enter
 
 ```
 src/
-  agent/              Core agent runtime - plan mode, execution, evaluation
+  agent/              Core agent runtime - plan mode, execution, evaluation, DAG engine
   api/                Axum routes and SSE streaming
   auth/               JWT + API key authentication
   billing/            Stripe + PayPal subscription management
@@ -180,7 +191,29 @@ ExecutionGuidelines {
 }
 ```
 
-`workflow_outline: Vec<WorkflowStep>` is the execution contract. It stores ordered, typed steps - description, tool, args template, success criteria, and condition - and is the source of truth for runtime execution and plan-mode test mode. When present, runtime builds a deterministic `Plan` from it instead of asking the LLM planner to invent one. The `planner` module still exists as the `Plan` translator and fallback path, but workflow-outline roles do not rely on it to invent new steps.
+`workflow_outline: Vec<WorkflowStep>` is the execution contract. It stores ordered, typed steps — description, tool, args template, success criteria, condition, DAG dependency edges (`depends_on`), retry policy, schema enforcement mode, and input/output schemas — and is the source of truth for runtime execution and plan-mode test mode. When present, runtime builds a deterministic `Plan` from it instead of asking the LLM planner to invent one. The `planner` module still exists as the `Plan` translator and fallback path, but workflow-outline roles do not rely on it to invent new steps.
+
+### WorkflowStep (enriched)
+```
+WorkflowStep {
+    description:     String,
+    tool:            Option<String>,
+    args_template:   Option<serde_json::Value>,
+    success_criteria:String,
+    condition:       Option<StepCondition>,
+    depends_on:      Vec<usize>,              // DAG dependency edges — indices of predecessor steps
+    retry_policy:    Option<RetryPolicy>,      // engine-managed retry (max_attempts, backoff, retry_on patterns)
+    schema_mode:     SchemaMode,              // Strict | Warn | Off — per-step schema enforcement
+    input_schema:    Option<serde_json::Value>,// JSON Schema for expected input from predecessors
+    output_schema:   Option<serde_json::Value>,// JSON Schema for the output this step must produce
+}
+```
+
+`depends_on` enables DAG topologies (fan-out, fan-in, diamond). Steps with empty `depends_on` are roots. The DAG engine resolves the topology at runtime and executes independent steps in parallel.
+
+`RetryPolicy` is engine-managed — no LLM evaluator involved. The engine retries deterministically based on `max_attempts`, exponential `backoff_secs`, and optional `retry_on` error patterns.
+
+`SchemaMode` defaults to `Strict`. In strict mode, the engine validates step input/output against the declared JSON schemas and fails the step on mismatch. `Warn` logs but continues. `Off` skips validation entirely.
 
 ### Tool contracts and output schemas
 
@@ -513,41 +546,110 @@ If the user chooses split, remaining `RoleResponsibility` objects are stashed in
 ### Worker â†’ AgentLoop
 The `WorkerPool` runs a configurable number of async workers. Each worker pops tasks from the queue and calls `AgentLoop::run_step()` once per task. The loop is not a continuous loop â€” it runs exactly one step, returns a `StepOutcome`, and re-enqueues if more steps remain.
 
-```
-StepOutcome {
-    Continue { delay_secs },
-    NeedsClarification { questions },
-    PlanApprovalNeeded,
-    Infeasible { reason },
-    Complete,
-    PartiallyComplete { note },   // new: criteria not all met
-    Failed(String),
-    Delegating { child_ids },
-}
-```
-
 ### Run step sequence
-```
-1. Preflight           â†’ credential checks, SLA setup, role-policy checks
-2. Deterministic plan  â†’ Plan::from_workflow_outline(role) when workflow_outline exists
-3. Clarification gate  â†’ ask user if needed
-4. Inject facts        â†’ OPTIMIZED: recent facts only (top 5 from current run, not all historical)
-5. Execute step        â†’ LlmExecutor.execute_step()
-6. Write step_outputs  â†’ items_processed + connector_writes â†’ state.metadata
-7. FailureAction check â†’ check_failure_rules_for_deterministic_abort() before evaluator
-8. Evaluate + Reflect  â†’ LlmEvaluator.evaluate_and_reflect()
-9. EARLY COMPLETION    â†’ check_early_completion() mid-run CompletionCriteria check
-10. Verdict dispatch   â†’ Continue | Retry (backoff) | GoalComplete | Abort | TransientError | PermanentError | PolicyViolation | RateLimited
-11. ATOMIC SAVE        â†’ StepStateTransaction::commit() â€” all metadata mutations at once
-12. GoalComplete path  â†’ check_completion_criteria() â†’ Complete | PartiallyComplete
-13. Persistence        â†’ write criteria_checks to goal_instance.result
-```
+1. Preflight           → credential checks, SLA setup, role-policy checks
+2. Deterministic plan  → Plan::from_workflow_outline(role) when workflow_outline exists
+3. DAG routing check   → if plan has depends_on edges + workflow_store → delegate to DagEngine
+4. Condition Skip      → if deterministic condition rules fail, skip processing.
+5. Orchestrator        → StepOrchestrator::run_step() (evaluates injection, execution, extraction, failures)
+6. Verdict dispatch    → Match on `StepVerdict` for `Delegating`, `NeedsClarification`, `DeterministicAbort`
+7. Evaluate + Reflect  → LlmEvaluator.evaluate_and_reflect() (linear fast path only)
+8. EARLY COMPLETION    → check_early_completion() mid-run CompletionCriteria check
+9. Verdict Feedback    → Continue | Retry (backoff) | GoalComplete | Abort | TransientError | PermanentError | PolicyViolation | RateLimited
+10. ATOMIC SAVE        → StepStateTransaction::commit() — all metadata mutations at once
+11. GoalComplete path  → check_completion_criteria() → Complete | PartiallyComplete
+12. Persistence        → write criteria_checks to goal_instance.result
 
 Key optimizations (March 2026):
 - **Knowledge graph**: Limited to recent facts (top 5 from this agent's run) instead of querying all historical facts. Reduces noise and ensures context is from current execution.
 - **Early completion**: Mid-run CompletionCriteria checks (e.g., `AllItemsProcessed`, `RecordUpdated`) can now trigger goal completion before all plan steps execute, avoiding wasted work.
 - **Atomic state save**: All step-related metadata mutations (retry_count, last_error, key_findings, step_outputs) are batched in `StepStateTransaction` and committed atomically. Prevents corrupt state on crash.
 - **Error classification**: `StepOutcome` now has granular variants (`TransientError`, `PermanentError`, `PolicyViolation`, `RateLimited`) for smarter retry strategies and better observability.
+
+### Step Orchestrator
+
+The `StepOrchestrator` (`src/agent/orchestrator.rs`) serves as the universal runtime hub for executing individual plan steps. It implements all standard step hooks *without* evaluating LLMs:
+- **Pre-hooks**: Injects knowledge graph context, injects parent-child context for delegation, and resolves runtime template variables.
+- **Execution**: Dispatches `Executor.execute_step()`.
+- **Post-hooks**: Captures connector execution trace results, checks deterministic `FailureRules`, detects step-level delegation and clarification signals, emits tool usage metrics, tracks citations, extracts knowledge graph entities, and saves findings to `pgvector`.
+
+It returns a `StepVerdict` (`Executed`, `Skipped`, `Delegating`, `NeedsClarification`, `DeterministicAbort`, `Error`). Both `DagEngine` and `AgentLoop` rely on the Orchestrator for all shared boilerplate.
+
+### Durable DAG engine
+
+The DAG engine (`agent/dag_engine.rs`) provides crash-resilient parallel workflow execution using the `StepOrchestrator`. It replaces the linear step-by-step loop when a plan contains explicit `depends_on` dependency edges.
+
+#### Architecture
+
+```
+PlannedStep.depends_on: Vec<usize>    ← declared in plan/workflow_outline
+        ↓
+AgentLoop.run_step()                   ← detects DAG topology
+        ↓
+WorkflowStore.create_workflow()        ← persists to Postgres before execution
+        ↓
+DagEngine.run()                        ← scheduler loop
+    ├── resolve_ready_steps()          ← finds steps whose predecessors all succeeded
+    ├── tokio::spawn per ready step    ← parallel execution
+    ├── orchestrator.run_step()        ← handles all pre/post hooks
+    ├── step verdict → checkpoint      ← atomic DB write per step completion
+    └── loop until all terminal        ← continues until no more ready steps
+        ↓
+StepOutcome::Complete / Failed         ← returned to AgentLoop
+```
+
+#### Step state machine
+
+Each step transitions through a strict state machine:
+
+```
+Pending → Running → Succeeded
+                  → Failed → (retry if RetryPolicy allows) → Running
+                  → Skipped (predecessor failed or condition failed)
+                  → AwaitingInput (user clarification needed)
+                  → AwaitingChildren (agent delegation)
+```
+
+State transitions are atomic — the `WorkflowStore` checkpoints every transition to Postgres. On crash recovery, the engine reads the last persisted state and resumes from where it stopped.
+
+#### Parallel execution model
+
+- **Fan-out:** Steps with no mutual dependencies execute concurrently via `tokio::spawn`.
+- **Fan-in:** A step with multiple `depends_on` entries waits until ALL predecessors reach `Succeeded`.
+- **Human/Child in the loop:** Steps returning `AwaitingInput` or `AwaitingChildren` are persisted as active blockers, cleanly suspending the node until the external event is fulfilled without blocking the event loop.
+- **Diamond:** Natural composition — fan-out followed by fan-in works without special handling.
+- **Isolation:** Each parallel step reads from DB and writes output to DB. No shared mutable in-memory state. `AgentState` is config/metadata/identity only — NOT a data pipeline.
+
+#### The LLM's Role (Worker vs. Orchestrator)
+
+The LLM is no longer used for control flow orchestration (deciding the next step, handling retries, or evaluating success/failure). Historical reliance on LLM evaluators caused non-deterministic execution loops, hallucinated fixes, and unreliable schema validation based on "vibes". In the DAG engine, state transitions, retry backoffs, and JSON schema enforcement are 100% deterministic Rust logic.
+
+However, the LLM is **still fully available for step execution**. If a user's workflow requires an LLM (e.g., extracting intent, summarizing a Zendesk ticket, or drafting an email), the DAG engine executes it as a standard worker node. A `StepNode` with `tool: None` signals a pure LLM reasoning task, allowing the orchestrator to pass the context and instruction to the LLM. The LLM has simply been shifted from the "manager" of the loop to a "worker" processor inside it.
+
+#### DAG routing in AgentLoop
+
+`AgentLoop.run_step()` automatically detects DAG workflows:
+
+1. After plan creation, check if ANY step has non-empty `depends_on`
+2. If yes AND `workflow_store` is available:
+   - Create a `Workflow` from the plan steps
+   - Persist it via `WorkflowStore.create_workflow()`
+   - Store `workflow_id` on `AgentState`
+   - Instantiate `DagEngine` and call `.run()`
+   - Return the final `StepOutcome` to the worker
+3. If no DAG edges, fall through to the existing linear path
+
+This routing is transparent — the `Worker` is agnostic to whether a workflow is linear or DAG-based.
+
+#### Step artifacts
+
+`step_artifacts.rs` provides per-step output files instead of stuffing everything into JSONB metadata. Each step writes structured output to a file in the workspace under `_dag/step_{index}/output.json`. This keeps step outputs inspectable, bounded, and crash-safe.
+
+#### Infrastructure hardening
+
+- **Progress tracking deltas:** `StepStateTransaction` tracks `lastReportedToolCount` to prevent duplicate progress reporting.
+- **Step history cap:** `STEP_HISTORY_CAP = 30` — the step history ring buffer prevents unbounded memory growth in long-running workflows.
+- **Message cap:** Conversation history is bounded to prevent LLM context window overflow.
 
 The normal runtime path is workflow-outline-first. It does not ask the LLM planner to invent a plan when a role already has `workflow_outline`; the LLM planner is only used as a fallback when the outline is missing or invalid.
 
@@ -691,9 +793,10 @@ plan_mode_sessions      — Plan-mode conversation snapshots (JSONB: conversatio
 role_chat_sessions      — In-progress role chat conversations (JSONB: conversation, pending_change)
 connector_installs      — OAuth tokens + API keys per tenant per connector
 tenant_connectors       — Custom connections (databases, REST APIs, MCP servers)
-agents                  — Runtime AgentState (ephemeral, re-created per run)
+agents                  — Runtime AgentState (ephemeral, re-created per run; includes workflow_id TEXT for DAG engine binding)
 session_tasks           — SessionTask graph for plan-mode and runtime coordination (id, agent_id, subject, description, status, owner, blocked_by, blocks, output JSONB, metadata JSONB)
 agent_messages          — Durable agent-to-agent messages (sender_agent_id, recipient_agent_id, kind, subject, body, task_id, metadata JSONB, delivered_at)
+dag_workflows           — Durable DAG workflow state (workflow_id, agent_id, status, steps JSONB with per-step StepStatus, created_at, updated_at)
 vector_documents        — pgvector embeddings for step findings
 ```
 
@@ -1578,6 +1681,8 @@ Narayan started as a basic agent loop with a plan/execute/evaluate cycle. Over m
 
 **Session 20:** Memory consolidation using Claude-style logic — added real consolidation service instead of ad hoc memory writes. Implements orient -> gather -> consolidate -> prune pattern on Narayan's existing memory stack. Reads successful run history, updates durable topic memories with index, embeds consolidated topics, prunes superseded memory. Consolidator service + manual `memory_consolidate` tool + automatic success-hook in agent loop ensures durable memories updated only from successful outcomes.
 
+**Session 21:** Durable DAG engine — replaced the linear step-by-step execution loop with a crash-resilient DAG workflow engine. Core additions: `dag.rs` (StepStatus state machine, StepNode, Workflow, WorkflowStatus — 13 unit tests), `dag_engine.rs` (parallel scheduler loop with tokio::spawn fan-out, DB-checkpoint-per-step, fan-in join), `dag_store.rs` (WorkflowStore trait + PgWorkflowStore for durable step-level checkpointing), `step_artifacts.rs` (per-step output files instead of JSONB stuffing). `PlannedStep` and `WorkflowStep` both gained `depends_on: Vec<usize>` for DAG topology. `WorkflowStep` also gained `RetryPolicy` (engine-managed, no LLM evaluator), `SchemaMode` (Strict/Warn/Off), and input/output JSON schemas. `AgentLoop.run_step()` now auto-routes to the `DagEngine` when a plan has dependency edges and a `WorkflowStore` is available. `AgentState` gained `workflow_id`. Infrastructure hardening: progress tracking deltas, step history cap (30), message cap for unbounded memory prevention. Design decision: DB is the source of truth for parallel steps — no shared mutable in-memory state. Each step reads from DB, writes output to DB. `AgentState` becomes config/metadata/identity only.
+
 ---
 ## The three things that make this different from other agent platforms
 
@@ -1702,11 +1807,34 @@ agent/evaluator.rs            ← step evaluation + completion criteria check
     LlmEvaluator              ← fast-path for unambiguous success, LLM call for ambiguous
 
 agent/loop.rs                 ← the step state machine — most complex file in the codebase
-    run_step()                ← workflow-outline-first sequence (preflight → execute → evaluate → criteria check)
+    run_step()                ← workflow-outline-first sequence (preflight → DAG routing → execute → evaluate → criteria check)
+    DAG routing               ← if plan has depends_on edges + workflow_store → delegate to DagEngine
+    with_workflow_store()     ← builder to inject WorkflowStore for DAG persistence
     apply_failure_action_override()← FailureAction dispatch BEFORE evaluator
     EvalVerdict               ← Continue | Retry | Abort | GoalComplete → dispatched in match
     auto-consolidation hook   ← triggers memory consolidation on successful completion
     child-to-parent reporting ← automatic structured result envelopes on worker completion/failure
+
+agent/dag.rs                  ← DAG primitives and topology
+    StepStatus                ← Pending | Running | Succeeded | Failed | Skipped — per-step state machine
+    StepNode                  ← step metadata + status + depends_on edges + output storage
+    Workflow                  ← full DAG: id, agent_id, steps, status, timestamps
+    WorkflowStatus            ← Pending | Running | Succeeded | Failed | Cancelled
+    13 unit tests             ← topology validation, fan-out/fan-in, diamond, cycle detection
+
+agent/dag_engine.rs           ← scheduler loop for parallel DAG execution
+    DagEngine                 ← holds Executor + WorkflowStore + EventBus
+    run()                     ← main scheduler: resolve_ready → spawn parallel → checkpoint → loop
+    resolve_ready_steps()     ← finds steps whose predecessors all succeeded
+    Step isolation             ← each parallel step reads/writes DB only, no shared mutable state
+
+agent/step_artifacts.rs       ← per-step output files
+    StepArtifactWriter        ← writes structured output to _dag/step_{index}/output.json
+    StepArtifactReader        ← reads step outputs for fan-in aggregation
+
+storage/dag_store.rs          ← DAG persistence layer
+    WorkflowStore trait       ← create_workflow, get_workflow, update_step_status, update_workflow_status
+    PgWorkflowStore           ← Postgres implementation with JSONB step state
 
 agent/savings.rs              ← ROI estimation — fire-and-forget after Complete/PartiallyComplete
     quality_factor()          ← 0.0 (no output) / 0.5 (result exists, no counts) / 1.0 (real counts)
@@ -1855,6 +1983,10 @@ All 8 are test infrastructure issues from the `StepResult` field additions and `
 
 ## State of the codebase as of this session
 
+- **DAG engine:** Durable, crash-resilient DAG workflow engine with parallel fan-out/fan-in execution. Steps transition through Pending → Running → Succeeded/Failed/Skipped. Engine checkpoints every state transition to Postgres. Auto-routing in `AgentLoop.run_step()` delegates to DAG engine when `depends_on` edges are present.
+- **Step state machine:** `StepStatus` (Pending, Running, Succeeded, Failed, Skipped) with per-step `RetryPolicy` (max_attempts, backoff, retry_on patterns), `SchemaMode` (Strict/Warn/Off), and input/output JSON schema validation.
+- **Step artifacts:** Per-step output files at `_dag/step_{index}/output.json` instead of JSONB metadata stuffing.
+- **Infrastructure hardening:** Progress tracking deltas (`lastReportedToolCount`), step history cap (30), message cap for unbounded memory prevention.
 - **Templates:** All 23 templates are defined and wired through template fast-path (initial 20 + call_center_triage, commerce_fulfillment_ops, brand_protection_monitoring).
 - **Plan mode:** Includes two-pass intent extraction, connector resolution, clarification pipeline, deterministic test/revise flow, workforce-event setup steps, adaptive research memo synthesis before review/save, and runtime policy disclosure in review card.
 - **Role policy:** `role_category`, `memory_scope`, `execution_limits`, `permission_mode`, `tool_pool`, and `execution_strategy` are persisted and used by runtime prompts. `workflow_outline` is the execution contract for both runtime and test mode.

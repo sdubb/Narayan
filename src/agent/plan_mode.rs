@@ -42,6 +42,7 @@ use crate::{
         RoleStatus, TenantConnector, ToolPool, TriggerDef, TriggerType,
     },
     agent::planner::AdaptiveResearchMemo,
+    agent::workflow_compiler::{CompilerResult, WorkflowCompiler},
     connectors::ConnectorInstallStore,
     gateway::{GatewayRequest, LlmGateway, TaskComplexity},
     providers::Message,
@@ -103,8 +104,8 @@ Respond ONLY with valid JSON. Schema:
   "needed_connector_categories": ["connector category suffixes such as crm, support, communication"],
   "candidate_connectors": ["exact installed or built-in connector names if likely"],
   "missing_capabilities": ["custom_db|custom_api|connector/<category>|tool/<category>"],
-  "workflow_outline": ["short ordered workflow hints, e.g. fetch records, enrich them, update CRM, notify Slack"],
-  "uses_external_db": "registered database name, true if a database is needed but no registered name is known yet, or null",
+  "workflow_outline": ["short ordered workflow hints. If exact tool arguments are known, append them as inline JSON e.g., 'Fetch users {{\"query\": \"SELECT * FROM u\"}}'"],
+  "uses_external_db": "exact saved database name, true if a database is needed but no saved name is known yet, or null",
   "uses_external_api": "registered API name or null",
   "trigger_hint": "schedule|webhook|user_message|manual",
   "trigger_cron": "best-guess cron expression if schedule, else null",
@@ -136,7 +137,7 @@ Rules:
 - If the user likely needs a database not in the installed connectors, prefer missing_capabilities=["custom_db"]
 - If the user likely needs a custom REST backend, prefer missing_capabilities=["custom_api"]
 - If the needed connector category is clear but no installed connector is obvious, add connector/<category> to missing_capabilities
-- workflow_outline should be high-level and ordered, not low-level tool calls
+- workflow_outline should be ordered. If the exact arguments for a specific tool are known, append them as inline JSON to the hint string to enable deterministic fast-path execution.
 - For deterministic filtering, mapping, cleaning, scoring, ranking, grouping, aggregation, and schema-aligned extraction, use data_engine
 - If a workflow needs arbitrary code or a dedicated execution sandbox later, mark it as a missing capability instead of inventing a runtime tool
 - Use data_extractor first when the input is semi-structured source material; use data_engine after extraction for record-level workflows
@@ -266,11 +267,12 @@ impl ConnectorResolver {
             .unwrap_or_default();
 
         // ── Tool overrides for external_db and external_api ─────────────
-        let explicit_db_name = intent_named_external_db(intent);
         let needs_db_connection = intent_needs_database_connection(intent);
         let mut tool_overrides: Vec<String> = Vec::new();
         let database_connectors: Vec<&TenantConnector> =
             tenant_connectors.iter().filter(|tc| tc.category == "connector/database").collect();
+        let explicit_db_name = intent_named_external_db(intent)
+            .filter(|db_name| database_connectors.iter().any(|connector| connector.name == *db_name));
 
         // If the intent explicitly named an external_db
         if let Some(db_name) = explicit_db_name.as_ref() {
@@ -575,6 +577,12 @@ pub(crate) fn intent_named_external_db(intent: &serde_json::Value) -> Option<Str
     }
 
     None
+}
+
+fn persist_selected_external_db(intent: &mut serde_json::Value, db_name: &str) {
+    if let Some(intent_object) = intent.as_object_mut() {
+        intent_object.insert("uses_external_db".into(), serde_json::json!(db_name));
+    }
 }
 
 pub(crate) fn intent_needs_database_connection(intent: &serde_json::Value) -> bool {
@@ -930,7 +938,7 @@ Rules:\n\
             return Ok(None);
         };
 
-        let refined = self
+        let mut refined = self
             .extractor
             .refine(&session.id, &session.tenant_id, &description, &initial_intent, &detail_context)
             .await?;
@@ -966,6 +974,9 @@ Rules:\n\
             ConnectorResolver::resolve(&refined, &installed, &tenant_connectors).await;
         session.draft_agent.connectors = resolved_connectors.clone();
         role.connectors = resolved_connectors;
+        if let Some(db_name) = tool_overrides.iter().find_map(|spec| spec.strip_prefix("external_db:")) {
+            persist_selected_external_db(&mut refined, db_name);
+        }
 
         let mut inferred_tools = inferred_preferred_tools(&self.tools, &refined);
         for tool_override in &tool_overrides {
@@ -986,9 +997,37 @@ Rules:\n\
         role.execution_guidelines.workflow_outline.clear();
         apply_execution_hints(role, &refined);
         materialize_workflow_outline(role, &refined);
-        let (trigger, confidence) = intent_to_trigger(&refined);
-        role.trigger = trigger;
-        role.trigger.confidence = confidence;
+        // Only overwrite the trigger if the user hasn't already confirmed it
+        // during the clarification step (confidence == High). Otherwise the
+        // refinement LLM response may omit or null-out trigger_cron, discarding
+        // the user's explicit answer (e.g. "every minute" → "* * * * *").
+        let user_confirmed_trigger = role.trigger.confidence == crate::agent::definition::TriggerConfidence::High
+            && role.trigger.trigger_type != TriggerType::Manual;
+        if !user_confirmed_trigger {
+            let (trigger, confidence) = intent_to_trigger(&refined);
+            role.trigger = trigger;
+            role.trigger.confidence = confidence;
+        } else {
+            // Sync the confirmed trigger's cron back into the refined intent
+            // so downstream consumers (fingerprint, review summary) stay consistent.
+            if let Some(obj) = refined.as_object_mut() {
+                if let Some(cron) = role.trigger.cron.as_deref() {
+                    obj.insert("trigger_cron".into(), serde_json::json!(cron));
+                }
+                obj.insert(
+                    "trigger_hint".into(),
+                    serde_json::json!(match role.trigger.trigger_type {
+                        TriggerType::Schedule => "schedule",
+                        TriggerType::Webhook => "webhook",
+                        TriggerType::UserMessage => "user_message",
+                        TriggerType::WorkforceEvent => "workforce_event",
+                        TriggerType::Manual => "manual",
+                    }),
+                );
+                obj.insert("trigger_confidence".into(), serde_json::json!("high"));
+            }
+            session.intent_cache = Some(refined.clone());
+        }
         session.goal_fingerprint = Some(compute_plan_mode_goal_fingerprint(&description, &refined, role));
 
         Ok(clarifying_q)
@@ -1487,6 +1526,9 @@ Rules:\n\
                 );
             }
         }
+        if let Some(db_name) = tool_overrides.iter().find_map(|spec| spec.strip_prefix("external_db:")) {
+            persist_selected_external_db(&mut cached_intent, db_name);
+        }
         session.intent_cache = Some(cached_intent.clone());
 
         if let Some(previous) = reused_snapshot {
@@ -1638,6 +1680,9 @@ Rules:\n\
                         }
                         if let Some(intent) = session.intent_cache.as_mut().and_then(|value| value.as_object_mut()) {
                             intent.remove("_pending_connector_resolution");
+                        }
+                        if let Some(intent) = session.intent_cache.as_mut() {
+                            persist_selected_external_db(intent, &db_name);
                         }
                         pending_connector_resolution = false;
                     } else if let Some(api_name) = matched_api_name {
@@ -1850,13 +1895,8 @@ Rules:\n\
         let mut tasks = Vec::new();
 
         for (task_id, subject, description, status, metadata, output) in specs {
-            let mut task = self
-                .store
-                .get_session_task(&session.tenant_id, &task_id)
-                .await
-                .ok()
-                .flatten()
-                .unwrap_or_else(|| {
+            let mut task =
+                self.store.get_session_task(&session.tenant_id, &task_id).await.ok().flatten().unwrap_or_else(|| {
                     SessionTask::new(
                         task_id.clone(),
                         session.tenant_id.clone(),
@@ -1890,6 +1930,7 @@ Rules:\n\
             }
         }
         let role = &preview_role;
+        let outline_required = role_requires_runnable_workflow_outline(role);
         let scaffold_tasks = self.sync_review_scaffold_tasks(session).await;
         let research_memo = session
             .intent_cache
@@ -1984,11 +2025,18 @@ Rules:\n\
             String::new()
         };
 
+        let save_guardrail = if outline_required && role.execution_guidelines.workflow_outline.is_empty() {
+            "\n\n⚠️ **Save guardrail:** this role still does not have a runnable workflow outline. Please add or clarify the missing workflow steps before saving.".to_string()
+        } else {
+            String::new()
+        };
+
         let runtime_policy = format!(
             "\n**Runtime policy:** execution={} | tool pool={} | permission mode={}",
             match role.execution_guidelines.execution_strategy {
                 ExecutionStrategy::DeterministicWorkflow => "deterministic_workflow",
                 ExecutionStrategy::AdaptivePlanning => "adaptive_planning -> compile into workflow_outline",
+                ExecutionStrategy::CoordinatorShell => "coordinator_shell -> research / synthesize / verify",
             },
             match role.execution_guidelines.tool_pool {
                 ToolPool::Worker => "worker",
@@ -2059,7 +2107,7 @@ Rules:\n\
             **Connectors:** {connectors}{tools}\n\
             **Output:** {output}\n\
             **Uploaded docs:** {attachments}\n\
-            **Constraints:** {constraints}{services}{runtime_policy}{tooling_notes}{research_summary}{scaffold}{review_focus}\n\n\
+            **Constraints:** {constraints}{services}{runtime_policy}{tooling_notes}{research_summary}{scaffold}{review_focus}{save_guardrail}\n\n\
             Does this look right? Say **yes** to save, or tell me what to change.",
             name = agent.name,
             purpose = role.purpose,
@@ -2080,6 +2128,17 @@ Rules:\n\
 
     async fn handle_review(&self, session: &mut PlanModeSession, answer: &str) -> Result<String> {
         if is_explicit_review_confirmation(answer) {
+            if let Some(role) = session.draft_role.as_ref() {
+                if role_requires_runnable_workflow_outline(role)
+                    && role.execution_guidelines.workflow_outline.is_empty()
+                {
+                    session.phase = PlanModePhase::Reviewing;
+                    return Ok(
+                        "⚠️ I still do not have a runnable workflow outline for this role, so I cannot save it yet.\n\nPlease add more detail or answer the missing questions and then try again."
+                            .into(),
+                    );
+                }
+            }
             session.phase = PlanModePhase::Complete;
             return Ok("✓ Agent saved. You can find it in your agent list. \
                        Add more roles anytime from the agent settings page."
@@ -2109,8 +2168,50 @@ Rules:\n\
 
                 // Enrich workflow outline — map prose hints to tools + arg templates
                 // so the runtime can build a deterministic Plan without an LLM call.
+                // If the draft already has a workflow outline and the final intent
+                // does not add any new hints, preserve the existing outline instead
+                // of clearing it out.
                 let intent = session.intent_cache.as_ref().cloned().unwrap_or_else(|| serde_json::json!({}));
-                enrich_workflow_outline(&mut r, &intent);
+                match WorkflowCompiler::compile(&r, &intent, &self.tools) {
+                    Ok(CompilerResult::Ready(mut compiled)) => {
+                        if let Some(metadata) = compiled.metadata.as_object_mut() {
+                            metadata.insert("plan_mode_session_id".into(), serde_json::json!(session.id.clone()));
+                            metadata.insert(
+                                "plan_mode_goal_fingerprint".into(),
+                                serde_json::json!(session.goal_fingerprint.clone()),
+                            );
+                            metadata
+                                .insert("plan_mode_repair_version".into(), serde_json::json!(session.repair_version));
+                            metadata.insert(
+                                "plan_mode_repair_root_session_id".into(),
+                                serde_json::json!(session.repair_root_session_id.clone()),
+                            );
+                            metadata.insert(
+                                "plan_mode_reused_from_session_id".into(),
+                                serde_json::json!(session.reused_from_session_id.clone()),
+                            );
+                        }
+                        r.execution_guidelines.compiled_workflow = Some(compiled.clone());
+                    }
+                    Ok(CompilerResult::NeedsCard(card)) => {
+                        anyhow::bail!(
+                            "workflow compilation requires setup card: {} (target={}, resume={})",
+                            card.card_type,
+                            card.binding_target,
+                            card.resume_token
+                        );
+                    }
+                    Err(error) => {
+                        anyhow::bail!("workflow compilation failed: {}", error);
+                    }
+                }
+                if role_requires_runnable_workflow_outline(&r)
+                    && r.execution_guidelines.workflow_outline.is_empty()
+                    && r.execution_guidelines.compiled_workflow.is_none()
+                {
+                    anyhow::bail!("workflow compiler did not produce a runnable artifact before save");
+                }
+                finalize_saved_role_execution_strategy(&mut r);
 
                 // Resolve "name:Role Name" hints in depends_on_role_id to actual IDs
                 if let Some(hint) = r.trigger.depends_on_role_id.clone() {
@@ -2174,7 +2275,7 @@ Rules:\n\
                     checks.push(PlanModeTestCheck {
                         label,
                         success: true,
-                        detail: Some("llmcall; conceptual step only".into()),
+                        detail: Some("llm_worker; conceptual step only".into()),
                     });
                 }
                 Some(tool_name) => {
@@ -2310,13 +2411,28 @@ Rules:\n\
                 tool: Some(conceptual_step_tool_name().into()),
                 success: true,
                 output: serde_json::json!({
-                    "mode": "llmcall",
+                    "mode": "llm_worker",
                     "reason": "conceptual step handled by the model",
                 }),
                 error: None,
                 blocked: false,
             };
         };
+
+        if tool_name == conceptual_step_tool_name() {
+            return PlanModeTestStepResult {
+                step: step.index,
+                description: label,
+                tool: Some(tool_name.to_string()),
+                success: true,
+                output: serde_json::json!({
+                    "mode": "llm_worker",
+                    "reason": "conceptual LLM worker step handled by the compiler/runtime contract",
+                }),
+                error: None,
+                blocked: false,
+            };
+        }
 
         let mut args = step.tool_args.clone().unwrap_or_else(|| serde_json::json!({}));
         materialize_validation_tool_args(tool_name, &step.description, &mut args, workspace_root, role);
@@ -2405,7 +2521,7 @@ Rules:\n\
 // ── Free helper functions ───────────────────────────────────────────────────
 
 fn conceptual_step_tool_name() -> &'static str {
-    "llmcall"
+    "llm_worker"
 }
 
 fn apply_role_policy_defaults(agent: &mut AgentDefinition, role: &mut AgentRole) {
@@ -2423,8 +2539,17 @@ fn apply_role_policy_defaults(agent: &mut AgentDefinition, role: &mut AgentRole)
     if matches!(role.role_category, RoleCategory::SoftwareEngineer) {
         role.execution_guidelines.execution_strategy = ExecutionStrategy::AdaptivePlanning;
         role.execution_guidelines.tool_pool = ToolPool::Worker;
+    } else if matches!(role.role_category, RoleCategory::ResearchAnalyst) {
+        role.execution_guidelines.execution_strategy = ExecutionStrategy::CoordinatorShell;
+        role.execution_guidelines.tool_pool = ToolPool::Coordinator;
     } else if role.execution_guidelines.execution_strategy == ExecutionStrategy::AdaptivePlanning {
         role.execution_guidelines.execution_strategy = ExecutionStrategy::DeterministicWorkflow;
+    }
+
+    if matches!(role.execution_guidelines.execution_strategy, ExecutionStrategy::CoordinatorShell)
+        && matches!(role.execution_guidelines.tool_pool, ToolPool::Worker)
+    {
+        role.execution_guidelines.tool_pool = ToolPool::Coordinator;
     }
 }
 
@@ -2447,7 +2572,8 @@ fn plan_mode_scaffold_specs(
     specs.push((
         format!("planmode:{}:intent", session.id),
         "Capture intent and workflow shape".into(),
-        "Lock down the business goal, workflow outline, trigger guess, and output direction before execution design.".into(),
+        "Lock down the business goal, workflow outline, trigger guess, and output direction before execution design."
+            .into(),
         if session.intent_cache.is_some() { SessionTaskStatus::Completed } else { SessionTaskStatus::InProgress },
         serde_json::json!({
             "phase": "capturing_intent",
@@ -2525,7 +2651,8 @@ fn plan_mode_scaffold_specs(
     specs.push((
         format!("planmode:{}:review", session.id),
         "Review, preflight, and sandbox the draft".into(),
-        "Use the checklist to validate workflow steps, required arguments, and sandbox behavior before approval.".into(),
+        "Use the checklist to validate workflow steps, required arguments, and sandbox behavior before approval."
+            .into(),
         review_status,
         serde_json::json!({
             "phase": "reviewing",
@@ -2567,14 +2694,19 @@ fn shared_plan_mode_tooling_notes(role: &AgentRole) -> Vec<String> {
         "ask_user stays structured: clarification vs decision vs approval".into(),
     ];
 
-    if role.tools.iter().any(|tool| tool == "mcp_session") || role.connectors.iter().any(|connector| connector.contains("mcp")) {
+    if role.tools.iter().any(|tool| tool == "mcp_session")
+        || role.connectors.iter().any(|connector| connector.contains("mcp"))
+    {
         notes.push("use mcp_session list_resources/read_resource to ground MCP-backed workflows".into());
     }
-    if matches!(role.execution_guidelines.permission_mode, PermissionMode::WorkspaceWrite | PermissionMode::TrustedAuto) {
+    if matches!(role.execution_guidelines.permission_mode, PermissionMode::WorkspaceWrite | PermissionMode::TrustedAuto)
+    {
         notes.push("runtime writes stay scoped by permission mode and workspace boundary checks".into());
     }
     if matches!(role.execution_guidelines.execution_strategy, ExecutionStrategy::AdaptivePlanning) {
         notes.push("adaptive planning must compile back into workflow_outline before deterministic execution".into());
+    } else if matches!(role.execution_guidelines.execution_strategy, ExecutionStrategy::CoordinatorShell) {
+        notes.push("coordinator-shell runs task-first research -> synthesis -> implementation -> verification".into());
     }
 
     notes
@@ -3432,13 +3564,13 @@ fn apply_execution_hints(role: &mut AgentRole, intent: &serde_json::Value) {
 /// Maps each prose hint to the best matching tool and builds an arg template.
 /// Called at save() time so the runtime can build a deterministic Plan.
 fn enrich_workflow_outline(role: &mut AgentRole, intent: &serde_json::Value) {
-    role.execution_guidelines.workflow_outline.clear();
-
     let hints = workflow_hints_for_compilation(intent);
 
     if hints.is_empty() {
         return;
     }
+
+    role.execution_guidelines.workflow_outline.clear();
 
     let connectors = &role.connectors;
     let tools = &role.tools;
@@ -3451,8 +3583,20 @@ fn enrich_workflow_outline(role: &mut AgentRole, intent: &serde_json::Value) {
             args_template,
             success_criteria: String::new(),
             condition: None,
+            ..Default::default()
         });
     }
+}
+
+fn finalize_saved_role_execution_strategy(role: &mut AgentRole) {
+    if !matches!(role.execution_guidelines.execution_strategy, ExecutionStrategy::CoordinatorShell) {
+        role.execution_guidelines.execution_strategy = ExecutionStrategy::DeterministicWorkflow;
+    }
+}
+
+fn role_requires_runnable_workflow_outline(role: &AgentRole) -> bool {
+    !matches!(role.execution_guidelines.execution_strategy, ExecutionStrategy::CoordinatorShell)
+        && role.execution_guidelines.compiled_workflow.is_none()
 }
 
 fn workflow_hints_for_compilation(intent: &serde_json::Value) -> Vec<String> {
@@ -3493,7 +3637,9 @@ fn fallback_plan_mode_research_memo(role: &AgentRole, intent: &serde_json::Value
             .map(|arr| arr.iter().filter_map(|value| value.as_str().map(str::to_string)).take(4).collect())
             .unwrap_or_default(),
         assumptions: Vec::new(),
-        risks: vec!["Research synthesis fell back to intent-derived hints because the memo response was not valid JSON.".into()],
+        risks: vec![
+            "Research synthesis fell back to intent-derived hints because the memo response was not valid JSON.".into(),
+        ],
         workflow_hints: intent["workflow_outline"]
             .as_array()
             .map(|arr| arr.iter().filter_map(|value| value.as_str().map(str::to_string)).take(6).collect())
@@ -3582,18 +3728,34 @@ fn resolve_tool_for_hint(
         return (None, None);
     }
 
+    // Attempt to extract inline JSON arguments if the AI or User provided static tool parameters!
+    let mut explicit_args = None;
+    if let Some(start) = hint.find('{') {
+        if let Some(end) = hint.rfind('}') {
+            match serde_json::from_str::<serde_json::Value>(&hint[start..=end]) {
+                Ok(params) if params.is_object() => {
+                    explicit_args = Some(params);
+                }
+                _ => {}
+            }
+        }
+    }
+
     // 1. Check for exact connector name match first
     for conn in connectors {
         if lower.contains(&conn.to_lowercase()) {
-            let op = infer_connector_operation(&lower);
-            return (Some(conn.clone()), Some(serde_json::json!({ "operation": op })));
+            let args = explicit_args.or_else(|| {
+                let op = infer_connector_operation(&lower);
+                Some(serde_json::json!({ "operation": op }))
+            });
+            return (Some(conn.clone()), args);
         }
     }
 
     // 2. Check for explicit role tool matches
     for tool in role_tools {
         if lower.contains(&tool.to_lowercase()) {
-            return (Some(tool.clone()), None);
+            return (Some(tool.clone()), explicit_args);
         }
     }
 
@@ -3703,8 +3865,14 @@ fn resolve_tool_for_hint(
         }
     }
 
-    // 5. No tool match — pure LLM reasoning step
-    (None, None)
+    // 5. No tool match — explicit LLM worker step
+    (
+        Some(conceptual_step_tool_name().into()),
+        Some(serde_json::json!({
+            "instruction": hint,
+            "response_format": "text",
+        })),
+    )
 }
 
 fn is_schedule_trigger_hint(lower: &str) -> bool {
@@ -4307,6 +4475,21 @@ mod tests {
     }
 
     #[test]
+    fn test_selected_db_name_is_persisted_in_intent() {
+        let mut intent = serde_json::json!({
+            "data_sources": ["monitor new users activity"],
+            "uses_external_db": true,
+            "write_targets": [],
+            "actions": ["watch for new rows"],
+        });
+
+        persist_selected_external_db(&mut intent, "mainnarayan");
+
+        assert_eq!(intent_named_external_db(&intent).as_deref(), Some("mainnarayan"));
+        assert_eq!(intent["uses_external_db"].as_str(), Some("mainnarayan"));
+    }
+
+    #[test]
     fn test_db_connector_prompts_for_registration_when_name_is_unknown() {
         let intent = serde_json::json!({
             "data_sources": ["monitor new users activity"],
@@ -4364,6 +4547,56 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let (_resolved, _tools, clarifying) = rt.block_on(ConnectorResolver::resolve(&intent, &[], &tenant_connectors));
         let question = clarifying.expect("should ask which database to use");
+        let lower = question.to_lowercase();
+        assert!(lower.contains("multiple database connections installed"));
+        assert!(lower.contains("mainnarayan"));
+        assert!(lower.contains("analytics"));
+    }
+
+    #[test]
+    fn test_db_connector_treats_tool_placeholder_as_unresolved() {
+        let intent = serde_json::json!({
+            "data_sources": ["monitor new users activity"],
+            "uses_external_db": "external_db",
+            "write_targets": [],
+            "actions": ["watch for new rows"],
+        });
+        let tenant_connectors = vec![
+            TenantConnector {
+                id: "db-1".into(),
+                tenant_id: "t-1".into(),
+                name: "mainnarayan".into(),
+                category: "connector/database".into(),
+                base_url: String::new(),
+                auth_type: ConnectorAuthType::ConnectionString,
+                auth_credential_key: None,
+                source: crate::agent::definition::ConnectorSource::Manual,
+                source_docs: None,
+                endpoints: Vec::new(),
+                summary: "Primary database".into(),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            },
+            TenantConnector {
+                id: "db-2".into(),
+                tenant_id: "t-1".into(),
+                name: "analytics".into(),
+                category: "connector/database".into(),
+                base_url: String::new(),
+                auth_type: ConnectorAuthType::ConnectionString,
+                auth_credential_key: None,
+                source: crate::agent::definition::ConnectorSource::Manual,
+                source_docs: None,
+                endpoints: Vec::new(),
+                summary: "Analytics database".into(),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            },
+        ];
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (_resolved, tools, clarifying) = rt.block_on(ConnectorResolver::resolve(&intent, &[], &tenant_connectors));
+        assert!(tools.iter().all(|tool| !tool.starts_with("external_db:external_db")));
+        let question = clarifying.expect("should ask which database to use when only a placeholder was provided");
         let lower = question.to_lowercase();
         assert!(lower.contains("multiple database connections installed"));
         assert!(lower.contains("mainnarayan"));
@@ -4517,6 +4750,7 @@ mod tests {
             args_template: None,
             success_criteria: "inputs collected".into(),
             condition: None,
+            ..Default::default()
         }];
 
         let fp_a = compute_plan_mode_goal_fingerprint("   Draft   a summary  ", &intent, &role);
@@ -4540,8 +4774,8 @@ mod tests {
     #[test]
     fn test_resolve_tool_for_hint_keeps_summary_extraction_conceptual() {
         let (tool, args) = resolve_tool_for_hint("Agent extracts key points, action items, and risks", &[], &[]);
-        assert!(tool.is_none());
-        assert!(args.is_none());
+        assert_eq!(tool.as_deref(), Some("llm_worker"));
+        assert!(args.is_some());
     }
 
     #[test]
@@ -4551,8 +4785,8 @@ mod tests {
             &["schedule".into()],
             &["schedule".into()],
         );
-        assert!(tool.is_none());
-        assert!(args.is_none());
+        assert_eq!(tool.as_deref(), Some("llm_worker"));
+        assert!(args.is_some());
     }
 
     #[test]
@@ -4748,14 +4982,54 @@ mod tests {
 
         enrich_workflow_outline(&mut role, &intent);
 
-        let descriptions = role
-            .execution_guidelines
-            .workflow_outline
-            .iter()
-            .map(|step| step.description.clone())
-            .collect::<Vec<_>>();
+        let descriptions =
+            role.execution_guidelines.workflow_outline.iter().map(|step| step.description.clone()).collect::<Vec<_>>();
         assert!(descriptions.contains(&"inspect repository".to_string()));
         assert!(descriptions.contains(&"verify behavior independently".to_string()));
+    }
+
+    #[test]
+    fn test_enrich_workflow_outline_preserves_existing_outline_when_no_hints_are_available() {
+        let mut role = AgentRole::new("role-1".into(), "agent-1".into(), "tenant-1".into(), "Primary Role".into());
+        role.execution_guidelines.workflow_outline = vec![crate::agent::definition::WorkflowStep {
+            description: "inspect repository".into(),
+            tool: Some("file_read".into()),
+            args_template: None,
+            success_criteria: "repository inspected".into(),
+            condition: None,
+            ..Default::default()
+        }];
+
+        let intent = serde_json::json!({
+            "actions": ["monitor database", "notify on new activity"]
+        });
+
+        enrich_workflow_outline(&mut role, &intent);
+
+        assert_eq!(role.execution_guidelines.workflow_outline.len(), 1);
+        assert_eq!(role.execution_guidelines.workflow_outline[0].description, "inspect repository");
+    }
+
+    #[test]
+    fn test_finalize_saved_role_execution_strategy_normalizes_to_deterministic() {
+        let mut role = AgentRole::new("role-1".into(), "agent-1".into(), "tenant-1".into(), "Primary Role".into());
+        role.execution_guidelines.execution_strategy = ExecutionStrategy::DeterministicWorkflow;
+
+        finalize_saved_role_execution_strategy(&mut role);
+        assert_eq!(role.execution_guidelines.execution_strategy, ExecutionStrategy::DeterministicWorkflow);
+
+        role.execution_guidelines.execution_strategy = ExecutionStrategy::AdaptivePlanning;
+        finalize_saved_role_execution_strategy(&mut role);
+        assert_eq!(role.execution_guidelines.execution_strategy, ExecutionStrategy::DeterministicWorkflow);
+    }
+
+    #[test]
+    fn test_role_requires_runnable_workflow_outline_skips_coordinator_shell() {
+        let mut role = AgentRole::new("role-1".into(), "agent-1".into(), "tenant-1".into(), "Primary Role".into());
+        assert!(role_requires_runnable_workflow_outline(&role));
+
+        role.execution_guidelines.execution_strategy = ExecutionStrategy::CoordinatorShell;
+        assert!(!role_requires_runnable_workflow_outline(&role));
     }
 
     #[test]

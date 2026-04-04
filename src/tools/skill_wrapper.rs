@@ -16,6 +16,11 @@ impl Tool for SkillWrapperTool {
             ParameterSchema::required("inputs", "object", "Input parameters for the skill."),
         ]
     }
+
+    fn output_schema(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({ "type": "object", "additionalProperties": true }))
+    }
+
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         let skill = args["skill_name"].as_str().unwrap_or("unknown");
         let inputs = &args["inputs"];

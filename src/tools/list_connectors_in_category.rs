@@ -12,7 +12,7 @@
 
 use async_trait::async_trait;
 
-use crate::tools::{ParameterSchema, Tool, ToolResult};
+use crate::tools::{ParameterSchema, Tool, ToolResult, schema_string, schema_array};
 
 pub struct ListConnectorsInCategoryTool;
 
@@ -45,6 +45,52 @@ impl Tool for ListConnectorsInCategoryTool {
 
     /// In production the executor intercepts this call and returns the real list.
     /// This fallback runs in unit tests.
+
+    fn output_schema(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
+            "oneOf": [
+                {
+                    "type": "object",
+                    "required": ["category", "connectors", "instruction"],
+                    "properties": {
+                        "category": schema_string(),
+                        "connectors": schema_array(serde_json::json!({
+                            "type": "object",
+                            "required": ["name", "category", "summary"],
+                            "properties": {
+                                "name": schema_string(),
+                                "category": schema_string(),
+                                "summary": schema_string(),
+                            },
+                            "additionalProperties": true,
+                        })),
+                        "instruction": schema_string(),
+                    },
+                    "additionalProperties": true,
+                },
+                {
+                    "type": "object",
+                    "required": ["category", "connectors", "note"],
+                    "properties": {
+                        "category": schema_string(),
+                        "connectors": schema_array(serde_json::json!({
+                            "type": "object",
+                            "required": ["name", "category", "summary"],
+                            "properties": {
+                                "name": schema_string(),
+                                "category": schema_string(),
+                                "summary": schema_string(),
+                            },
+                            "additionalProperties": true,
+                        })),
+                        "note": schema_string(),
+                    },
+                    "additionalProperties": true,
+                }
+            ]
+        }))
+    }
+
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         let category = args["category"].as_str().unwrap_or("all");
         Ok(ToolResult::ok(serde_json::json!({

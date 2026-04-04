@@ -14,6 +14,7 @@ pub struct WorkerPool {
     store: Arc<PostgresStore>,
     queue: Arc<dyn Queue>,
     agent_loop: Arc<AgentLoop>,
+    dag_engine: Arc<crate::agent::dag_engine::DagEngine>,
     metrics: Arc<Metrics>,
     workspace_manager: Arc<WorkspaceManager>,
     services: Arc<AgentServices>,
@@ -35,12 +36,13 @@ impl WorkerPool {
         store: Arc<PostgresStore>,
         queue: Arc<dyn Queue>,
         agent_loop: Arc<AgentLoop>,
+        dag_engine: Arc<crate::agent::dag_engine::DagEngine>,
         metrics: Arc<Metrics>,
         workspace_manager: Arc<WorkspaceManager>,
         services: Arc<AgentServices>,
         event_bus: Arc<EventBus>,
     ) -> Self {
-        Self { pool_size, name, store, queue, agent_loop, metrics, workspace_manager, services, event_bus }
+        Self { pool_size, name, store, queue, agent_loop, dag_engine, metrics, workspace_manager, services, event_bus }
     }
 
     pub async fn run(&self, cancel_token: tokio_util::sync::CancellationToken) -> Result<()> {
@@ -55,6 +57,7 @@ impl WorkerPool {
                 self.store.clone(),
                 self.queue.clone(),
                 self.agent_loop.clone(),
+                self.dag_engine.clone(),
                 self.metrics.clone(),
                 self.workspace_manager.clone(),
                 self.services.clone(),
@@ -63,12 +66,14 @@ impl WorkerPool {
             let token = cancel_token.clone();
             set.spawn(async move {
                 loop {
-                    if token.is_cancelled() { break; }
+                    if token.is_cancelled() {
+                        break;
+                    }
                     // Wrap process_next in a defensive layer to catch and log panics
                     let worker = Arc::clone(&worker);
                     let task_token = token.clone();
                     let result = tokio::spawn(async move { worker.process_next(task_token).await }).await;
-                    
+
                     match result {
                         Ok(Ok(true)) => {}
                         Ok(Ok(false)) => {

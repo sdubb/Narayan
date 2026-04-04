@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use crate::tools::{ParameterSchema, Tool, ToolResult};
+use crate::tools::{ParameterSchema, Tool, ToolResult, schema_string, schema_boolean};
 pub struct RegisterApiTool;
 #[async_trait]
 impl Tool for RegisterApiTool {
@@ -19,6 +19,20 @@ impl Tool for RegisterApiTool {
             ParameterSchema::optional("credential_key", "string", "Credential key name for auth."),
         ]
     }
+
+    fn output_schema(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
+            "type": "object",
+            "required": ["registered", "tool_name", "base_url"],
+            "properties": {
+                "registered": schema_boolean(),
+                "tool_name": schema_string(),
+                "base_url": schema_string(),
+            },
+            "additionalProperties": true,
+        }))
+    }
+
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         let name = args["tool_name"].as_str().unwrap_or("unnamed");
         let url = args["base_url"].as_str().unwrap_or("");

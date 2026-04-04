@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use crate::tools::{ParameterSchema, Tool, ToolResult};
+use crate::tools::{ParameterSchema, Tool, ToolResult, schema_string, schema_boolean};
 pub struct RequestCredentialTool;
 #[async_trait]
 impl Tool for RequestCredentialTool {
@@ -26,6 +26,20 @@ impl Tool for RequestCredentialTool {
             ),
         ]
     }
+
+    fn output_schema(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
+            "type": "object",
+            "required": ["stored", "name", "hint"],
+            "properties": {
+                "stored": schema_boolean(),
+                "name": schema_string(),
+                "hint": schema_string(),
+            },
+            "additionalProperties": true,
+        }))
+    }
+
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         let name = match args["name"].as_str() {
             Some(n) => n,

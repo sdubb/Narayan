@@ -3,7 +3,7 @@
 
 use async_trait::async_trait;
 
-use crate::tools::{ParameterSchema, Tool, ToolResult};
+use crate::tools::{ParameterSchema, Tool, ToolResult, schema_string, schema_integer};
 
 pub struct ImageProcessTool;
 
@@ -34,6 +34,24 @@ impl Tool for ImageProcessTool {
     //  {type: "blur",      sigma: 2.0}
     //  {type: "brighten",  value: 20}                     -- -255 to 255
     //  {type: "contrast",  value: 1.5}
+
+    fn output_schema(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
+            "type": "object",
+            "required": ["output", "width", "height", "format", "size_bytes", "ops_applied", "elapsed_ms"],
+            "properties": {
+                "output": schema_string(),
+                "width": schema_integer(),
+                "height": schema_integer(),
+                "format": schema_string(),
+                "size_bytes": schema_integer(),
+                "ops_applied": schema_integer(),
+                "elapsed_ms": schema_integer(),
+            },
+            "additionalProperties": true,
+        }))
+    }
+
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         let input = match args["input"].as_str() {
             Some(p) => p.to_string(),

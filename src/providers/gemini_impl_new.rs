@@ -1,6 +1,9 @@
 use async_trait::async_trait;
 
-use crate::providers::{ChatResponse, Message, Provider, Role, ToolCall, ToolSpec};
+use crate::{
+    gateway::llm_controls::LlmGenerationConfig,
+    providers::{ChatResponse, Message, Provider, Role, ToolCall, ToolSpec},
+};
 
 pub struct GeminiProviderAdapter {
     api_key: String,
@@ -19,7 +22,12 @@ impl Provider for GeminiProviderAdapter {
         "gemini"
     }
 
-    async fn chat(&self, messages: Vec<Message>, tools: Vec<ToolSpec>) -> anyhow::Result<ChatResponse> {
+    async fn chat(
+        &self,
+        messages: Vec<Message>,
+        tools: Vec<ToolSpec>,
+        generation: Option<&LlmGenerationConfig>,
+    ) -> anyhow::Result<ChatResponse> {
         let system = messages.iter().find(|m| matches!(m.role, Role::System)).map(|m| m.content.clone());
 
         let mut contents: Vec<serde_json::Value> = Vec::new();
@@ -34,7 +42,22 @@ impl Provider for GeminiProviderAdapter {
             }));
         }
 
-        let mut payload = serde_json::json!({"contents": contents});
+        let generation = generation.cloned().unwrap_or_else(|| {
+            LlmGenerationConfig::new(
+                crate::gateway::llm_controls::LlmRole::Drafter,
+                crate::gateway::llm_controls::LlmExecutionIntent::Balanced,
+                crate::gateway::llm_controls::LlmBudgetTier::High,
+            )
+            .with_limits(4096, 0.2)
+        });
+
+        let mut payload = serde_json::json!({
+            "contents": contents,
+            "generationConfig": {
+                "temperature": generation.temperature,
+                "maxOutputTokens": generation.max_tokens,
+            }
+        });
         if let Some(sys) = system {
             payload["systemInstruction"] = serde_json::json!({
                 "parts": [{"text": sys}]

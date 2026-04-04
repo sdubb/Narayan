@@ -15,6 +15,11 @@ impl Tool for ImageInfoTool {
     fn parameters_schema(&self) -> Vec<ParameterSchema> {
         vec![ParameterSchema::required("path", "string", "Path to the image file.")]
     }
+
+    fn output_schema(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({ "type": "object", "additionalProperties": true }))
+    }
+
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         let path = match args["path"].as_str() {
             Some(p) => p.to_string(),

@@ -893,7 +893,8 @@ pub async fn get_agent(
             let step_count = a.plan.as_ref().map(|p| p.steps.len()).unwrap_or(0);
             let job_type = a.plan.as_ref().and_then(|p| p.job_type.clone());
             let cost = state.cost_tracker.get_usage(&a.id).await;
-            let unread_message_count = state.store.count_undelivered_agent_messages(&tenant.tenant_id, &a.id).await.unwrap_or(0);
+            let unread_message_count =
+                state.store.count_undelivered_agent_messages(&tenant.tenant_id, &a.id).await.unwrap_or(0);
             Json(serde_json::json!({
                 "id":               a.id,
                 "goal":             a.goal,
@@ -1101,10 +1102,7 @@ pub async fn download_workspace_bundle(
     (
         [
             (axum::http::header::CONTENT_TYPE, "application/zstd"),
-            (
-                axum::http::header::CONTENT_DISPOSITION,
-                "attachment; filename=\"workspace-files.tar.zst\"",
-            ),
+            (axum::http::header::CONTENT_DISPOSITION, "attachment; filename=\"workspace-files.tar.zst\""),
         ],
         bytes,
     )
@@ -1177,7 +1175,8 @@ pub async fn list_agent_messages(
 
     match result {
         Ok(messages) => {
-            let unread_count = state.store.count_undelivered_agent_messages(&tenant.tenant_id, &agent_id).await.unwrap_or(0);
+            let unread_count =
+                state.store.count_undelivered_agent_messages(&tenant.tenant_id, &agent_id).await.unwrap_or(0);
             Json(serde_json::json!({
                 "agent_id": agent_id,
                 "direction": direction,
@@ -1222,11 +1221,7 @@ pub async fn ack_agent_message(
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 
-    match state
-        .store
-        .mark_agent_message_delivered_for_recipient(&tenant.tenant_id, &agent_id, &message_id)
-        .await
-    {
+    match state.store.mark_agent_message_delivered_for_recipient(&tenant.tenant_id, &agent_id, &message_id).await {
         Ok(true) => {
             state
                 .event_bus_handle
@@ -1575,7 +1570,8 @@ pub async fn resume_plan_mode_for_next_role(
                         "name": r.name,
                         "id": r.id
                     }))
-                })).into_response(),
+                }))
+                .into_response(),
                 Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to persist session: {}", e)),
             }
         }
@@ -2350,7 +2346,8 @@ pub async fn agent_definition_summary(
     };
 
     let roles = state.store.list_roles_for_agent(&tenant.tenant_id, &id).await.unwrap_or_default();
-    let runs = state.store.list_goal_instances_for_agent(&tenant.tenant_id, &id, 8).await.unwrap_or_default();
+    let runs =
+        state.store.list_goal_instances_for_agent_definition(&tenant.tenant_id, &id, 8).await.unwrap_or_default();
 
     let peer_defs = state.store.list_agent_definitions(&tenant.tenant_id).await.unwrap_or_default();
     let mut peers = Vec::with_capacity(peer_defs.len());
@@ -2475,7 +2472,8 @@ pub async fn export_agent_summary_pdf(
     };
 
     let roles = state.store.list_roles_for_agent(&tenant.tenant_id, &agent_id).await.unwrap_or_default();
-    let runs = state.store.list_goal_instances_for_agent(&tenant.tenant_id, &agent_id, 8).await.unwrap_or_default();
+    let runs =
+        state.store.list_goal_instances_for_agent_definition(&tenant.tenant_id, &agent_id, 8).await.unwrap_or_default();
     let peers = state.store.list_agent_definitions(&tenant.tenant_id).await.unwrap_or_default();
 
     let pdf_bytes = match build_agent_summary_pdf(&agent, &roles, &runs, &peers) {
@@ -2499,10 +2497,7 @@ pub async fn export_agent_summary_pdf(
 
     (
         [
-            (
-                axum::http::header::CONTENT_TYPE,
-                axum::http::HeaderValue::from_static("application/pdf"),
-            ),
+            (axum::http::header::CONTENT_TYPE, axum::http::HeaderValue::from_static("application/pdf")),
             (
                 axum::http::header::CONTENT_DISPOSITION,
                 axum::http::HeaderValue::from_str(&format!("attachment; filename=\"{}\"", filename))
@@ -2548,14 +2543,8 @@ fn build_agent_summary_pdf(
                 crate::agent::agent_chat::maybe_or_dash(&agent.memory_ref),
             ),
         ),
-        (
-            format!("Roles ({})", roles.len()),
-            summarize_roles(roles),
-        ),
-        (
-            format!("Recent Runs ({})", runs.len()),
-            summarize_runs(runs, roles),
-        ),
+        (format!("Roles ({})", roles.len()), summarize_roles(roles)),
+        (format!("Recent Runs ({})", runs.len()), summarize_runs(runs, roles)),
         (
             format!("Peer Agents ({})", peers.iter().filter(|peer| peer.id != agent.id).count()),
             summarize_peers(agent.id.as_str(), peers),
@@ -2621,8 +2610,7 @@ fn summarize_runs(runs: &[GoalInstance], roles: &[crate::agent::definition::Agen
 
     let role_names: HashMap<String, String> = roles.iter().map(|role| (role.id.clone(), role.name.clone())).collect();
 
-    runs
-        .iter()
+    runs.iter()
         .take(5)
         .map(|run| {
             let role_name = role_names.get(&run.role_id).cloned().unwrap_or_else(|| run.role_id.clone());
@@ -2910,7 +2898,7 @@ pub async fn list_goal_instances(
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     let limit = params.get("limit").and_then(|s| s.parse::<i64>().ok()).unwrap_or(50);
-    match state.store.list_goal_instances_for_agent(&tenant.tenant_id, &agent_id, limit).await {
+    match state.store.list_goal_instances_for_agent_definition(&tenant.tenant_id, &agent_id, limit).await {
         Ok(instances) => Json(serde_json::json!({ "goal_instances": instances })).into_response(),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
@@ -3683,6 +3671,38 @@ pub async fn list_plan_mode_templates(_tenant: AuthenticatedTenant) -> impl Into
     Json(serde_json::json!({ "templates": list })).into_response()
 }
 
+/// GET /plan-mode/sessions/:session_id — fetch the persisted plan-mode session state
+pub async fn get_plan_mode_session(
+    State(state): State<AppState>,
+    tenant: AuthenticatedTenant,
+    Path(session_id): Path<String>,
+) -> impl IntoResponse {
+    let session = match state.store.get_plan_mode_session(&tenant.tenant_id, &session_id).await {
+        Ok(Some(s)) => s,
+        Ok(None) => return err(StatusCode::NOT_FOUND, "plan mode session not found"),
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    };
+
+    Json(serde_json::json!({
+        "session_id": session.id,
+        "agent_id": session.draft_agent.id,
+        "phase": serde_json::to_value(&session.phase).unwrap_or_default(),
+        "draft_agent": session.draft_agent,
+        "draft_role": session.draft_role,
+        "intent_cache": session.intent_cache,
+        "pending_steps": session.pending_steps,
+        "attachments": session.attachments,
+        "goal_fingerprint": session.goal_fingerprint,
+        "repair_version": session.repair_version,
+        "reused_from_session_id": session.reused_from_session_id,
+        "repair_root_session_id": session.repair_root_session_id,
+        "created_at": session.created_at,
+        "updated_at": session.updated_at,
+        "message_count": session.conversation.len(),
+    }))
+    .into_response()
+}
+
 fn plan_mode_inline_setup_payload(
     session: &crate::agent::definition::PlanModeSession,
     pending: bool,
@@ -3705,6 +3725,39 @@ fn plan_mode_inline_setup_payload(
         })
         .unwrap_or_default();
 
+    let card_requests: Vec<serde_json::Value> = session
+        .intent_cache
+        .as_ref()
+        .map(|intent| {
+            let mut cards = Vec::new();
+            if crate::agent::plan_mode::intent_needs_database_connection(intent) {
+                cards.push(serde_json::json!({
+                    "card_type": "database",
+                    "required_fields": ["host", "port", "db_name"],
+                    "binding_target": "database",
+                    "resume_token": format!("plan-mode:{}:database", session.id),
+                }));
+            }
+            if crate::agent::plan_mode::intent_needs_api_connection(intent) {
+                cards.push(serde_json::json!({
+                    "card_type": "api_auth",
+                    "required_fields": ["base_url", "api_key"],
+                    "binding_target": "api",
+                    "resume_token": format!("plan-mode:{}:api", session.id),
+                }));
+            }
+            if crate::agent::plan_mode::intent_needs_mcp_connection(intent) {
+                cards.push(serde_json::json!({
+                    "card_type": "mcp",
+                    "required_fields": ["server_url"],
+                    "binding_target": "mcp",
+                    "resume_token": format!("plan-mode:{}:mcp", session.id),
+                }));
+            }
+            cards
+        })
+        .unwrap_or_default();
+
     serde_json::json!({
         "pending": pending,
         "connection_kinds": connection_kinds,
@@ -3718,6 +3771,7 @@ fn plan_mode_inline_setup_payload(
             .as_ref()
             .map(crate::agent::plan_mode::intent_needs_database_connection)
             .unwrap_or(false),
+        "card_requests": card_requests,
     })
 }
 
@@ -3780,7 +3834,7 @@ pub async fn start_plan_mode_session(
             session.draft_agent.connectors = role.connectors.clone();
             session.draft_role = Some(role.clone());
             session.intent_cache = Some((tmpl.intent)());
-            
+
             // Check which required connectors are not yet installed
             let installed: Vec<String> = state
                 .connector_installs
@@ -3803,8 +3857,7 @@ pub async fn start_plan_mode_session(
                     "I've configured your **{}** agent. Before we continue, you'll need to connect: **{}**.\n\n\
                      Use the inline connection cards below to add them now, or head to **Settings → Connectors** \
                      if you'd rather do it there.",
-                    tmpl.name,
-                    connector_list
+                    tmpl.name, connector_list
                 )
             } else {
                 // Build the FULL clarification queue respecting template exclusions
@@ -3817,7 +3870,7 @@ pub async fn start_plan_mode_session(
                     .into_iter()
                     .map(|c| c.connector_type)
                     .collect();
-                
+
                 let existing_role_names: Vec<String> = state
                     .store
                     .list_roles_for_agent(&session.tenant_id, &session.draft_agent.id)
@@ -3837,10 +3890,8 @@ pub async fn start_plan_mode_session(
 
                 // Filter OUT only the steps that template explicitly says to skip (ask_steps exclusion)
                 let template_ask_set: std::collections::HashSet<&str> = tmpl.ask_steps.iter().copied().collect();
-                let steps_to_ask: Vec<_> = all_steps
-                    .into_iter()
-                    .filter(|step| template_ask_set.contains(step.id.as_str()))
-                    .collect();
+                let steps_to_ask: Vec<_> =
+                    all_steps.into_iter().filter(|step| template_ask_set.contains(step.id.as_str())).collect();
 
                 session.pending_steps = steps_to_ask.iter().filter_map(|s| serde_json::to_value(s).ok()).collect();
                 session.phase = crate::agent::definition::PlanModePhase::CapturingClarifications;
@@ -3849,8 +3900,7 @@ pub async fn start_plan_mode_session(
                 if let Some(first_step) = steps_to_ask.first() {
                     format!(
                         "I've configured your **{}** agent. Let me ask a few personalization questions:\n\n{}",
-                        tmpl.name,
-                        first_step.question
+                        tmpl.name, first_step.question
                     )
                 } else {
                     // No questions to ask — proceed to review

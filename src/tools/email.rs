@@ -13,7 +13,7 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 
-use crate::tools::{ParameterSchema, Tool, ToolResult};
+use crate::tools::{ParameterSchema, Tool, ToolResult, schema_string, schema_boolean};
 
 pub struct EmailTool;
 
@@ -53,6 +53,21 @@ impl Tool for EmailTool {
                 "Credential key name (default: auto-detect by provider).",
             ),
         ]
+    }
+
+    fn output_schema(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
+            "type": "object",
+            "required": ["sent", "provider", "to"],
+            "properties": {
+                "sent": schema_boolean(),
+                "provider": schema_string(),
+                "to": schema_string(),
+                "id": serde_json::json!({ "type": ["string", "null"] }),
+                "host": serde_json::json!({ "type": ["string", "null"] }),
+            },
+            "additionalProperties": true,
+        }))
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {

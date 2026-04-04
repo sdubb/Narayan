@@ -1,6 +1,9 @@
 use async_trait::async_trait;
 
-use crate::providers::{ChatResponse, Message, Provider, Role, ToolSpec};
+use crate::{
+    gateway::llm_controls::LlmGenerationConfig,
+    providers::{ChatResponse, Message, Provider, Role, ToolSpec},
+};
 
 pub struct CopilotProviderAdapter {
     api_key: String,
@@ -19,7 +22,12 @@ impl Provider for CopilotProviderAdapter {
         "copilot"
     }
 
-    async fn chat(&self, messages: Vec<Message>, _tools: Vec<ToolSpec>) -> anyhow::Result<ChatResponse> {
+    async fn chat(
+        &self,
+        messages: Vec<Message>,
+        _tools: Vec<ToolSpec>,
+        _generation: Option<&LlmGenerationConfig>,
+    ) -> anyhow::Result<ChatResponse> {
         let system = messages.iter().find(|m| matches!(m.role, Role::System)).map(|m| m.content.as_str());
         let history: Vec<serde_json::Value> = messages
             .iter()

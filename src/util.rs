@@ -35,17 +35,14 @@ pub fn create_reqwest_client(timeout_secs: u64) -> anyhow::Result<reqwest::Clien
 
 /// Create a JSON error response for HTTP handlers.
 /// Standardizes error format across all API endpoints.
-/// 
+///
 /// # Example
 /// ```ignore
 /// if user.is_none() {
 ///     return http_error(StatusCode::NOT_FOUND, "user not found");
 /// }
 /// ```
-pub fn http_error(
-    code: axum::http::StatusCode,
-    msg: impl Into<String>,
-) -> axum::response::Response {
+pub fn http_error(code: axum::http::StatusCode, msg: impl Into<String>) -> axum::response::Response {
     use axum::response::IntoResponse;
     (code, axum::Json(serde_json::json!({ "error": msg.into() }))).into_response()
 }

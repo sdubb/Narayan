@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use base64::Engine;
 use ring::{aead, digest, hmac, pbkdf2, rand};
 
-use crate::tools::{ParameterSchema, Tool, ToolResult};
+use crate::tools::{ParameterSchema, Tool, ToolResult, schema_string, schema_integer};
 
 pub struct CryptoTool;
 
@@ -30,6 +30,72 @@ impl Tool for CryptoTool {
             ParameterSchema::optional("salt", "string", "Salt (base64) for pbkdf2. Auto-generated if omitted."),
             ParameterSchema::optional("iterations", "integer", "PBKDF2 iterations (default: 100000)."),
         ]
+    }
+
+
+
+    fn output_schema(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
+            "oneOf": [
+                {
+                    "type": "object",
+                    "required": ["algorithm", "hash", "format", "bytes"],
+                    "properties": {
+                        "algorithm": schema_string(),
+                        "hash": schema_string(),
+                        "format": schema_string(),
+                        "bytes": schema_integer(),
+                    },
+                    "additionalProperties": true,
+                },
+                {
+                    "type": "object",
+                    "required": ["signature", "format"],
+                    "properties": {
+                        "signature": schema_string(),
+                        "format": schema_string(),
+                    },
+                    "additionalProperties": true,
+                },
+                {
+                    "type": "object",
+                    "required": ["ciphertext_b64", "algorithm"],
+                    "properties": {
+                        "ciphertext_b64": schema_string(),
+                        "algorithm": schema_string(),
+                    },
+                    "additionalProperties": true,
+                },
+                {
+                    "type": "object",
+                    "required": ["plaintext"],
+                    "properties": {
+                        "plaintext": schema_string(),
+                    },
+                    "additionalProperties": true,
+                },
+                {
+                    "type": "object",
+                    "required": ["secret", "format", "length"],
+                    "properties": {
+                        "secret": schema_string(),
+                        "format": schema_string(),
+                        "length": schema_integer(),
+                    },
+                    "additionalProperties": true,
+                },
+                {
+                    "type": "object",
+                    "required": ["key_b64", "salt_b64", "iterations"],
+                    "properties": {
+                        "key_b64": schema_string(),
+                        "salt_b64": schema_string(),
+                        "iterations": schema_integer(),
+                    },
+                    "additionalProperties": true,
+                }
+            ]
+        }))
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {

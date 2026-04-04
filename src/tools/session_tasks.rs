@@ -87,6 +87,10 @@ impl Tool for TaskCreateTool {
         ]
     }
 
+    fn output_schema(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({ "type": "object", "additionalProperties": true }))
+    }
+
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         let tenant_id = match required_string(&args, "tenant_id") {
             Ok(value) => value,

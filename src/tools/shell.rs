@@ -41,7 +41,10 @@ impl Tool for ShellTool {
         Some("{ stdout, stderr, exit_code }. Non-zero exits return success=false with stderr in error.".into())
     }
     fn when_to_use(&self) -> Option<String> {
-        Some("Use for small workspace-local shell actions, repo inspection, and build/test commands that need a shell.".into())
+        Some(
+            "Use for small workspace-local shell actions, repo inspection, and build/test commands that need a shell."
+                .into(),
+        )
     }
     fn when_not_to_use(&self) -> Option<String> {
         Some("Do not use for destructive system-wide commands, long-running daemons, or tasks better expressed as structured code or data transforms.".into())

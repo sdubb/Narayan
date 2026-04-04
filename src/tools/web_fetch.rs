@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use scraper::{Html, Selector};
 
-use crate::tools::{ParameterSchema, Tool, ToolResult};
+use crate::tools::{ParameterSchema, Tool, ToolResult, schema_string, schema_integer};
 
 pub struct WebFetchTool;
 
@@ -34,6 +34,48 @@ impl Tool for WebFetchTool {
             ParameterSchema::optional("headers", "object", "Additional HTTP headers as key-value pairs."),
         ]
     }
+
+
+    fn output_schema(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
+            "oneOf": [
+                {
+                    "type": "object",
+                    "required": ["html", "url", "status", "content_type"],
+                    "properties": {
+                        "html": schema_string(),
+                        "url": schema_string(),
+                        "status": schema_integer(),
+                        "content_type": schema_string(),
+                    },
+                    "additionalProperties": true,
+                },
+                {
+                    "type": "object",
+                    "required": ["text", "title", "url", "status", "content_type", "char_count"],
+                    "properties": {
+                        "text": schema_string(),
+                        "title": schema_string(),
+                        "url": schema_string(),
+                        "status": schema_integer(),
+                        "content_type": schema_string(),
+                        "char_count": schema_integer(),
+                    },
+                    "additionalProperties": true,
+                },
+                {
+                    "type": "object",
+                    "required": ["status", "url"],
+                    "properties": {
+                        "status": schema_integer(),
+                        "url": schema_string(),
+                    },
+                    "additionalProperties": true,
+                }
+            ]
+        }))
+    }
+
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         let url = match args["url"].as_str() {
             Some(u) => u,

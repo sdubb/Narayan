@@ -19,6 +19,11 @@ impl Tool for PushoverTool {
             ParameterSchema::optional("url_title", "string", "Title for the supplementary URL."),
         ]
     }
+
+    fn output_schema(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({ "type": "object", "additionalProperties": true }))
+    }
+
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         let message = match args["message"].as_str() {
             Some(m) => m,

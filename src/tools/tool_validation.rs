@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use crate::tools::{ParameterSchema, Tool, ToolResult};
+use crate::tools::{ParameterSchema, Tool, ToolResult, schema_boolean, schema_string, schema_integer};
 pub struct ToolValidationTool;
 #[async_trait]
 impl Tool for ToolValidationTool {
@@ -16,6 +16,21 @@ impl Tool for ToolValidationTool {
             ParameterSchema::required("args", "object", "Arguments to validate."),
         ]
     }
+
+
+    fn output_schema(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
+            "type": "object",
+            "required": ["valid", "tool", "arg_count"],
+            "properties": {
+                "valid": schema_boolean(),
+                "tool": schema_string(),
+                "arg_count": schema_integer(),
+            },
+            "additionalProperties": true,
+        }))
+    }
+
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         let tool_name = args["tool_name"].as_str().unwrap_or("unknown");
         let tool_args = &args["args"];

@@ -11,7 +11,7 @@ use chromiumoxide::cdp::browser_protocol::page::PrintToPdfParams;
 
 use crate::{
     browser::BrowserPool,
-    tools::{ParameterSchema, Tool, ToolResult},
+    tools::{ParameterSchema, Tool, ToolResult, schema_string, schema_integer},
 };
 
 pub struct BrowserPdfTool {
@@ -46,6 +46,22 @@ impl Tool for BrowserPdfTool {
             ParameterSchema::optional("wait_ms", "integer", "Wait after load before export (ms, default: 500)."),
             ParameterSchema::optional("timeout_secs", "integer", "Navigation timeout (default: 30)."),
         ]
+    }
+
+
+
+    fn output_schema(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
+            "type": "object",
+            "required": ["url", "size_bytes", "pdf_b64"],
+            "properties": {
+                "url": schema_string(),
+                "size_bytes": schema_integer(),
+                "saved_to": serde_json::json!({ "type": ["string", "null"] }),
+                "pdf_b64": schema_string(),
+            },
+            "additionalProperties": true,
+        }))
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {

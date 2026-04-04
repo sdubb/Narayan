@@ -4,31 +4,31 @@ import { ArrowRight, Bot, CheckCircle2, Database, FileText, Layers3, MessageSqua
 import BenefitsScroller from '../components/BenefitsScroller';
 
 const stats = [
-  { value: 'Write', label: 'Describe the job in plain English. The agent learns the playbook.' },
-  { value: 'Check', label: 'Test connections, verify the setup, and catch issues before launch.' },
-  { value: 'Launch', label: 'The agent runs 24/7 and keeps a clear record of what happened.' },
+  { value: 'Cloud', label: '100% cloud-based with zero upfront setup or infrastructure costs.' },
+  { value: 'Secure', label: 'Enterprise-grade security that open-source alternatives cannot match.' },
+  { value: 'Simple', label: 'Just tell us what you need done, and we will do it.' },
 ];
 
 const pillars = [
   {
     icon: Workflow,
-    title: 'Scale without adding headcount',
-    text: 'Pay only for work done. Agents stay on demand, not on payroll, so teams can scale without hiring delays.',
+    title: 'We improve your company',
+    text: 'Scale operations without adding headcount. We turn plain-English instructions into fully deployed digital employees, transforming how your business operates.',
   },
   {
     icon: ShieldCheck,
-    title: 'Clear and traceable',
-    text: 'Every decision is recorded, replayable, and tied back to the inputs that produced it.',
+    title: 'Unmatched security',
+    text: 'Enterprise-grade security that open-source tools simply cannot provide. Every action is recorded, auditable, and strictly sandboxed.',
   },
   {
     icon: Layers3,
-    title: 'Fits many teams',
-    text: 'Finance, support, legal, sales, and research all run on the same platform and controls.',
+    title: 'Cloud-based, zero setup costs',
+    text: 'No clunky infrastructure to deploy or servers to manage. Narayan operates entirely in the cloud, so you can skip the setup time and upfront capital.',
   },
   {
     icon: Plug,
-    title: 'Works with your existing systems',
-    text: 'Custom APIs, databases, MCP servers, and webhooks. Narayan is an intelligence layer on top of your backend, not a replacement.',
+    title: 'Tell us what to do',
+    text: 'Just tell us what needs to be done, and we will do it. Our agents instantly wire themselves to execute your requested jobs 24/7.',
   },
 ];
 
@@ -344,13 +344,13 @@ export default function LandingPage({ onEnterApp, onSignIn }) {
             </div>
 
             <h1 className="font-serif text-4xl leading-[0.95] text-tx-1 sm:text-5xl lg:text-6xl">
-              Write a job description.
-              <span className="block text-accent">Agent does the work.</span>
+              Just tell us what needs to be done.
+              <span className="block text-accent">We will do it.</span>
             </h1>
 
             <p className="mt-5 max-w-lg text-base leading-7 text-tx-2 sm:text-lg">
-              Deploy agents for finance, support, legal, sales, and research without adding another person to the queue.
-              Every action is logged. Every workflow stays auditable.
+              We fundamentally improve how your company operates. Skip the setup costs of traditional software with our secure, cloud-based platform that open-source tools can't match.
+              Deploy intelligent agents across any department, instantly.
             </p>
 
             <div className="mt-7 flex flex-col gap-3 sm:flex-row">

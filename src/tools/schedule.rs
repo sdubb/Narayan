@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use crate::tools::{ParameterSchema, Tool, ToolResult};
+use crate::tools::{ParameterSchema, Tool, ToolResult, schema_string, schema_boolean};
 pub struct ScheduleTool;
 #[async_trait]
 impl Tool for ScheduleTool {
@@ -17,6 +17,21 @@ impl Tool for ScheduleTool {
             ParameterSchema::optional("tenant_id", "string", "Tenant ID (injected automatically)."),
         ]
     }
+
+    fn output_schema(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
+            "type": "object",
+            "required": ["scheduled", "id", "goal", "run_at"],
+            "properties": {
+                "scheduled": schema_boolean(),
+                "id": schema_string(),
+                "goal": schema_string(),
+                "run_at": schema_string(),
+            },
+            "additionalProperties": true,
+        }))
+    }
+
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         let goal = match args["goal"].as_str() {
             Some(g) => g,

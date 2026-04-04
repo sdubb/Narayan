@@ -1,6 +1,9 @@
 use async_trait::async_trait;
 
-use crate::providers::{ChatResponse, Message, Provider, Role, ToolCall, ToolSpec};
+use crate::{
+    gateway::llm_controls::LlmGenerationConfig,
+    providers::{ChatResponse, Message, Provider, Role, ToolCall, ToolSpec},
+};
 
 pub struct CompatibleProviderAdapter {
     api_key: String,
@@ -19,7 +22,12 @@ impl Provider for CompatibleProviderAdapter {
         "compatible"
     }
 
-    async fn chat(&self, messages: Vec<Message>, tools: Vec<ToolSpec>) -> anyhow::Result<ChatResponse> {
+    async fn chat(
+        &self,
+        messages: Vec<Message>,
+        tools: Vec<ToolSpec>,
+        generation: Option<&LlmGenerationConfig>,
+    ) -> anyhow::Result<ChatResponse> {
         let system = messages.iter().find(|m| matches!(m.role, Role::System)).map(|m| m.content.as_str());
         let history: Vec<serde_json::Value> = messages
             .iter()
@@ -27,9 +35,20 @@ impl Provider for CompatibleProviderAdapter {
             .map(|m| serde_json::json!({"role": format!("{:?}", m.role).to_lowercase(), "content": m.content}))
             .collect();
 
+        let generation = generation.cloned().unwrap_or_else(|| {
+            LlmGenerationConfig::new(
+                crate::gateway::llm_controls::LlmRole::Drafter,
+                crate::gateway::llm_controls::LlmExecutionIntent::Balanced,
+                crate::gateway::llm_controls::LlmBudgetTier::High,
+            )
+            .with_limits(4096, 0.2)
+        });
+
         let mut payload = serde_json::json!({
             "model":    self.model,
             "messages": history,
+            "max_tokens": generation.max_tokens,
+            "temperature": generation.temperature,
         });
         if let Some(sys) = system {
             payload["system"] = serde_json::json!(sys);

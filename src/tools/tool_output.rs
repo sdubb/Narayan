@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use crate::tools::{ParameterSchema, Tool, ToolResult};
+use crate::tools::{ParameterSchema, Tool, ToolResult, schema_string};
 pub struct ToolOutputTool;
 #[async_trait]
 impl Tool for ToolOutputTool {
@@ -21,6 +21,20 @@ impl Tool for ToolOutputTool {
             ),
         ]
     }
+
+
+    fn output_schema(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
+            "type": "object",
+            "required": ["formatted", "tool"],
+            "properties": {
+                "formatted": schema_string(),
+                "tool": schema_string(),
+            },
+            "additionalProperties": true,
+        }))
+    }
+
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         let tool_name = args["tool_name"].as_str().unwrap_or("unknown");
         let output = &args["output"];

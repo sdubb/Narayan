@@ -187,7 +187,9 @@ impl Scheduler for DbPollingScheduler {
                             .collect::<Vec<_>>();
                         merge_child_results_into_parent(&mut parent, &child_states, &child_messages);
                         for message in &child_messages {
-                            if let Err(error) = self.store.mark_agent_message_delivered(&parent.tenant_id, &message.id).await {
+                            if let Err(error) =
+                                self.store.mark_agent_message_delivered(&parent.tenant_id, &message.id).await
+                            {
                                 tracing::warn!(
                                     parent = %parent.id,
                                     message_id = %message.id,

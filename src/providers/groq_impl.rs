@@ -1,6 +1,9 @@
 use async_trait::async_trait;
 
-use crate::providers::{ChatResponse, Message, Provider, ToolCall, ToolSpec};
+use crate::{
+    gateway::llm_controls::LlmGenerationConfig,
+    providers::{ChatResponse, Message, Provider, ToolCall, ToolSpec},
+};
 
 pub struct GroqProviderAdapter {
     api_key: String,
@@ -19,7 +22,12 @@ impl Provider for GroqProviderAdapter {
         "groq"
     }
 
-    async fn chat(&self, messages: Vec<Message>, tools: Vec<ToolSpec>) -> anyhow::Result<ChatResponse> {
+    async fn chat(
+        &self,
+        messages: Vec<Message>,
+        tools: Vec<ToolSpec>,
+        generation: Option<&LlmGenerationConfig>,
+    ) -> anyhow::Result<ChatResponse> {
         let client = reqwest::Client::new();
 
         // Build OpenAI-compatible tool format for Groq
@@ -37,9 +45,20 @@ impl Provider for GroqProviderAdapter {
             })
             .collect();
 
+        let generation = generation.cloned().unwrap_or_else(|| {
+            LlmGenerationConfig::new(
+                crate::gateway::llm_controls::LlmRole::Drafter,
+                crate::gateway::llm_controls::LlmExecutionIntent::Balanced,
+                crate::gateway::llm_controls::LlmBudgetTier::High,
+            )
+            .with_limits(4096, 0.2)
+        });
+
         let mut payload = serde_json::json!({
             "model": self.model,
             "messages": messages.iter().map(|m| serde_json::json!({ "role": m.role, "content": m.content })).collect::<Vec<_>>(),
+            "max_tokens": generation.max_tokens,
+            "temperature": generation.temperature,
         });
 
         if !groq_tools.is_empty() {

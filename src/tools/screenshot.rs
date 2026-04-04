@@ -9,7 +9,7 @@ use chromiumoxide::{cdp::browser_protocol::page::CaptureScreenshotFormat, page::
 
 use crate::{
     browser::BrowserPool,
-    tools::{ParameterSchema, Tool, ToolResult},
+    tools::{ParameterSchema, Tool, ToolResult, schema_string, schema_integer, schema_boolean},
 };
 
 pub struct ScreenshotTool {
@@ -39,6 +39,24 @@ impl Tool for ScreenshotTool {
             ParameterSchema::optional("timeout_secs", "integer", "Navigation timeout (default: 30)."),
             ParameterSchema::optional("selector", "string", "CSS selector — screenshot only that element."),
         ]
+    }
+
+    fn output_schema(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
+            "type": "object",
+            "required": ["url", "format", "width", "height", "full_page", "size_bytes", "image_b64"],
+            "properties": {
+                "url": schema_string(),
+                "format": schema_string(),
+                "width": schema_integer(),
+                "height": schema_integer(),
+                "full_page": schema_boolean(),
+                "size_bytes": schema_integer(),
+                "saved_to": serde_json::json!({ "type": ["string", "null"] }),
+                "image_b64": schema_string(),
+            },
+            "additionalProperties": true,
+        }))
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {

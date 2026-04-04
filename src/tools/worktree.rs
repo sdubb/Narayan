@@ -40,12 +40,20 @@ fn sanitize_label(raw: &str) -> String {
         }
     }
     let trimmed = out.trim_matches('-');
-    if trimmed.is_empty() { "isolated".into() } else { trimmed[..trimmed.len().min(48)].to_string() }
+    if trimmed.is_empty() {
+        "isolated".into()
+    } else {
+        trimmed[..trimmed.len().min(48)].to_string()
+    }
 }
 
 fn resolve_path(path: &str, workspace_path: &str) -> PathBuf {
     let candidate = Path::new(path);
-    if candidate.is_absolute() { candidate.to_path_buf() } else { Path::new(workspace_path).join(candidate) }
+    if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        Path::new(workspace_path).join(candidate)
+    }
 }
 
 fn canonicalish(path: &Path) -> anyhow::Result<PathBuf> {
@@ -63,18 +71,15 @@ fn path_within(base: &Path, candidate: &Path) -> anyhow::Result<bool> {
 }
 
 async fn run_git(repo_path: &Path, args: &[&str]) -> anyhow::Result<ToolResult> {
-    let output = tokio::time::timeout(
-        Duration::from_secs(120),
-        Command::new("git").current_dir(repo_path).args(args).output(),
-    )
-    .await;
+    let output =
+        tokio::time::timeout(Duration::from_secs(120), Command::new("git").current_dir(repo_path).args(args).output())
+            .await;
 
     match output {
         Ok(Ok(result)) => {
             let stdout = String::from_utf8_lossy(&result.stdout).into_owned();
             let stderr = String::from_utf8_lossy(&result.stderr).into_owned();
-            let payload =
-                serde_json::json!({"stdout": stdout, "stderr": stderr, "exit_code": result.status.code().unwrap_or(-1)});
+            let payload = serde_json::json!({"stdout": stdout, "stderr": stderr, "exit_code": result.status.code().unwrap_or(-1)});
             if result.status.success() {
                 Ok(ToolResult::ok(payload))
             } else {
@@ -104,8 +109,16 @@ impl Tool for EnterWorktreeTool {
 
     fn parameters_schema(&self) -> Vec<ParameterSchema> {
         vec![
-            ParameterSchema::required("explicit_user_request", "boolean", "Must be true only when the user explicitly requested a worktree."),
-            ParameterSchema::optional("repo_path", "string", "Workspace-relative or absolute git repository path. Defaults to the workspace root."),
+            ParameterSchema::required(
+                "explicit_user_request",
+                "boolean",
+                "Must be true only when the user explicitly requested a worktree.",
+            ),
+            ParameterSchema::optional(
+                "repo_path",
+                "string",
+                "Workspace-relative or absolute git repository path. Defaults to the workspace root.",
+            ),
             ParameterSchema::optional("branch_name", "string", "Optional branch name for the isolated worktree."),
             ParameterSchema::optional("name", "string", "Short label for the worktree path."),
             ParameterSchema::required("workspace_path", "string", "Injected automatically."),
@@ -113,11 +126,18 @@ impl Tool for EnterWorktreeTool {
         ]
     }
 
+
+
+    fn output_schema(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({ "type": "object", "additionalProperties": true }))
+    }
+
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         if let Err(message) = require_explicit_user_request(&args) {
             return Ok(ToolResult::err(message));
         }
-        let workspace_path = optional_string(&args, "workspace_path").ok_or_else(|| anyhow::anyhow!("workspace_path is required"))?;
+        let workspace_path =
+            optional_string(&args, "workspace_path").ok_or_else(|| anyhow::anyhow!("workspace_path is required"))?;
         let agent_id = optional_string(&args, "agent_id").ok_or_else(|| anyhow::anyhow!("agent_id is required"))?;
         let workspace_root = PathBuf::from(&workspace_path);
         if !workspace_root.exists() {
@@ -135,7 +155,11 @@ impl Tool for EnterWorktreeTool {
         }
 
         let branch_name = optional_string(&args, "branch_name").unwrap_or_else(|| {
-            format!("narayan-{}-{}", sanitize_label(&agent_id), sanitize_label(optional_string(&args, "name").as_deref().unwrap_or("isolated")))
+            format!(
+                "narayan-{}-{}",
+                sanitize_label(&agent_id),
+                sanitize_label(optional_string(&args, "name").as_deref().unwrap_or("isolated"))
+            )
         });
         let worktree_label = sanitize_label(optional_string(&args, "name").as_deref().unwrap_or(&branch_name));
         let worktree_root = workspace_root
@@ -146,10 +170,7 @@ impl Tool for EnterWorktreeTool {
         tokio::fs::create_dir_all(&worktree_root).await?;
         let worktree_path = worktree_root.join(worktree_label);
         if worktree_path.exists() {
-            return Ok(ToolResult::err(format!(
-                "worktree path '{}' already exists",
-                worktree_path.display()
-            )));
+            return Ok(ToolResult::err(format!("worktree path '{}' already exists", worktree_path.display())));
         }
 
         let worktree_path_string = worktree_path.display().to_string();
@@ -186,7 +207,11 @@ impl Tool for ExitWorktreeTool {
 
     fn parameters_schema(&self) -> Vec<ParameterSchema> {
         vec![
-            ParameterSchema::required("explicit_user_request", "boolean", "Must be true only when the user explicitly requested worktree isolation."),
+            ParameterSchema::required(
+                "explicit_user_request",
+                "boolean",
+                "Must be true only when the user explicitly requested worktree isolation.",
+            ),
             ParameterSchema::required("worktree_path", "string", "Worktree path returned by enter_worktree."),
             ParameterSchema::required("workspace_path", "string", "Injected automatically."),
         ]
@@ -196,10 +221,13 @@ impl Tool for ExitWorktreeTool {
         if let Err(message) = require_explicit_user_request(&args) {
             return Ok(ToolResult::err(message));
         }
-        let workspace_path = optional_string(&args, "workspace_path").ok_or_else(|| anyhow::anyhow!("workspace_path is required"))?;
+        let workspace_path =
+            optional_string(&args, "workspace_path").ok_or_else(|| anyhow::anyhow!("workspace_path is required"))?;
         let workspace_root = PathBuf::from(&workspace_path);
         let worktree_path = resolve_path(
-            optional_string(&args, "worktree_path").ok_or_else(|| anyhow::anyhow!("worktree_path is required"))?.as_str(),
+            optional_string(&args, "worktree_path")
+                .ok_or_else(|| anyhow::anyhow!("worktree_path is required"))?
+                .as_str(),
             &workspace_path,
         );
         if !path_within(workspace_root.parent().unwrap_or(&workspace_root), &worktree_path)? {
@@ -217,7 +245,11 @@ impl Tool for ExitWorktreeTool {
             git_common.output.get("stdout").and_then(|value| value.as_str()).unwrap_or_default().trim().to_string();
         let common_dir = {
             let candidate = PathBuf::from(&common_dir_raw);
-            if candidate.is_absolute() { candidate } else { worktree_path.join(candidate) }
+            if candidate.is_absolute() {
+                candidate
+            } else {
+                worktree_path.join(candidate)
+            }
         };
         let common_dir = common_dir.canonicalize().unwrap_or(common_dir);
         let repo_root = common_dir.parent().ok_or_else(|| anyhow::anyhow!("unable to resolve main repository root"))?;

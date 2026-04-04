@@ -43,6 +43,14 @@ pub struct ClarificationQuestion {
     pub connector_type: Option<String>,
     #[serde(default, alias = "actionLabel")]
     pub action_label: Option<String>,
+    #[serde(default)]
+    pub card_type: Option<String>,
+    #[serde(default)]
+    pub required_fields: Vec<String>,
+    #[serde(default)]
+    pub binding_target: Option<String>,
+    #[serde(default)]
+    pub resume_token: Option<String>,
 }
 
 impl ClarificationQuestion {
@@ -63,6 +71,10 @@ impl ClarificationQuestion {
             store_as_credential: None,
             connector_type: None,
             action_label: None,
+            card_type: None,
+            required_fields: Vec::new(),
+            binding_target: None,
+            resume_token: None,
         }
     }
 
@@ -155,6 +167,22 @@ pub fn parse_clarification_questions(value: &serde_json::Value) -> Vec<Clarifica
                                 .and_then(|value| value.as_str())
                                 .map(str::to_string),
                             action_label: map.get("action_label").and_then(|value| value.as_str()).map(str::to_string),
+                            card_type: map.get("card_type").and_then(|value| value.as_str()).map(str::to_string),
+                            required_fields: map
+                                .get("required_fields")
+                                .and_then(|value| value.as_array())
+                                .map(|items| {
+                                    items
+                                        .iter()
+                                        .filter_map(|value| value.as_str().map(str::to_string))
+                                        .collect::<Vec<_>>()
+                                })
+                                .unwrap_or_default(),
+                            binding_target: map
+                                .get("binding_target")
+                                .and_then(|value| value.as_str())
+                                .map(str::to_string),
+                            resume_token: map.get("resume_token").and_then(|value| value.as_str()).map(str::to_string),
                         }
                         .normalized(index)
                     })
@@ -206,7 +234,21 @@ or
   "clear": false,
   "questions": [
     "Specific question 1?",
-    "Specific question 2?"
+    {
+      "id": "database_setup",
+      "question_type": "card_open",
+      "prompt": "Connect the database before continuing.",
+      "card_type": "database",
+      "binding_target": "db_main",
+      "required_fields": ["host", "port", "db_name"],
+      "resume_token": "bind_db_main"
+    },
+    {
+      "id": "trigger_mode",
+      "question_type": "mcq",
+      "prompt": "How should this workflow start?",
+      "options": ["Manual", "Schedule", "Webhook"]
+    }
   ]
 }
 

@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use crate::tools::{ParameterSchema, Tool, ToolResult};
+use crate::tools::{ParameterSchema, Tool, ToolResult, schema_string, schema_integer};
 pub struct ApiCallTool;
 #[async_trait]
 impl Tool for ApiCallTool {
@@ -29,6 +29,20 @@ impl Tool for ApiCallTool {
             ParameterSchema::optional("headers", "object", "Additional headers."),
         ]
     }
+
+
+    fn output_schema(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
+            "type": "object",
+            "required": ["status", "body"],
+            "properties": {
+                "status": schema_integer(),
+                "body": schema_string(),
+            },
+            "additionalProperties": true,
+        }))
+    }
+
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         let url = match args["url"].as_str() {
             Some(u) => u,

@@ -16,6 +16,7 @@ use crate::{
         executor::StepResult,
         planner::{Plan, PlannedStep},
     },
+    gateway::LlmGenerationConfig,
     state::AgentState,
     tools::ToolResult,
 };
@@ -997,6 +998,7 @@ EXECUTION STYLE:
         history_summary: &str,
         previous_tool_results: &[&str],
         conversation_history: &str,
+        llm_generation: Option<&LlmGenerationConfig>,
     ) -> String {
         let conv_ctx =
             if conversation_history.is_empty() { String::new() } else { format!("{conversation_history}\n") };
@@ -1024,7 +1026,22 @@ EXECUTION STYLE:
         let planned_tool = step
             .tool
             .as_ref()
-            .map(|t| format!("\nPLANNED TOOL: {} — use this unless you have a concrete reason not to", t))
+            .map(|t| {
+                if t == "llm_worker" {
+                    let llm_meta = llm_generation.map(|cfg| {
+                        format!(
+                            "\nLLM ROLE: {:?}\nEXECUTION INTENT: {:?}\nBUDGET TIER: {:?}\nMAX TOKENS: {}\nTEMPERATURE: {}",
+                            cfg.role, cfg.execution_intent, cfg.budget_tier, cfg.max_tokens, cfg.temperature
+                        )
+                    });
+                    format!(
+                        "\nPLANNED WORKER: llm_worker — this is an explicit LLM reasoning step. Do not call external tools; produce the requested JSON result directly.{}",
+                        llm_meta.unwrap_or_default()
+                    )
+                } else {
+                    format!("\nPLANNED TOOL: {} — use this unless you have a concrete reason not to", t)
+                }
+            })
             .unwrap_or_default();
         let planned_tool_args = step
             .tool_args
@@ -1053,12 +1070,28 @@ EXECUTION STYLE:
         let clarification_ctx = clarification_context(state)
             .map(|value| format!("\nLATEST USER INPUT:\n{}\n", truncate(&value, 1200)))
             .unwrap_or_default();
+        let dag_ctx = state
+            .metadata
+            .get("dag_step_context")
+            .and_then(|value| serde_json::to_string_pretty(value).ok())
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| format!("\nDAG STEP CONTEXT:\n{}\n", truncate(&value, 2000)))
+            .unwrap_or_default();
+        let coordinator_ctx = state
+            .metadata
+            .get("coordinator_shell")
+            .and_then(|value| serde_json::to_string_pretty(value).ok())
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| format!("\nCOORDINATOR SHELL CONTEXT:\n{}\n", truncate(&value, 2000)))
+            .unwrap_or_default();
 
         format!(
-            "{conv_ctx}USER GOAL:\n{goal}{clarification_ctx}\nCURRENT STEP [{idx}]: {desc}{planned_tool}{planned_tool_args}{retry_ctx}{history}{tools}\n\nExecute this step now.",
+            "{conv_ctx}USER GOAL:\n{goal}{clarification_ctx}{dag_ctx}{coordinator_ctx}\nCURRENT STEP [{idx}]: {desc}{planned_tool}{planned_tool_args}{retry_ctx}{history}{tools}\n\nExecute this step now.",
             conv_ctx = conv_ctx,
             goal = state.goal,
             clarification_ctx = clarification_ctx,
+            dag_ctx = dag_ctx,
+            coordinator_ctx = coordinator_ctx,
             idx = step.index,
             desc = step.description,
             planned_tool = planned_tool,
@@ -1403,6 +1436,12 @@ struct StepEntry {
     output: String, // full, untruncated — we truncate at render time
 }
 
+/// Maximum entries retained in the in-memory step history.
+/// The tiered compression in `summarise()` already renders old steps as
+/// header-only, so dropping them from the backing Vec loses nothing.
+/// Full step outputs are preserved on disk as artifact files.
+const STEP_HISTORY_CAP: usize = 30;
+
 impl StepHistory {
     pub fn new() -> Self {
         Self { entries: Vec::new() }
@@ -1410,6 +1449,11 @@ impl StepHistory {
 
     pub fn push(&mut self, index: usize, desc: String, success: bool, output: &str) {
         self.entries.push(StepEntry { index, desc, success, output: output.to_string() });
+        // Evict oldest entries when over cap
+        if self.entries.len() > STEP_HISTORY_CAP {
+            let excess = self.entries.len() - STEP_HISTORY_CAP;
+            self.entries.drain(..excess);
+        }
     }
 
     pub fn inject_facts(&mut self, facts: &str) {
@@ -1478,5 +1522,62 @@ pub fn truncate(s: &str, max_chars: usize) -> &str {
     match s.char_indices().nth(max_chars) {
         None => s,
         Some((i, _)) => &s[..i],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::planner::PlannedStep;
+    use crate::state::AgentState;
+
+    #[test]
+    fn user_step_includes_dag_context_when_present() {
+        let mut state = AgentState::new("agent-1".into(), "tenant-1".into(), "Investigate".into(), "/tmp".into());
+        state.metadata["dag_step_context"] = serde_json::json!({
+            "dag_step_id": "step-1",
+            "dag_predecessor_outputs": {
+                "step-0": { "result": "done" }
+            }
+        });
+
+        let step = PlannedStep {
+            foreach: None,
+            index: 1,
+            description: "Use predecessor results".into(),
+            tool: None,
+            tool_args: None,
+            success_criteria: "Finish".into(),
+            condition: None,
+            depends_on: vec![0],
+        };
+
+        let prompt = ExecutorPrompt::user_step(&state, &step, "", &[], "", None);
+        assert!(prompt.contains("DAG STEP CONTEXT"));
+        assert!(prompt.contains("step-0"));
+    }
+
+    #[test]
+    fn user_step_includes_coordinator_context_when_present() {
+        let mut state = AgentState::new("agent-1".into(), "tenant-1".into(), "Coordinate".into(), "/tmp".into());
+        state.metadata["coordinator_shell"] = serde_json::json!({
+            "mode": "coordinator_shell",
+            "pending_children": ["child-1"]
+        });
+
+        let step = PlannedStep {
+            foreach: None,
+            index: 2,
+            description: "Synthesize findings".into(),
+            tool: None,
+            tool_args: None,
+            success_criteria: "Finish".into(),
+            condition: None,
+            depends_on: vec![1],
+        };
+
+        let prompt = ExecutorPrompt::user_step(&state, &step, "", &[], "", None);
+        assert!(prompt.contains("COORDINATOR SHELL CONTEXT"));
+        assert!(prompt.contains("child-1"));
     }
 }

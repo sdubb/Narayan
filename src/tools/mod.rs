@@ -207,28 +207,24 @@ pub mod file_read;
 pub mod file_write;
 pub mod git_operations;
 pub mod glob_search;
-pub mod hardware;
+
 pub mod http_request;
 pub mod image_info;
 pub mod image_process;
 pub mod kubernetes;
 pub mod mcp_session;
+
 pub mod message_inbox;
-pub mod memory_consolidate;
-pub mod memory_forget;
-pub mod memory_recall;
-pub mod memory_store;
 pub mod model_routing;
 pub mod notification;
-pub mod pdf_create;
-pub mod pdf_read;
+
 pub mod plane_guard;
 pub mod process_monitor;
 pub mod proxy_config;
 pub mod pushover;
 pub mod register_api_tool;
 pub mod request_credential;
-pub mod run_registered_wasm;
+
 pub mod schedule;
 pub mod screenshot;
 pub mod search_mcp_registry;
@@ -243,13 +239,7 @@ pub mod suggest_connectors;
 pub mod tool_output;
 pub mod tool_search;
 pub mod tool_validation;
-pub mod vector_delete;
-pub mod vector_search;
-pub mod vector_store;
-pub mod wasm_call;
-pub mod wasm_compile;
-pub mod wasm_exec;
-pub mod wasm_inspect;
+
 pub mod web_fetch;
 pub mod web_search_tool;
 pub mod worktree;
@@ -277,12 +267,10 @@ pub fn default_registry() -> ToolRegistry {
     // NOTE: BrowserTool and ScreenshotTool require Arc<BrowserPool> and are registered
     // in main.rs when a browser pool is available.
     r.register(Arc::new(browser_open::BrowserOpenTool));
-    r.register(Arc::new(memory_store::MemoryStoreTool));
-    r.register(Arc::new(memory_recall::MemoryRecallTool));
-    r.register(Arc::new(memory_forget::MemoryForgetTool));
+
     r.register(Arc::new(data_extractor::DataExtractorTool));
     r.register(Arc::new(data_engine::DataEngineTool));
-    r.register(Arc::new(pdf_read::PdfReadTool));
+
     r.register(Arc::new(image_info::ImageInfoTool));
     r.register(Arc::new(api_call::ApiCallTool));
     r.register(Arc::new(pushover::PushoverTool));
@@ -321,9 +309,7 @@ pub fn default_registry() -> ToolRegistry {
     r.register(Arc::new(proxy_config::ProxyConfigTool));
     r.register(Arc::new(model_routing::ModelRoutingTool));
     r.register(Arc::new(ask_user::AskUserTool));
-    r.register(Arc::new(hardware::HardwareBoardInfoTool));
-    r.register(Arc::new(hardware::HardwareMemoryMapTool));
-    r.register(Arc::new(hardware::HardwareMemoryReadTool));
+
     r.register(Arc::new(sql_query::SqlQueryTool));
     r.register(Arc::new(diff_patch::DiffTool));
     r.register(Arc::new(diff_patch::PatchTool));
@@ -338,14 +324,10 @@ pub fn default_registry() -> ToolRegistry {
     r.register(Arc::new(spreadsheet::SpreadsheetWriteTool));
     r.register(Arc::new(process_monitor::ProcessMonitorTool));
     r.register(Arc::new(kubernetes::KubernetesTool));
-    r.register(Arc::new(pdf_create::PdfCreateTool));
+
     r.register(Arc::new(crypto_tool::CryptoTool));
     // WASM tools
-    r.register(Arc::new(wasm_exec::WasmExecTool));
-    r.register(Arc::new(wasm_compile::WasmCompileTool));
-    r.register(Arc::new(wasm_inspect::WasmInspectTool));
-    r.register(Arc::new(wasm_call::WasmCallTool));
-    r.register(Arc::new(run_registered_wasm::RunRegisteredWasmTool::new()));
+
     // NOTE: vector tools are registered in main.rs (they need Arc<PgVectorStore> + Arc<dyn EmbeddingModel>)
     // NOTE: browser tools with pool are registered in main.rs (they need Arc<BrowserPool>)
     r
@@ -371,37 +353,37 @@ pub fn parameters_schema_to_json(parameters: &[ParameterSchema]) -> serde_json::
     })
 }
 
-fn schema_array(items: serde_json::Value) -> serde_json::Value {
+pub fn schema_array(items: serde_json::Value) -> serde_json::Value {
     serde_json::json!({
         "type": "array",
         "items": items,
     })
 }
 
-fn schema_string() -> serde_json::Value {
+pub fn schema_string() -> serde_json::Value {
     serde_json::json!({ "type": "string" })
 }
 
-fn schema_integer() -> serde_json::Value {
+pub fn schema_integer() -> serde_json::Value {
     serde_json::json!({ "type": "integer" })
 }
 
-fn schema_number() -> serde_json::Value {
+pub fn schema_number() -> serde_json::Value {
     serde_json::json!({ "type": "number" })
 }
 
-fn schema_boolean() -> serde_json::Value {
+pub fn schema_boolean() -> serde_json::Value {
     serde_json::json!({ "type": "boolean" })
 }
 
-fn generic_object_schema() -> serde_json::Value {
+pub fn generic_object_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "additionalProperties": true,
     })
 }
 
-fn any_json_schema() -> serde_json::Value {
+pub fn any_json_schema() -> serde_json::Value {
     serde_json::json!({
         "anyOf": [
             { "type": "object", "additionalProperties": true },
@@ -1032,14 +1014,7 @@ pub fn default_output_schema<T: Tool + ?Sized>(tool: &T) -> Option<serde_json::V
                 }
             ]
         }),
-        "hardware_board_info" | "hardware_memory_map" | "hardware_memory_read" => serde_json::json!({
-            "type": "object",
-            "required": ["info"],
-            "properties": {
-                "info": schema_string(),
-            },
-            "additionalProperties": true,
-        }),
+
         "git_operations" => serde_json::json!({
             "type": "object",
             "required": ["stdout", "stderr", "exit_code"],

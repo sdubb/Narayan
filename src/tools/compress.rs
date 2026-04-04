@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 
-use crate::tools::{ParameterSchema, Tool, ToolResult};
+use crate::tools::{ParameterSchema, Tool, ToolResult, schema_string, schema_integer};
 
 pub struct CompressTool;
 pub struct DecompressTool;
@@ -47,6 +47,23 @@ impl Tool for CompressTool {
             ParameterSchema::optional("level", "integer", "Compression level 0-9 (default: 6)."),
         ]
     }
+
+
+    fn output_schema(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
+            "type": "object",
+            "required": ["output", "format", "files", "output_bytes", "elapsed_ms"],
+            "properties": {
+                "output": schema_string(),
+                "format": schema_string(),
+                "files": schema_integer(),
+                "output_bytes": schema_integer(),
+                "elapsed_ms": schema_integer(),
+            },
+            "additionalProperties": true,
+        }))
+    }
+
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         let output = match args["output"].as_str() {
             Some(o) => o.to_string(),

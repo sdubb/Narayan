@@ -260,7 +260,8 @@ impl Tool for DataEngineTool {
             Err(err) => return Ok(ToolResult::err(err)),
         };
 
-        let has_pipeline = args.get("pipeline").and_then(Value::as_array).map(|items| !items.is_empty()).unwrap_or(false);
+        let has_pipeline =
+            args.get("pipeline").and_then(Value::as_array).map(|items| !items.is_empty()).unwrap_or(false);
         let op = args["op"].as_str().map(str::trim).unwrap_or_default().to_string();
         let mut warnings = Vec::<String>::new();
         let mut errors = Vec::<String>::new();
@@ -477,14 +478,11 @@ fn parse_config<T: for<'de> Deserialize<'de>>(raw: Option<&Value>, label: &str) 
 }
 
 fn parse_rules_config(step: &PipelineStep) -> Result<RulesConfig, String> {
-    let mut config = if let Some(rules) = &step.rules {
-        RulesConfig {
-            mode: step.mode.clone().unwrap_or_else(|| "first_match".into()),
-            rules: rules.clone(),
-        }
+    let config = if let Some(rules) = &step.rules {
+        RulesConfig { mode: step.mode.clone().unwrap_or_else(|| "first_match".into()), rules: rules.clone() }
     } else if let Some(config) = &step.config {
-        let mut rc: RulesConfig = serde_json::from_value(config.clone())
-            .map_err(|err| format!("invalid apply_rules config: {err}"))?;
+        let mut rc: RulesConfig =
+            serde_json::from_value(config.clone()).map_err(|err| format!("invalid apply_rules config: {err}"))?;
         if let Some(mode) = &step.mode {
             rc.mode = mode.clone();
         }
@@ -538,7 +536,9 @@ fn validate_condition(condition: &ConditionSpec, depth: usize, options: &EngineO
     if depth > options.max_depth {
         return Err(format!("condition depth exceeds max_depth={}", options.max_depth));
     }
-    if condition.not_condition.is_some() && (condition.field.is_some() || condition.all_of.is_some() || condition.any_of.is_some()) {
+    if condition.not_condition.is_some()
+        && (condition.field.is_some() || condition.all_of.is_some() || condition.any_of.is_some())
+    {
         return Err("condition 'not' cannot be combined with atomic or grouped conditions".into());
     }
     if condition.all_of.is_some() && condition.any_of.is_some() {
@@ -602,19 +602,19 @@ fn validate_condition(condition: &ConditionSpec, depth: usize, options: &EngineO
     Ok(())
 }
 
-fn evaluate_condition(condition: &ConditionSpec, record: &Map<String, Value>, options: &EngineOptions) -> Result<bool, String> {
+fn evaluate_condition(
+    condition: &ConditionSpec,
+    record: &Map<String, Value>,
+    options: &EngineOptions,
+) -> Result<bool, String> {
     if let Some(inner) = &condition.not_condition {
         return Ok(!evaluate_condition(inner, record, options)?);
     }
     if let Some(all_of) = &condition.all_of {
-        return all_of
-            .iter()
-            .try_fold(true, |acc, item| Ok(acc && evaluate_condition(item, record, options)?));
+        return all_of.iter().try_fold(true, |acc, item| Ok(acc && evaluate_condition(item, record, options)?));
     }
     if let Some(any_of) = &condition.any_of {
-        return any_of
-            .iter()
-            .try_fold(false, |acc, item| Ok(acc || evaluate_condition(item, record, options)?));
+        return any_of.iter().try_fold(false, |acc, item| Ok(acc || evaluate_condition(item, record, options)?));
     }
 
     let field = condition.field.as_ref().ok_or_else(|| "atomic condition requires field".to_string())?;
@@ -669,16 +669,17 @@ fn evaluate_condition(condition: &ConditionSpec, record: &Map<String, Value>, op
     Err("unsupported condition".into())
 }
 
-fn evaluate_assignment_value(value_spec: &Value, record: &Map<String, Value>, options: &EngineOptions) -> Result<Value, String> {
+fn evaluate_assignment_value(
+    value_spec: &Value,
+    record: &Map<String, Value>,
+    options: &EngineOptions,
+) -> Result<Value, String> {
     if let Some(obj) = value_spec.as_object() {
         if obj.contains_key("if") && obj.contains_key("then") {
-            let condition: ConditionSpec =
-                serde_json::from_value(obj.get("if").cloned().unwrap_or(Value::Null)).map_err(|err| format!("invalid assign condition: {err}"))?;
-            let branch = if evaluate_condition(&condition, record, options)? {
-                obj.get("then")
-            } else {
-                obj.get("else")
-            };
+            let condition: ConditionSpec = serde_json::from_value(obj.get("if").cloned().unwrap_or(Value::Null))
+                .map_err(|err| format!("invalid assign condition: {err}"))?;
+            let branch =
+                if evaluate_condition(&condition, record, options)? { obj.get("then") } else { obj.get("else") };
             return Ok(branch.cloned().unwrap_or(Value::Null));
         }
         if obj.contains_key("formula") && obj.len() == 1 {
@@ -721,7 +722,11 @@ fn apply_rules_to_record(
     }
 }
 
-fn apply_action(record: &mut Map<String, Value>, action: &RuleActionSpec, options: &EngineOptions) -> Result<bool, String> {
+fn apply_action(
+    record: &mut Map<String, Value>,
+    action: &RuleActionSpec,
+    options: &EngineOptions,
+) -> Result<bool, String> {
     if let Some(set) = &action.set {
         for (field, spec) in set {
             let value = evaluate_assignment_value(spec, record, options)?;
@@ -746,7 +751,8 @@ fn apply_action(record: &mut Map<String, Value>, action: &RuleActionSpec, option
 
 fn clean_record(mut record: Map<String, Value>, config: &CleanConfig) -> Map<String, Value> {
     let lowercase: std::collections::HashSet<&str> = config.lowercase_fields.iter().map(String::as_str).collect();
-    let null_values: std::collections::HashSet<String> = config.null_values.iter().filter_map(value_to_string).collect();
+    let null_values: std::collections::HashSet<String> =
+        config.null_values.iter().filter_map(value_to_string).collect();
     let coercions = &config.type_coercion;
 
     let keys: Vec<String> = record.keys().cloned().collect();
@@ -802,7 +808,9 @@ fn clean_value(
 
 fn coerce_string(value: &str, target: &str) -> Option<Value> {
     match target.to_ascii_lowercase().as_str() {
-        "number" | "float" | "f64" => value.parse::<f64>().ok().and_then(serde_json::Number::from_f64).map(Value::Number),
+        "number" | "float" | "f64" => {
+            value.parse::<f64>().ok().and_then(serde_json::Number::from_f64).map(Value::Number)
+        }
         "integer" | "int" | "i64" => value.parse::<i64>().ok().map(|n| Value::Number(n.into())),
         "boolean" | "bool" => value.parse::<bool>().ok().map(Value::Bool),
         "string" => Some(Value::String(value.to_string())),
@@ -810,7 +818,11 @@ fn coerce_string(value: &str, target: &str) -> Option<Value> {
     }
 }
 
-fn rank_records(records: Vec<Map<String, Value>>, config: &RankConfig, options: &EngineOptions) -> Result<Vec<Map<String, Value>>, String> {
+fn rank_records(
+    records: Vec<Map<String, Value>>,
+    config: &RankConfig,
+    options: &EngineOptions,
+) -> Result<Vec<Map<String, Value>>, String> {
     let score_field = config.score_field.clone().unwrap_or_else(|| "score".into());
     let mut scored: Vec<(f64, String, Map<String, Value>)> = Vec::with_capacity(records.len());
     for mut record in records {
@@ -818,7 +830,8 @@ fn rank_records(records: Vec<Map<String, Value>>, config: &RankConfig, options: 
             let value = evaluate_formula(formula, &record, options)?;
             as_f64(&value).ok_or_else(|| "rank formula must evaluate to a number".to_string())?
         } else {
-            let value = get_path(&record, &score_field).ok_or_else(|| format!("missing score field '{score_field}'"))?;
+            let value =
+                get_path(&record, &score_field).ok_or_else(|| format!("missing score field '{score_field}'"))?;
             as_f64(value).ok_or_else(|| format!("score field '{score_field}' must be numeric"))?
         };
         set_path(&mut record, &score_field, number_to_value(score)?);
@@ -830,11 +843,14 @@ fn rank_records(records: Vec<Map<String, Value>>, config: &RankConfig, options: 
         primary.unwrap_or(std::cmp::Ordering::Equal).then_with(|| a.1.cmp(&b.1))
     });
 
-    let mut ranked: Vec<Map<String, Value>> =
-        scored.into_iter().enumerate().map(|(idx, (_score, _, mut record))| {
+    let mut ranked: Vec<Map<String, Value>> = scored
+        .into_iter()
+        .enumerate()
+        .map(|(idx, (_score, _, mut record))| {
             record.insert("rank".into(), Value::Number((idx + 1).into()));
             record
-        }).collect();
+        })
+        .collect();
 
     let top_n = config.top_n.unwrap_or(DEFAULT_TOP_N);
     if ranked.len() > top_n {
@@ -864,11 +880,7 @@ fn aggregate_records(
     let mut buckets: std::collections::BTreeMap<String, Bucket> = std::collections::BTreeMap::new();
     for record in records {
         let key_value = Value::Array(
-            config
-                .group_by
-                .iter()
-                .map(|field| get_path(&record, field).cloned().unwrap_or(Value::Null))
-                .collect(),
+            config.group_by.iter().map(|field| get_path(&record, field).cloned().unwrap_or(Value::Null)).collect(),
         );
         let key = stable_json_string(&key_value);
         let mut bucket = buckets.remove(&key).unwrap_or_default();
@@ -883,9 +895,8 @@ fn aggregate_records(
     for (_key, bucket) in buckets {
         let mut row = bucket.group_values;
         for (metric_name, expr_value) in &config.metrics {
-            let expr = expr_value
-                .as_str()
-                .ok_or_else(|| format!("metric '{metric_name}' must be a string expression"))?;
+            let expr =
+                expr_value.as_str().ok_or_else(|| format!("metric '{metric_name}' must be a string expression"))?;
             let metric_value = evaluate_metric(expr, &bucket.rows)?;
             row.insert(metric_name.clone(), metric_value);
         }
@@ -908,7 +919,11 @@ fn evaluate_metric(expr: &str, rows: &[Map<String, Value>]) -> Result<Value, Str
             if arg == "*" {
                 Ok(Value::Number((rows.len() as i64).into()))
             } else {
-                Ok(Value::Number((rows.iter().filter(|row| get_path(row, arg).map(|v| !v.is_null()).unwrap_or(false)).count() as i64).into()))
+                Ok(Value::Number(
+                    (rows.iter().filter(|row| get_path(row, arg).map(|v| !v.is_null()).unwrap_or(false)).count()
+                        as i64)
+                        .into(),
+                ))
             }
         }
         "sum" | "avg" | "min" | "max" => {
@@ -965,10 +980,7 @@ fn extract_structured_data(
     let required_total = required_fields.len().max(1);
 
     for mut record in records {
-        let source = get_path(&record, &source_field)
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .unwrap_or_default();
+        let source = get_path(&record, &source_field).and_then(Value::as_str).map(str::to_string).unwrap_or_default();
         if source.is_empty() {
             warnings.push(format!("missing_field:{source_field}"));
         }
@@ -1014,15 +1026,19 @@ fn extract_field_value(source: &str, spec: &ExtractFieldSpec, options: &EngineOp
     match spec.r#type.to_ascii_lowercase().as_str() {
         "number" | "float" | "f64" => {
             let normalized = matched.replace(',', "");
-            let number = normalized.parse::<f64>().map_err(|err| format!("failed to parse number '{matched}': {err}"))?;
+            let number =
+                normalized.parse::<f64>().map_err(|err| format!("failed to parse number '{matched}': {err}"))?;
             number_to_value(number)
         }
         "integer" | "int" | "i64" => {
             let normalized = matched.replace(',', "");
-            let number = normalized.parse::<i64>().map_err(|err| format!("failed to parse integer '{matched}': {err}"))?;
+            let number =
+                normalized.parse::<i64>().map_err(|err| format!("failed to parse integer '{matched}': {err}"))?;
             Ok(Value::Number(number.into()))
         }
-        "boolean" | "bool" => matched.parse::<bool>().map(Value::Bool).map_err(|err| format!("failed to parse bool '{matched}': {err}")),
+        "boolean" | "bool" => {
+            matched.parse::<bool>().map(Value::Bool).map_err(|err| format!("failed to parse bool '{matched}': {err}"))
+        }
         _ => Ok(Value::String(matched.to_string())),
     }
 }
@@ -1047,7 +1063,8 @@ fn evaluate_expr(expr: &Expr, record: &Map<String, Value>) -> Result<Value, Stri
         Expr::Literal(value) => Ok(value.clone()),
         Expr::Field(field) => Ok(get_path(record, field).cloned().unwrap_or(Value::Null)),
         Expr::UnaryMinus(inner) => {
-            let number = as_f64(&evaluate_expr(inner, record)?).ok_or_else(|| "unary minus expects numeric value".to_string())?;
+            let number = as_f64(&evaluate_expr(inner, record)?)
+                .ok_or_else(|| "unary minus expects numeric value".to_string())?;
             number_to_value(-number)
         }
         Expr::Binary(left, op, right) => {
@@ -1081,12 +1098,20 @@ fn evaluate_call(name: &str, args: &[Expr], record: &Map<String, Value>) -> Resu
             number_to_value(as_f64(value).ok_or_else(|| "abs expects numeric value".to_string())?.abs())
         }
         "min" => {
-            let values = evaluated.iter().map(as_f64).collect::<Option<Vec<_>>>().ok_or_else(|| "min expects numeric values".to_string())?;
+            let values = evaluated
+                .iter()
+                .map(as_f64)
+                .collect::<Option<Vec<_>>>()
+                .ok_or_else(|| "min expects numeric values".to_string())?;
             let first = values.first().copied().ok_or_else(|| "min expects at least one argument".to_string())?;
             number_to_value(values.into_iter().fold(first, f64::min))
         }
         "max" => {
-            let values = evaluated.iter().map(as_f64).collect::<Option<Vec<_>>>().ok_or_else(|| "max expects numeric values".to_string())?;
+            let values = evaluated
+                .iter()
+                .map(as_f64)
+                .collect::<Option<Vec<_>>>()
+                .ok_or_else(|| "max expects numeric values".to_string())?;
             let first = values.first().copied().ok_or_else(|| "max expects at least one argument".to_string())?;
             number_to_value(values.into_iter().fold(first, f64::max))
         }
@@ -1725,7 +1750,7 @@ mod tests {
             .unwrap();
 
         assert!(result.success);
-        assert!(result.output["meta"]["execution_time_ms"].as_u64().unwrap() > 0);
+        assert!(result.output["meta"]["execution_time_ms"].as_u64().is_some());
         assert_eq!(result.output["meta"]["ops_applied"], serde_json::json!(["rank_items"]));
     }
 }

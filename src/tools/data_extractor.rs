@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use regex::Regex;
 use scraper::{Html, Selector};
 
-use crate::tools::{ParameterSchema, Tool, ToolResult};
+use crate::tools::{ParameterSchema, Tool, ToolResult, schema_string, schema_integer, schema_array};
 
 pub struct DataExtractorTool;
 
@@ -24,7 +24,10 @@ impl Tool for DataExtractorTool {
     }
 
     fn when_to_use(&self) -> Option<String> {
-        Some("Use to pull structured records or fields out of HTML/text before passing the result to data_engine.".into())
+        Some(
+            "Use to pull structured records or fields out of HTML/text before passing the result to data_engine."
+                .into(),
+        )
     }
 
     fn when_not_to_use(&self) -> Option<String> {
@@ -44,6 +47,95 @@ impl Tool for DataExtractorTool {
             ParameterSchema::optional("attribute", "string", "HTML attribute to extract (e.g. 'href', 'src')."),
         ]
     }
+
+
+    fn output_schema(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
+            "oneOf": [
+                {
+                    "type": "object",
+                    "required": ["tables", "count"],
+                    "properties": {
+                        "tables": schema_array(schema_array(schema_array(schema_string()))),
+                        "count": schema_integer(),
+                    },
+                    "additionalProperties": true,
+                },
+                {
+                    "type": "object",
+                    "required": ["links", "count"],
+                    "properties": {
+                        "links": schema_array(serde_json::json!({
+                            "type": "object",
+                            "required": ["href", "text"],
+                            "properties": {
+                                "href": schema_string(),
+                                "text": schema_string(),
+                            },
+                            "additionalProperties": true,
+                        })),
+                        "count": schema_integer(),
+                    },
+                    "additionalProperties": true,
+                },
+                {
+                    "type": "object",
+                    "required": ["emails", "count"],
+                    "properties": {
+                        "emails": schema_array(schema_string()),
+                        "count": schema_integer(),
+                    },
+                    "additionalProperties": true,
+                },
+                {
+                    "type": "object",
+                    "required": ["prices", "count"],
+                    "properties": {
+                        "prices": schema_array(schema_string()),
+                        "count": schema_integer(),
+                    },
+                    "additionalProperties": true,
+                },
+                {
+                    "type": "object",
+                    "required": ["phones", "count"],
+                    "properties": {
+                        "phones": schema_array(schema_string()),
+                        "count": schema_integer(),
+                    },
+                    "additionalProperties": true,
+                },
+                {
+                    "type": "object",
+                    "required": ["urls", "count"],
+                    "properties": {
+                        "urls": schema_array(schema_string()),
+                        "count": schema_integer(),
+                    },
+                    "additionalProperties": true,
+                },
+                {
+                    "type": "object",
+                    "required": ["items", "count"],
+                    "properties": {
+                        "items": schema_array(schema_string()),
+                        "count": schema_integer(),
+                    },
+                    "additionalProperties": true,
+                },
+                {
+                    "type": "object",
+                    "required": ["matches", "count"],
+                    "properties": {
+                        "matches": schema_array(schema_string()),
+                        "count": schema_integer(),
+                    },
+                    "additionalProperties": true,
+                }
+            ]
+        }))
+    }
+
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         let content = match args["content"].as_str() {
             Some(c) => c,

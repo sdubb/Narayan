@@ -71,11 +71,29 @@ pub struct ClarificationStep {
     /// Optional hint to the parser about what shape the answer takes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
+    /// Optional frontend question mode: text, mcq, multi_select, hybrid, card_open.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question_type: Option<String>,
+    /// Optional answer options for MCQ / multi-select questions.
+    #[serde(default)]
+    pub options: Vec<String>,
+    /// Whether multiple answers can be selected.
+    #[serde(default)]
+    pub multi_select: bool,
 }
 
 impl ClarificationStep {
     pub fn new(id: impl Into<String>, question: impl Into<String>, field: StepField) -> Self {
-        Self { id: id.into(), question: question.into(), field, required: true, hint: None }
+        Self {
+            id: id.into(),
+            question: question.into(),
+            field,
+            required: true,
+            hint: None,
+            question_type: None,
+            options: Vec::new(),
+            multi_select: false,
+        }
     }
     pub fn optional(mut self) -> Self {
         self.required = false;
@@ -83,6 +101,22 @@ impl ClarificationStep {
     }
     pub fn with_hint(mut self, hint: impl Into<String>) -> Self {
         self.hint = Some(hint.into());
+        self
+    }
+    pub fn with_question_type(mut self, question_type: impl Into<String>) -> Self {
+        self.question_type = Some(question_type.into());
+        self
+    }
+    pub fn with_options<I, S>(mut self, options: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.options = options.into_iter().map(Into::into).collect();
+        self
+    }
+    pub fn multi_select(mut self) -> Self {
+        self.multi_select = true;
         self
     }
 }
@@ -106,19 +140,23 @@ pub fn generate_steps(
             .map(|arr| arr.iter().filter_map(|r| r["name"].as_str()).collect())
             .unwrap_or_default();
         let reason = intent["multi_role_reason"].as_str().unwrap_or("they have different triggers");
-        steps.push(ClarificationStep::new(
-            "role_split",
-            format!(
-                "I see {} distinct responsibilities â€” {}.\n\n\
+        steps.push(
+            ClarificationStep::new(
+                "role_split",
+                format!(
+                    "I see {} distinct responsibilities â€” {}.\n\n\
                  **A) One role** â€” simpler, all in one\n\
                  **B) {} separate roles** (recommended) â€” easier to debug and monitor\n\n\
                  Which do you prefer? (A or B)",
-                names.len(),
-                reason,
-                names.len()
-            ),
-            StepField::RoleSplit,
-        ));
+                    names.len(),
+                    reason,
+                    names.len()
+                ),
+                StepField::RoleSplit,
+            )
+            .with_question_type("mcq")
+            .with_options(["One role", "Separate roles"]),
+        );
     }
 
     // â”€â”€ Step 2: Trigger â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€

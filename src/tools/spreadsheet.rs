@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 
-use crate::tools::{ParameterSchema, Tool, ToolResult};
+use crate::tools::{ParameterSchema, Tool, ToolResult, schema_string, schema_integer, schema_array};
 
 pub struct SpreadsheetReadTool;
 pub struct SpreadsheetWriteTool;
@@ -20,7 +20,10 @@ impl Tool for SpreadsheetReadTool {
         Some("{ path, sheet?, header_row?, max_rows?, start_row? }. path is required.".into())
     }
     fn output_contract(&self) -> Option<String> {
-        Some("{ sheet, sheets, headers, rows, row_count }. rows are returned as arrays or objects depending on headers.".into())
+        Some(
+            "{ sheet, sheets, headers, rows, row_count }. rows are returned as arrays or objects depending on headers."
+                .into(),
+        )
     }
     fn when_to_use(&self) -> Option<String> {
         Some("Use to read structured spreadsheet data into JSON before downstream transforms or analysis.".into())
@@ -37,6 +40,22 @@ impl Tool for SpreadsheetReadTool {
             ParameterSchema::optional("start_row", "integer", "First data row index (0-based, default: 0)."),
         ]
     }
+
+    fn output_schema(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
+            "type": "object",
+            "required": ["sheet", "sheets", "headers", "rows", "row_count"],
+            "properties": {
+                "sheet": schema_string(),
+                "sheets": schema_array(schema_string()),
+                "headers": schema_array(schema_string()),
+                "rows": schema_array(serde_json::json!({})),
+                "row_count": schema_integer(),
+            },
+            "additionalProperties": true,
+        }))
+    }
+
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         let path = match args["path"].as_str() {
             Some(p) => p.to_string(),
@@ -143,7 +162,10 @@ impl Tool for SpreadsheetWriteTool {
         Some("Use when the final artifact should be a spreadsheet file or tabular export.".into())
     }
     fn when_not_to_use(&self) -> Option<String> {
-        Some("Avoid when you only need a JSON transform or when the output should remain in the workspace as text.".into())
+        Some(
+            "Avoid when you only need a JSON transform or when the output should remain in the workspace as text."
+                .into(),
+        )
     }
     fn parameters_schema(&self) -> Vec<ParameterSchema> {
         vec![

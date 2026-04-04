@@ -13,7 +13,7 @@ use async_trait::async_trait;
 
 use crate::{
     browser::BrowserPool,
-    tools::{ParameterSchema, Tool, ToolResult},
+    tools::{ParameterSchema, Tool, ToolResult, schema_string, schema_integer, schema_array},
 };
 
 pub struct BrowserNetworkTool {
@@ -51,6 +51,36 @@ impl Tool for BrowserNetworkTool {
             ),
             ParameterSchema::optional("timeout_secs", "integer", "Timeout (default: 30)."),
         ]
+    }
+
+
+
+    fn output_schema(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
+            "type": "object",
+            "required": ["page_url", "request_count", "requests", "tip"],
+            "properties": {
+                "page_url": schema_string(),
+                "request_count": schema_integer(),
+                "requests": schema_array(serde_json::json!({
+                    "type": "object",
+                    "required": ["url", "type"],
+                    "properties": {
+                        "url": schema_string(),
+                        "type": schema_string(),
+                        "method": serde_json::json!({ "type": ["string", "null"] }),
+                        "status": serde_json::json!({ "type": ["integer", "null"] }),
+                        "duration": serde_json::json!({ "type": ["integer", "null"] }),
+                        "size": serde_json::json!({ "type": ["integer", "null"] }),
+                        "error": serde_json::json!({ "type": ["string", "null"] }),
+                        "ts": serde_json::json!({ "type": ["integer", "null"] }),
+                    },
+                    "additionalProperties": true,
+                })),
+                "tip": schema_string(),
+            },
+            "additionalProperties": true,
+        }))
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {

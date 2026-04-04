@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use crate::tools::{ParameterSchema, Tool, ToolResult};
+use crate::tools::{ParameterSchema, Tool, ToolResult, schema_string, schema_boolean};
 pub struct AcpSessionTool;
 #[async_trait]
 impl Tool for AcpSessionTool {
@@ -19,6 +19,32 @@ impl Tool for AcpSessionTool {
             ParameterSchema::optional("auth_token", "string", "Bearer auth token."),
         ]
     }
+
+
+    fn output_schema(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
+            "oneOf": [
+                {
+                    "type": "object",
+                    "required": ["agents"],
+                    "properties": {
+                        "agents": schema_string(),
+                    },
+                    "additionalProperties": true,
+                },
+                {
+                    "type": "object",
+                    "required": ["sent", "to"],
+                    "properties": {
+                        "sent": schema_boolean(),
+                        "to": schema_string(),
+                    },
+                    "additionalProperties": true,
+                }
+            ]
+        }))
+    }
+
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         let server = match args["server_url"].as_str() {
             Some(s) => s,

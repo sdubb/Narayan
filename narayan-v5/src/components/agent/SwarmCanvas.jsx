@@ -44,9 +44,10 @@ export default function SwarmCanvas({ parentAgent, onBack }) {
   const [children, setChildren] = useState([]);
   const [selectedChildId, setSelectedChildId] = useState(null);
   const [childDetail, setChildDetail] = useState(null);
+  const hasParentAgent = !!parentAgent?.id;
 
   useEffect(() => {
-    if (!parentAgent?.id) return;
+    if (!hasParentAgent) return;
     let cancelled = false;
     const refresh = async () => {
       try {
@@ -60,12 +61,25 @@ export default function SwarmCanvas({ parentAgent, onBack }) {
     refresh();
     const iv = setInterval(refresh, 3000);
     return () => { cancelled = true; clearInterval(iv); };
-  }, [parentAgent?.id]);
+  }, [hasParentAgent, parentAgent?.id]);
 
   useEffect(() => {
-    if (!selectedChildId) return;
+    if (!hasParentAgent || !selectedChildId) return;
     agentsApi.get(selectedChildId).then(setChildDetail).catch(() => {});
-  }, [selectedChildId]);
+  }, [hasParentAgent, selectedChildId]);
+
+  if (!hasParentAgent) {
+    return (
+      <div className="flex h-full items-center justify-center p-6 text-center">
+        <div>
+          <p className="text-sm font-medium text-tx-1 mb-1">No live swarm to inspect</p>
+          <p className="text-xs text-tx-3 max-w-sm leading-relaxed">
+            Once a role is running, this view will show the current runtime agent and its children.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   const allComplete = children.length > 0 && children.every(c => c.status === 'completed' || c.status === 'failed');
 

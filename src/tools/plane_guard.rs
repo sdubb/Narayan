@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use crate::tools::{ParameterSchema, Tool, ToolResult};
+use crate::tools::{ParameterSchema, Tool, ToolResult, schema_string, schema_boolean};
 pub struct PlaneGuardTool;
 #[async_trait]
 impl Tool for PlaneGuardTool {
@@ -18,6 +18,22 @@ impl Tool for PlaneGuardTool {
             ParameterSchema::optional("reversible", "boolean", "Whether the action can be undone (default: false)."),
         ]
     }
+
+    fn output_schema(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
+            "type": "object",
+            "required": ["approved", "action", "risk_level", "reversible", "reason"],
+            "properties": {
+                "approved": schema_boolean(),
+                "action": schema_string(),
+                "risk_level": schema_string(),
+                "reversible": schema_boolean(),
+                "reason": schema_string(),
+            },
+            "additionalProperties": true,
+        }))
+    }
+
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         let action = args["action"].as_str().unwrap_or("");
         let risk = args["risk_level"].as_str().unwrap_or("medium");

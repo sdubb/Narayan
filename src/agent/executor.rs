@@ -23,11 +23,15 @@ use crate::{
         definition::{PermissionMode, ToolPool},
         planner::{Plan, PlannedStep},
         prompts::{build_conversation_history, is_direct_response_goal, ExecutorPrompt, JobType, StepHistory},
+        workflow_compiler::LLM_WORKER_TOOL_NAME,
     },
     events::{AgentEvent, EventBus},
-    gateway::{GatewayRequest, LlmGateway, TaskComplexity},
+    gateway::{
+        llm_controls::{LlmBudgetTier, LlmExecutionIntent, LlmGenerationConfig},
+        GatewayRequest, LlmGateway, TaskComplexity,
+    },
     policy::{engine::PolicyContext, rules::PolicyRuleSet, PolicyDecision},
-    providers::{Message, ToolCall},
+    providers::{ChatResponse, Message, ToolCall},
     segments::AgentServices,
     state::AgentState,
     storage::PostgresStore,
@@ -61,6 +65,9 @@ fn truncate_for_log(value: &str, max_chars: usize) -> String {
 pub struct StepResult {
     pub step_index: usize,
     pub success: bool,
+    /// True when the DAG engine skipped this step due to a condition evaluating false.
+    /// Not a failure — the step was intentionally bypassed.
+    pub skipped: bool,
     pub output: String,
     pub final_answer_candidate: Option<String>,
     pub tool_results: Vec<ToolResult>,
@@ -382,6 +389,9 @@ fn build_workspace_tool_spec(tool: &WorkspaceGeneratedTool) -> crate::providers:
 }
 
 fn make_planned_tool_call(step: &PlannedStep) -> Option<ToolCall> {
+    if step.tool.as_deref() == Some(LLM_WORKER_TOOL_NAME) {
+        return None;
+    }
     Some(ToolCall {
         id: format!("planned-step-{}", step.index),
         name: step.tool.clone()?,
@@ -389,8 +399,89 @@ fn make_planned_tool_call(step: &PlannedStep) -> Option<ToolCall> {
     })
 }
 
+fn is_llm_worker_step(step: &PlannedStep) -> bool {
+    step.tool.as_deref() == Some(LLM_WORKER_TOOL_NAME)
+}
+
+fn llm_generation_from_step(step: &PlannedStep) -> Option<LlmGenerationConfig> {
+    let inferred_role = crate::agent::workflow_compiler::infer_llm_role(&step.description);
+    let Some(args) = step.tool_args.as_ref().and_then(|value| value.as_object()) else {
+        return Some(crate::agent::workflow_compiler::llm_generation_for_hint(&step.description, &inferred_role));
+    };
+    let role =
+        args.get("llm_role").and_then(|value| serde_json::from_value(value.clone()).ok()).unwrap_or(inferred_role);
+    let execution_intent = args
+        .get("execution_intent")
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .unwrap_or_else(|| crate::agent::workflow_compiler::infer_llm_execution_intent(&role, &step.description));
+    let budget_tier = args
+        .get("budget_tier")
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .unwrap_or_else(|| crate::agent::workflow_compiler::infer_llm_budget_tier(&role, &step.description));
+    let max_tokens = args
+        .get("max_tokens")
+        .and_then(|value| value.as_u64())
+        .map(|value| value as u32)
+        .unwrap_or_else(|| budget_tier.default_max_tokens());
+    let temperature = args
+        .get("temperature")
+        .and_then(|value| value.as_f64())
+        .map(|value| value as f32)
+        .unwrap_or_else(|| budget_tier.default_temperature());
+    let cost_budget_usd = args.get("cost_budget_usd").and_then(|value| value.as_f64());
+    let cadence = args.get("cadence").and_then(|value| value.as_str()).map(str::to_string);
+
+    Some(LlmGenerationConfig { role, execution_intent, budget_tier, max_tokens, temperature, cost_budget_usd, cadence })
+}
+
+fn llm_output_schema_from_step(step: &PlannedStep) -> Option<serde_json::Value> {
+    let args = step.tool_args.as_ref().and_then(|value| value.as_object());
+    if let Some(args) = args {
+        if let Some(schema) = args.get("output_schema") {
+            return Some(schema.clone());
+        }
+    }
+    let role = args
+        .and_then(|args| args.get("llm_role"))
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .unwrap_or_else(|| crate::agent::workflow_compiler::infer_llm_role(&step.description));
+    Some(crate::agent::workflow_compiler::llm_output_schema(&role))
+}
+
+fn llm_complexity_from_generation(generation: Option<&LlmGenerationConfig>) -> TaskComplexity {
+    match generation.map(|g| &g.budget_tier) {
+        Some(LlmBudgetTier::Lean) => TaskComplexity::Simple,
+        Some(LlmBudgetTier::High) => TaskComplexity::Complex,
+        _ => TaskComplexity::Medium,
+    }
+}
+
 pub(crate) fn step_outputs_from_state(state: &AgentState) -> Vec<serde_json::Value> {
-    state.metadata.get("step_outputs").and_then(|value| value.as_array()).cloned().unwrap_or_default()
+    let pointers = state.metadata.get("step_outputs").and_then(|value| value.as_array()).cloned().unwrap_or_default();
+
+    // Phase 0A: If entries are compact pointers (contain artifact_path),
+    // attempt to load the full artifact from disk for template resolution.
+    // Falls back to the compact pointer if the artifact can't be read.
+    pointers
+        .into_iter()
+        .enumerate()
+        .map(|(index, pointer)| {
+            if pointer.get("artifact_path").and_then(|v| v.as_str()).is_some() {
+                // Try synchronous read — template resolution runs in a sync context.
+                let artifact_path = crate::agent::step_artifacts::step_artifact_path(
+                    std::path::Path::new(&state.workspace_path),
+                    &state.id,
+                    index,
+                );
+                match std::fs::read(&artifact_path) {
+                    Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or(pointer),
+                    Err(_) => pointer, // Artifact not written yet or missing — use pointer
+                }
+            } else {
+                pointer // Legacy full record — use as-is
+            }
+        })
+        .collect()
 }
 
 pub(crate) fn resolve_tool_arguments(
@@ -878,6 +969,8 @@ fn build_executor_prompts(
     role_policy_context: Option<&str>,
     direct_response_mode: bool,
     answer_only_step: bool,
+    llm_worker_step: bool,
+    llm_generation: Option<&LlmGenerationConfig>,
 ) -> (String, String, TaskComplexity) {
     if direct_response_mode {
         (
@@ -891,10 +984,16 @@ fn build_executor_prompts(
             ExecutorPrompt::synthesis_user(state, step, history_text, &[]),
             TaskComplexity::Simple,
         )
+    } else if llm_worker_step {
+        (
+            ExecutorPrompt::system(state, plan, job_type, role_policy_context),
+            ExecutorPrompt::user_step(state, step, history_text, &[], conv_history, llm_generation),
+            llm_complexity_from_generation(llm_generation),
+        )
     } else {
         (
             ExecutorPrompt::system(state, plan, job_type, role_policy_context),
-            ExecutorPrompt::user_step(state, step, history_text, &[], conv_history),
+            ExecutorPrompt::user_step(state, step, history_text, &[], conv_history, None),
             TaskComplexity::infer(&step.description),
         )
     }
@@ -1648,9 +1747,11 @@ impl Executor for LlmExecutor {
             role_policy.as_ref().map(|policy| policy.job_type.clone()).unwrap_or_else(|| JobType::detect(&state.goal));
         let allowed_wasm_tools =
             role_policy.as_ref().map(|policy| policy.allowed_wasm_tools.clone()).unwrap_or_default();
-        let direct_response_mode = is_direct_response_goal(&state.goal) && plan.steps.len() == 1 && step.tool.is_none();
-        let answer_only_step = !direct_response_mode && is_answer_only_step(step);
-        let mut tool_specs = if direct_response_mode || answer_only_step {
+        let llm_worker_step = is_llm_worker_step(step);
+        let llm_generation = if llm_worker_step { llm_generation_from_step(step) } else { None };
+        let direct_response_mode = is_direct_response_goal(&state.goal) && plan.steps.len() == 1 && llm_worker_step;
+        let answer_only_step = !direct_response_mode && !llm_worker_step && is_answer_only_step(step);
+        let mut tool_specs = if direct_response_mode || answer_only_step || llm_worker_step {
             Vec::new()
         } else {
             let role_tools = role_policy.as_ref().map(|policy| policy.tool_preferences.clone()).unwrap_or_default();
@@ -1712,6 +1813,8 @@ impl Executor for LlmExecutor {
             role_policy.as_ref().map(|policy| policy.prompt_context.as_str()),
             direct_response_mode,
             answer_only_step,
+            llm_worker_step,
+            llm_generation.as_ref(),
         );
 
         tracing::info!(
@@ -1719,7 +1822,8 @@ impl Executor for LlmExecutor {
             step_index        = step.index,
             complexity        = ?complexity,
             direct_response   = direct_response_mode,
-            answer_only       = answer_only_step,
+            answer_only       = answer_only_step || llm_worker_step,
+            llm_worker        = llm_worker_step,
             system_prompt     = %truncate_for_log(&system, 1200),
             user_prompt       = %truncate_for_log(&user, 1200),
             "executor prompts prepared"
@@ -1733,49 +1837,97 @@ impl Executor for LlmExecutor {
         )
         .with_tools(tool_specs.clone())
         .no_cache();
+        if let Some(generation) = llm_generation.clone() {
+            request = request.with_generation(generation);
+        }
 
-        let resp = loop {
-            let r = self.gateway.chat(request.clone()).await?;
-
-            // Check if the LLM called a connector meta-tool
-            let meta_call = r.tool_calls.iter().find(|tc| META_TOOL_NAMES.contains(&tc.name.as_str()));
-            if meta_call.is_none() || connector_expansion_rounds >= 3 {
-                break r;
-            }
-            connector_expansion_rounds += 1;
-            let call = meta_call.unwrap();
-
+        // ── Template variable resolution ─────────────────────────────────
+        // Resolve {{...}} templates in tool_args before the fast-path check.
+        // This converts templates like {{$.deps.step-0.output.count}} or
+        // {{input.db_name}} into concrete values, enabling the zero-LLM path
+        // for steps that would otherwise need the LLM just to fill in args.
+        let step = if crate::agent::template_vars::has_templates(&step.tool_args) {
+            let ctx = crate::agent::template_vars::TemplateContext::from_agent_state(state);
+            let resolved = crate::agent::template_vars::resolve_step_templates(step, &ctx);
             tracing::info!(
-                agent_id  = %state.id,
-                step      = step.index,
-                meta_tool = %call.name,
-                round     = connector_expansion_rounds,
-                "executor: intercepting connector meta-tool call"
+                agent_id = %state.id,
+                step_index = step.index,
+                "template variables resolved in tool_args — checking fast-path eligibility"
             );
+            resolved
+        } else {
+            step.clone()
+        };
+        let step = &step;
 
-            let meta_result = self
-                .handle_connector_meta_tool(
-                    call.name.as_str(),
-                    &call.arguments,
-                    state,
-                    &mut tool_specs,
-                    &mut workspace_tools,
-                )
-                .await;
+        let is_fully_deterministic_fast_path = step.tool.is_some()
+            && !llm_worker_step
+            && step
+                .tool_args
+                .as_ref()
+                .map(|args| args.is_object() && !args.as_object().unwrap().is_empty())
+                .unwrap_or(false);
 
-            // Inject the meta-tool result as a tool_result message and rebuild request
-            let result_content = serde_json::to_string(&meta_result).unwrap_or_default();
-            let mut messages = request.messages.clone();
-            // Append assistant turn with tool call + tool result
-            messages.push(Message::user(format!(
-                "[tool:{name}] → {result}",
-                name = call.name,
-                result = &result_content[..result_content.len().min(2000)],
-            )));
+        let mut resp = if is_fully_deterministic_fast_path {
+            tracing::info!(
+                agent_id = %state.id,
+                step_index = step.index,
+                tool = %step.tool.as_ref().unwrap(),
+                "executor fast-path: exact tool arguments statically provided, bypassing LLM prompt generation"
+            );
+            ChatResponse {
+                content: Some(format!("Deterministic Fast-Path executing: {}", step.tool.as_ref().unwrap())),
+                tool_calls: vec![make_planned_tool_call(step).unwrap()],
+                input_tokens: 0,
+                output_tokens: 0,
+            }
+        } else {
+            loop {
+                let r = self.gateway.chat(request.clone()).await?;
 
-            request = GatewayRequest::new(state.id.clone(), state.tenant_id.clone(), complexity.clone(), messages)
-                .with_tools(tool_specs.clone())
-                .no_cache();
+                // Check if the LLM called a connector meta-tool
+                let meta_call = r.tool_calls.iter().find(|tc| META_TOOL_NAMES.contains(&tc.name.as_str()));
+                if meta_call.is_none() || connector_expansion_rounds >= 3 {
+                    break r;
+                }
+                connector_expansion_rounds += 1;
+                let call = meta_call.unwrap();
+
+                tracing::info!(
+                    agent_id  = %state.id,
+                    step      = step.index,
+                    meta_tool = %call.name,
+                    round     = connector_expansion_rounds,
+                    "executor: intercepting connector meta-tool call"
+                );
+
+                let meta_result = self
+                    .handle_connector_meta_tool(
+                        call.name.as_str(),
+                        &call.arguments,
+                        state,
+                        &mut tool_specs,
+                        &mut workspace_tools,
+                    )
+                    .await;
+
+                // Inject the meta-tool result as a tool_result message and rebuild request
+                let result_content = serde_json::to_string(&meta_result).unwrap_or_default();
+                let mut messages = request.messages.clone();
+                // Append assistant turn with tool call + tool result
+                messages.push(Message::user(format!(
+                    "[tool:{name}] → {result}",
+                    name = call.name,
+                    result = &result_content[..result_content.len().min(2000)],
+                )));
+
+                request = GatewayRequest::new(state.id.clone(), state.tenant_id.clone(), complexity.clone(), messages)
+                    .with_tools(tool_specs.clone())
+                    .no_cache();
+                if let Some(generation) = llm_generation.clone() {
+                    request = request.with_generation(generation);
+                }
+            }
         };
         tracing::info!(
             agent_id = %state.id,
@@ -1796,9 +1948,38 @@ impl Executor for LlmExecutor {
 
         let mut tool_results = Vec::new();
         let mut tools_called = Vec::new();
+
+        if llm_worker_step {
+            match resp.content.as_ref() {
+                Some(content) => match serde_json::from_str::<serde_json::Value>(content) {
+                    Ok(parsed) => {
+                        if let Some(schema) = llm_output_schema_from_step(step) {
+                            if let Err(error) = validate_output_against_schema("llm_worker", &parsed, &schema) {
+                                tool_results
+                                    .push(ToolResult::err(format!("llm_worker output schema mismatch: {error}")));
+                            } else {
+                                resp.content =
+                                    Some(serde_json::to_string_pretty(&parsed).unwrap_or_else(|_| parsed.to_string()));
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        tool_results.push(ToolResult::err(format!("llm_worker returned non-JSON output: {error}")));
+                    }
+                },
+                None => {
+                    tool_results.push(ToolResult::err("llm_worker returned no output"));
+                }
+            }
+        }
+
         let mut tool_calls = resp.tool_calls.clone();
 
-        if !direct_response_mode && !answer_only_step && tool_calls.is_empty() {
+        if llm_worker_step {
+            tool_calls.clear();
+        }
+
+        if !direct_response_mode && !answer_only_step && !llm_worker_step && tool_calls.is_empty() {
             if let Some(planned_call) = make_planned_tool_call(step) {
                 tracing::info!(
                     agent_id = %state.id,
@@ -2214,6 +2395,7 @@ impl Executor for LlmExecutor {
         Ok(StepResult {
             step_index: step.index,
             success,
+            skipped: false,
             output,
             final_answer_candidate,
             tool_results,
@@ -2388,12 +2570,14 @@ mod tests {
 
     fn make_step(tool: &str) -> PlannedStep {
         PlannedStep {
+            foreach: None,
             index: 0,
             description: "run the tool".into(),
             tool: Some(tool.into()),
             tool_args: Some(serde_json::json!({ "cmd": "cargo test" })),
             success_criteria: "done".into(),
             condition: None,
+            depends_on: vec![],
         }
     }
 

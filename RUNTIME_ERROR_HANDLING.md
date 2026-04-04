@@ -1,226 +1,104 @@
-# Runtime Error Handling Improvements
 
-## Overview
+The user is saying:
 
-The Narayan runtime execution pipeline now provides granular error classification to enable smarter retry strategies and better failure visibility. Instead of collapsing all failures into a generic `Failed(String)` variant, `StepOutcome` now distinguishes between multiple error categories.
+Plan mode is NOT filling up steps correctly - URLs, tools, and for each tool which function to call, what to do with results, etc.
+Because of that, the planner is being called to correct it
+But the planner is not at plan mode level (it's at execution level, not at planning/configuration level)
+So the issue is:
 
-## StepOutcome Variants
+Plan mode should be generating COMPLETE, deterministic workflow steps with all parameters filled in
+Instead, it's generating vague hints like "Fetch records from database (requires database connector)"
+Then at execution time, the system tries to salvage it by having the LLM planner generate a plan again
+But the LLM planner is designed for execution, not for filling in plan mode details
+The real problem: Plan mode compilation is incomplete. It should output:
 
-### `Continue { delay_secs: i64 }`
-Step executed successfully, move to next step.
-
-### `TransientError { reason: String, retry_after_secs: u64 }`
-**Characteristics:**
-- Connection timeouts
-- Service temporarily unavailable (503, 504)
-- Connection reset by peer
-- Temporary service disruptions
-
-**Recovery Strategy:**
-- Attempt retry WITH exponential backoff
-- Evaluator LLM NOT called (deterministic recovery)
-- Time to wait: Use `retry_after_secs` or exponential backoff (10s, 20s, 40s)
-- Max retries: Configured by evaluator fast-path (typically 3 attempts)
-
-**Examples:**
-```
-"step 2 aborted: connection timeout to stripe api"
-"step 3 aborted: service unavailable (503)"
-"step 4 aborted: connection reset by peer"
-```
-
-### `PermanentError { reason: String }`
-**Characteristics:**
-- Invalid/missing credentials
-- Tool/connector not found
-- Invalid schema or malformed request
-- Authentication failures
-- OAuth token expired
-
-**Recovery Strategy:**
-- Do NOT retry (LLM cannot fix configuration errors)
-- Escalate to human immediately
-- Requires user action: Add credentials, fix schema, renew tokens, etc.
-
-**Examples:**
-```
-"step 1 aborted: stripe api key not found in credentials"
-"step 5 aborted: invalid schema — missing required field 'amount'"
-"step 3 aborted: authentication failed — oauth token expired"
-```
-
-### `PolicyViolation { reason: String }`
-**Characteristics:**
-- Permission denied
-- Tool blocked by plane guard
-- Policy engine rejection
-- Access denied to resource
-- Role/scope violations
-
-**Recovery Strategy:**
-- Escalate to admin/role reviewer
-- Requires explicit approval or role permission update
-- Cannot proceed until permissions are updated
-
-**Examples:**
-```
-"step 2 aborted: Policy blocked tool 'delete_customer' for this role"
-"step 4 aborted: Plane guard rejected — insufficient permissions"
-"step 6 aborted: Access denied to PII fields"
-```
-
-### `RateLimited { retry_after_secs: u64, reason: String }`
-**Characteristics:**
-- HTTP 429 Too Many Requests
-- Rate limit exceeded
-- Quota exhausted temporarily
-
-**Recovery Strategy:**
-- Backoff for specified retry_after_secs
-- Retry after delay
-- Evaluator LLM NOT called (deterministic recovery)
-- Consider queuing if high concurrency
-
-**Examples:**
-```
-"step 3 aborted: rate limit 429 — retry after 60 seconds"
-"step 5 aborted: api quota exceeded temporarily"
-```
-
-### `Failed(String)`
-**When to use:** Generic failures that don't fit the above categories, or legacy code not yet migrated.
-
-## Implementation Details
-
-### Error Classification
-
-The `classify_error()` helper function automatically categorizes errors based on message content:
-
-```rust
-fn classify_error(reason: &str) -> StepOutcome {
-    // Checks for keywords: "policy", "permission", "access denied", etc.
-    // Returns appropriate StepOutcome variant
+{
+  "description": "Fetch records from database (requires database connector)",
+  "tool": "data_engine",
+  "tool_args": {
+    "records": [...],
+    "pipeline": [...]
+  },
+  "success_criteria": "Retrieved abnormal records"
 }
-```
+But it's only outputting:
 
-**Classification Rules:**
-
-| Keywords | Variant |
-|----------|---------|
-| policy, permission, access denied, plane guard, forbidden | `PolicyViolation` |
-| rate limit, too many requests, 429 | `RateLimited` |
-| credential, not found, invalid schema, authentication, oauth, api key | `PermanentError` |
-| timeout, connection refused, service unavailable, 503, 504 | `TransientError` |
-| (other) | `Failed` |
-
-### Where Classification Happens
-
-1. **FailureRule matches deterministically** (loop.rs line ~758):
-   - FailureRule::Abort matched → `PermanentError`
-   
-2. **Evaluator aborts step** (loop.rs line ~1141):
-   - All abort reasons passed through `classify_error()`
-   - Returned as appropriate variant
-
-3. **Provider credentials missing** (loop.rs line ~626):
-   - Returns `PermanentError (credentials)`
-
-## Usage Examples
-
-### Frontend/API Layer
-
-When receiving `StepOutcome`, handle each variant:
-
-```rust
-match step_outcome {
-    StepOutcome::TransientError { reason, retry_after_secs } => {
-        log::warn!("Transient error, will retry in {}s: {}", retry_after_secs, reason);
-        // Show user a progress indicator
-    }
-    StepOutcome::PermanentError { reason } => {
-        log::error!("Permanent error — user action required: {}", reason);
-        // Show error modal with action button (add credentials, etc.)
-    }
-    StepOutcome::PolicyViolation { reason } => {
-        log::error!("Access denied — escalating to admin: {}", reason);
-        // Notify admin, show escalation UI
-    }
-    StepOutcome::RateLimited { retry_after_secs, reason } => {
-        log::warn!("Rate limited, retrying in {}s", retry_after_secs);
-        // Update UI with queue/wait status
-    }
-    _ => { /* handle other outcomes */ }
+{
+  "description": "Fetch records from database (requires database connector)",
+  "tool": "web_fetch",
+  "tool_args": {"url": "{input.url}"}  // <- placeholder!
 }
-```
+The user is right - the workflow outline compilation phase (enrich_workflow_outline and resolve_tool_for_hint) is shallow. It needs to:
 
-### Logging & Monitoring
+Actually understand the intent JSON structure
+Extract concrete parameters (query, filters, etc.)
+Generate proper tool_args with real values, not templates
+Map results to outputs properly
+Let me explain this and figure out what needs to be fixed.
 
-Each variant provides context for observability:
+You're absolutely right! This is the core architectural gap. Let me break it down:
 
-```rust
-// Transient failures are expected and should trigger automated retry
-metrics.increment("runtime.error.transient");
+The Problem: Plan Mode ≠ Complete Workflow Compilation
+What's Happening Now (WRONG)
+Then at runtime: Execution planner called to fix it (wrong layer!)
+Plan Mode:
+┌─ Intent JSON: preferred_tools=["data_engine"], uses_external_db="shub"
+│  workflow_outline: ["Fetch records...", "Analyze records...", "Send alert..."]
+│
+└─> enrich_workflow_outline()
+    └─> resolve_tool_for_hint("Fetch records from database...")
+        └─> (INCOMPLETE!) Returns:
+            {
+              "tool": "web_fetch",  // ❌ WRONG (keyword matched)
+              "tool_args": {"url": "{input.url}"}  // ❌ PLACEHOLDER
+            }
+What Should Happen (RIGHT)
+Plan Mode:
+┌─ Intent JSON: preferred_tools=["data_engine"], uses_external_db="shub"
+│  actions: ["monitor database", "detect abnormalities", "send alert"]
+│
+└─> compile_workflow_with_intent()
+    ├─ Extract: tool=data_engine, db=shub
+    ├─ Generate: Actual SQL/filter query from intent["actions"]
+    ├─ Fill args: {
+    │    "records": {query_results},
+    │    "pipeline": [
+    │      {"op": "filter", "condition": "abnormal_detection"},
+    │      {"op": "map", "assign": {"alert": true}}
+    │    ]
+    │  }
+    ├─ Define: success_criteria, result_handling
+    └─> COMPLETE step with NO placeholders
 
-// Permanent errors indicate configuration issues (actionable by user)
-metrics.increment("runtime.error.permanent");
+The Real Issues
+Issue 1: resolve_tool_for_hint() is Too Shallow
+plan_mode.rs:3665:
 
-// Policy violations indicate permission issues (actionable by admin)
-metrics.increment("runtime.error.policy_violation");
+✅ Matches keywords
+❌ Does NOT extract concrete parameters from intent JSON
+❌ Does NOT know what query to run
+❌ Does NOT know what "abnormal" means
+❌ Returns placeholder {input.url} instead of real query
+Issue 2: enrich_workflow_outline() Lacks Context
+plan_mode.rs:3512:
 
-// Rate limits indicate scaling/quota issues (actionable by ops)
-metrics.increment("runtime.error.rate_limited");
-```
+It should also receive and use:
 
-### Cost Optimization
+intent["data_sources"] → which database
+intent["actions"] → what to detect
+intent["output_destination_hint"] → where to send results
+intent["trigger_hint"] → when/how triggered
+Issue 3: No Result Handling
+Steps don't specify what to do with results:
 
-**Evaluator LLM Calls Saved:**
-- TransientError: Skip LLM, use exponential backoff
-- RateLimited: Skip LLM, wait and retry
-- PolicyViolation: Skip LLM, escalate immediately
-- FailureRule deterministic abort: Skip LLM, return error classification
+What Needs to Be Fixed
+Function: resolve_tool_for_hint() [Line 3665]
 
-**Estimated Reduction:** 20-25% fewer evaluator LLM calls through finer error classification
+Should become resolve_tool_and_args_from_intent() with signature:
 
-## Migration Guide
+This should:
 
-### For Existing Code
-
-Old pattern:
-```rust
-return Ok(StepOutcome::Failed(reason));
-```
-
-New pattern (when you know the error category):
-```rust
-if reason.contains("timeout") {
-    return Ok(StepOutcome::TransientError { 
-        reason, 
-        retry_after_secs: 30 
-    });
-} else if reason.contains("credential") {
-    return Ok(StepOutcome::PermanentError { reason });
-} else {
-    // Let classify_error() categorize it
-    return Ok(classify_error(&reason));
-}
-```
-
-### For Tests
-
-Update test assertions to match new variants:
-
-```rust
-// Old
-assert!(matches!(outcome, StepOutcome::Failed(_)));
-
-// New
-assert!(matches!(outcome, StepOutcome::PermanentError { .. }));
-// or
-assert!(matches!(outcome, StepOutcome::Failed(_) | StepOutcome::PermanentError { .. }));
-```
-
-## See Also
-
-- [ARCHITECTURE.md](ARCHITECTURE.md) - Overall runtime pipeline design
-- [src/agent/loop.rs](src/agent/loop.rs) - Main execution loop with error handling
-- [src/agent/evaluator.rs](src/agent/evaluator.rs) - Fast-paths that skip LLM calls
+Identify tool from preferred_tools array
+Extract concrete parameters from intent (queries, thresholds, etc.)
+Generate FULL tool_args with NO {input.*} placeholders
+Include success_criteria and result_mapping

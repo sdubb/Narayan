@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use crate::tools::{ParameterSchema, Tool, ToolResult};
+use crate::tools::{ParameterSchema, Tool, ToolResult, schema_string, schema_integer, schema_boolean};
 
 /// Opens a URL and returns a confirmation (delegates actual content retrieval to browser/web_fetch).
 pub struct BrowserOpenTool;
@@ -31,6 +31,21 @@ impl Tool for BrowserOpenTool {
             ParameterSchema::optional("timeout", "integer", "Timeout seconds (default: 15)."),
         ]
     }
+
+
+    fn output_schema(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
+            "type": "object",
+            "required": ["url", "status", "reachable"],
+            "properties": {
+                "url": schema_string(),
+                "status": schema_integer(),
+                "reachable": schema_boolean(),
+            },
+            "additionalProperties": true,
+        }))
+    }
+
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         let url = match args["url"].as_str() {
             Some(u) => u,

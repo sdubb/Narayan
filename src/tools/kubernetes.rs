@@ -10,7 +10,7 @@ use kube::{
     Api, Client, ResourceExt,
 };
 
-use crate::tools::{ParameterSchema, Tool, ToolResult};
+use crate::tools::{ParameterSchema, Tool, ToolResult, schema_string, schema_boolean, schema_integer, schema_array};
 
 pub struct KubernetesTool;
 
@@ -38,6 +38,106 @@ impl Tool for KubernetesTool {
             ParameterSchema::optional("label", "string", "Label selector filter: 'app=myapp'."),
             ParameterSchema::optional("tail", "integer", "Log lines to fetch (default: 50)."),
         ]
+    }
+
+    fn output_schema(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
+            "oneOf": [
+                {
+                    "type": "object",
+                    "required": ["namespaces"],
+                    "properties": {
+                        "namespaces": schema_array(schema_string()),
+                    },
+                    "additionalProperties": true,
+                },
+                {
+                    "type": "object",
+                    "required": ["namespace", "pods", "count"],
+                    "properties": {
+                        "namespace": schema_string(),
+                        "pods": schema_array(serde_json::json!({
+                            "type": "object",
+                            "required": ["name", "phase", "ready"],
+                            "properties": {
+                                "name": schema_string(),
+                                "phase": serde_json::json!({ "type": ["string", "null"] }),
+                                "ready": schema_boolean(),
+                                "node": serde_json::json!({ "type": ["string", "null"] }),
+                            },
+                            "additionalProperties": true,
+                        })),
+                        "count": schema_integer(),
+                    },
+                    "additionalProperties": true,
+                },
+                {
+                    "type": "object",
+                    "required": ["namespace", "deployments"],
+                    "properties": {
+                        "namespace": schema_string(),
+                        "deployments": schema_array(serde_json::json!({
+                            "type": "object",
+                            "required": ["name"],
+                            "properties": {
+                                "name": schema_string(),
+                                "replicas": serde_json::json!({ "type": ["integer", "null"] }),
+                                "ready_replicas": serde_json::json!({ "type": ["integer", "null"] }),
+                                "available": serde_json::json!({ "type": ["integer", "null"] }),
+                            },
+                            "additionalProperties": true,
+                        })),
+                    },
+                    "additionalProperties": true,
+                },
+                {
+                    "type": "object",
+                    "required": ["apiVersion"],
+                    "properties": {},
+                    "additionalProperties": true,
+                },
+                {
+                    "type": "object",
+                    "required": ["pod", "logs"],
+                    "properties": {
+                        "pod": schema_string(),
+                        "logs": schema_string(),
+                    },
+                    "additionalProperties": true,
+                },
+                {
+                    "type": "object",
+                    "required": ["scaled", "deployment", "replicas"],
+                    "properties": {
+                        "scaled": schema_boolean(),
+                        "deployment": schema_string(),
+                        "replicas": schema_integer(),
+                    },
+                    "additionalProperties": true,
+                },
+                {
+                    "type": "object",
+                    "required": ["deleted", "pod"],
+                    "properties": {
+                        "deleted": schema_boolean(),
+                        "pod": schema_string(),
+                    },
+                    "additionalProperties": true,
+                },
+                {
+                    "type": "object",
+                    "required": ["deployment"],
+                    "properties": {
+                        "deployment": schema_string(),
+                        "replicas": serde_json::json!({ "type": ["integer", "null"] }),
+                        "ready": serde_json::json!({ "type": ["integer", "null"] }),
+                        "available": serde_json::json!({ "type": ["integer", "null"] }),
+                        "updated": serde_json::json!({ "type": ["integer", "null"] }),
+                    },
+                    "additionalProperties": true,
+                }
+            ]
+        }))
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {

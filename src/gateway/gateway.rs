@@ -11,6 +11,7 @@ use crate::{
         cache::{hash_str, make_cache_key, ResponseCache},
         cost::{CostTracker, SpendCheck},
         limiter::RateLimiter,
+        llm_controls::LlmGenerationConfig,
         router::TaskComplexity,
     },
     providers::{ChatResponse, Message, Provider, ToolSpec},
@@ -39,16 +40,21 @@ pub struct GatewayRequest {
     pub complexity: TaskComplexity,
     pub messages: Vec<Message>,
     pub tools: Vec<ToolSpec>,
+    pub generation: Option<LlmGenerationConfig>,
     pub bypass_cache: bool,
 }
 
 impl GatewayRequest {
     pub fn new(agent_id: String, tenant_id: String, complexity: TaskComplexity, messages: Vec<Message>) -> Self {
-        Self { agent_id, tenant_id, complexity, messages, tools: vec![], bypass_cache: false }
+        Self { agent_id, tenant_id, complexity, messages, tools: vec![], generation: None, bypass_cache: false }
     }
 
     pub fn with_tools(mut self, tools: Vec<ToolSpec>) -> Self {
         self.tools = tools;
+        self
+    }
+    pub fn with_generation(mut self, generation: LlmGenerationConfig) -> Self {
+        self.generation = Some(generation);
         self
     }
     pub fn no_cache(mut self) -> Self {
@@ -58,7 +64,9 @@ impl GatewayRequest {
 
     fn cache_key(&self) -> String {
         let content: String = self.messages.iter().map(|m| m.content.as_str()).collect::<Vec<_>>().join("|");
-        make_cache_key(&self.agent_id, &hash_str(&content))
+        let generation =
+            self.generation.as_ref().map(|value| serde_json::to_string(value).unwrap_or_default()).unwrap_or_default();
+        make_cache_key(&self.agent_id, &hash_str(&format!("{content}|{generation}")))
     }
 }
 
@@ -298,15 +306,18 @@ impl LlmGateway for NarayanGateway {
         self.rate_limiter.acquire(&provider_name).await;
 
         // 5. Call provider
-        let response = provider.chat(request.messages.clone(), request.tools.clone()).await.map_err(|e| {
-            tracing::error!(
-                tenant_id = %request.tenant_id,
-                provider  = %provider_name,
-                error     = %e,
-                "provider call failed"
-            );
-            e
-        })?;
+        let response = provider
+            .chat(request.messages.clone(), request.tools.clone(), request.generation.as_ref())
+            .await
+            .map_err(|e| {
+                tracing::error!(
+                    tenant_id = %request.tenant_id,
+                    provider  = %provider_name,
+                    error     = %e,
+                    "provider call failed"
+                );
+                e
+            })?;
 
         // 6. Track cost against tenant + agent
         let cost_delta =

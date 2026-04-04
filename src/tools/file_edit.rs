@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use crate::tools::{ParameterSchema, Tool, ToolResult};
+use crate::tools::{ParameterSchema, Tool, ToolResult, schema_string, schema_integer};
 
 pub struct FileEditTool;
 
@@ -23,7 +23,10 @@ impl Tool for FileEditTool {
         Some("Use for targeted text replacements in an existing file when the change is small and local.".into())
     }
     fn when_not_to_use(&self) -> Option<String> {
-        Some("Avoid for broad refactors, binary files, or when a file rewrite is simpler than a targeted replacement.".into())
+        Some(
+            "Avoid for broad refactors, binary files, or when a file rewrite is simpler than a targeted replacement."
+                .into(),
+        )
     }
     fn parameters_schema(&self) -> Vec<ParameterSchema> {
         vec![
@@ -34,6 +37,24 @@ impl Tool for FileEditTool {
             ParameterSchema::optional("use_regex", "boolean", "Treat 'old' as a regex pattern (default: false)."),
         ]
     }
+
+    fn output_schema(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
+            "oneOf": [
+                {
+                    "type": "object",
+                    "required": ["edited", "path"],
+                    "properties": {
+                        "edited": serde_json::json!({ "type": "boolean", "const": true }),
+                        "path": schema_string(),
+                        "replacements": schema_integer(),
+                    },
+                    "additionalProperties": true,
+                }
+            ]
+        }))
+    }
+
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         let path = match args["path"].as_str() {
             Some(p) => std::path::PathBuf::from(p),

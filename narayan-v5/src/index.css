@@ -38,11 +38,11 @@
 
 @layer components {
   .card {
-    @apply bg-bg-card rounded-xl border border-border shadow-card;
+    @apply bg-white/70 rounded-xl border border-white/60 shadow-card backdrop-blur-md;
   }
   .card-hover {
-    @apply hover:shadow-card-hover hover:border-border-md;
-    transition: box-shadow 0.15s ease, border-color 0.15s ease;
+    @apply hover:shadow-card-hover hover:border-border-md hover:bg-bg-hover;
+    transition: box-shadow 0.15s ease, border-color 0.15s ease, background-color 0.15s ease;
   }
   .card-interactive {
     @apply card card-hover cursor-pointer active:shadow-card-active;

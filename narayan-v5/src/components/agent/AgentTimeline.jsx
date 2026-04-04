@@ -21,7 +21,7 @@ import CostCounter from './CostCounter';
 import ReplayScrubber from './ReplayScrubber';
 import { agents as agentsApi } from '../../api';
 
-const TERMINAL = new Set(['completed', 'failed']);
+const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'partially_complete']);
 
 function Badge({ label, color = 'gray', icon: Icon }) {
   const cls = {
@@ -46,7 +46,7 @@ function RunOverview({ events, liveStatus, onCancel, cancelling }) {
     return acc;
   }, { steps: 0, tools: 0, retries: 0, reviews: 0, judgements: 0 });
   const plan = events.find(ev => ev.type === 'plan_created');
-  const isTerminalStatus = ['completed', 'failed'].includes(liveStatus);
+  const isTerminalStatus = ['completed', 'failed', 'cancelled', 'partially_complete'].includes(liveStatus);
   return (
     <div className="mb-3 rounded-xl border border-border bg-bg-card px-3.5 py-3 flex flex-wrap items-center gap-2">
       <Badge label={liveStatus} color={liveStatus === 'failed' ? 'red' : liveStatus === 'completed' ? 'green' : 'blue'} icon={Activity} />
@@ -222,9 +222,50 @@ export default function AgentTimeline({ agentId, initialStatus, onStatusChange, 
       {/* Step cards */}
       <AnimatePresence>
         <div className="space-y-3">
-          {steps.slice(0, visibleUpTo + 1).map((step, i) => (
-            <StepCard key={`step-${step.index ?? i}`} step={step} />
-          ))}
+          {(() => {
+            const visibleSteps = steps.slice(0, visibleUpTo + 1);
+            const groupedSteps = [];
+            let currentGroup = null;
+
+            for (const step of visibleSteps) {
+              if (step.isForEachItem && step.forEachTitle) {
+                if (currentGroup && currentGroup.title === step.forEachTitle) {
+                  currentGroup.items.push(step);
+                } else {
+                  currentGroup = { type: 'foreach_group', title: step.forEachTitle, items: [step] };
+                  groupedSteps.push(currentGroup);
+                }
+              } else {
+                currentGroup = null;
+                groupedSteps.push({ type: 'single', step });
+              }
+            }
+
+            return groupedSteps.map((group, i) => {
+              if (group.type === 'single') {
+                return <StepCard key={`step-${group.step.index ?? i}`} step={group.step} />;
+              }
+              const allDone = group.items.every(s => s.completed);
+              return (
+                <div key={`group-${i}`} className="rounded-xl border border-border bg-black/5 p-3 space-y-3 backdrop-blur-sm">
+                  <div className="flex items-center gap-2 px-1">
+                    <Layers size={14} className={allDone ? "text-ok" : "text-accent animate-pulse"} />
+                    <span className="text-xs font-semibold text-tx-2 uppercase tracking-wide">
+                      Parallel Iteration: {group.title}
+                    </span>
+                    <span className="ml-auto text-[10px] shadow-sm bg-bg-card border border-border px-2 py-0.5 rounded-full text-tx-3">
+                      {group.items.filter(s => s.completed).length} / {group.items.length} completed
+                    </span>
+                  </div>
+                  <div className="pl-3 border-l-2 border-border/30 space-y-3">
+                    {group.items.map(step => (
+                      <StepCard key={`step-${step.index}`} step={step} />
+                    ))}
+                  </div>
+                </div>
+              );
+            });
+          })()}
         </div>
       </AnimatePresence>
 

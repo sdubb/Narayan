@@ -26,7 +26,10 @@
 //!   real external systems.
 
 use chrono::{DateTime, Utc};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
+
+use crate::agent::workflow_compiler::CompiledWorkflow;
 
 // ── AgentDefinition ────────────────────────────────────────────────────────
 
@@ -239,6 +242,7 @@ pub enum ExecutionStrategy {
     #[default]
     DeterministicWorkflow,
     AdaptivePlanning,
+    CoordinatorShell,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -276,7 +280,9 @@ impl PermissionMode {
         match self {
             Self::PlanOnly => "planning-only mode; mutating actions require explicit approval",
             Self::SafeAuto => "safe reads and low-risk actions may proceed automatically",
-            Self::WorkspaceWrite => "workspace-local writes may proceed automatically; destructive and external actions escalate",
+            Self::WorkspaceWrite => {
+                "workspace-local writes may proceed automatically; destructive and external actions escalate"
+            }
             Self::TrustedAuto => "broad automation allowed, with destructive actions still scrutinized",
         }
     }
@@ -448,7 +454,7 @@ pub fn infer_failure_action(lower: &str) -> FailureAction {
 
 /// One enriched workflow step — tool-resolved at plan mode save time.
 /// Templates like `{input.topic}` are rendered at runtime from trigger input_data.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct WorkflowStep {
     pub description: String,
     pub tool: Option<String>,
@@ -458,6 +464,86 @@ pub struct WorkflowStep {
     pub success_criteria: String,
     #[serde(default)]
     pub condition: Option<crate::agent::planner::StepCondition>,
+    /// Optional JSONPath for iterating over a collection.
+    #[serde(default)]
+    pub foreach: Option<String>,
+    /// DAG dependency edges — indices of predecessor steps.
+    #[serde(default)]
+    pub depends_on: Vec<usize>,
+    /// Engine-managed retry policy for this step.
+    #[serde(default)]
+    pub retry_policy: Option<RetryPolicy>,
+    /// Schema validation mode for this step's input/output.
+    #[serde(default)]
+    pub schema_mode: SchemaMode,
+    /// JSON Schema for expected input from predecessor steps.
+    #[serde(default)]
+    pub input_schema: Option<serde_json::Value>,
+    /// JSON Schema for the output this step must produce.
+    #[serde(default)]
+    pub output_schema: Option<serde_json::Value>,
+}
+
+/// Engine-managed retry policy — declared per-step, enforced by the DAG engine.
+/// No LLM evaluator involved; the engine decides retries deterministically.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RetryPolicy {
+    /// Maximum total attempts (including the first). Default: 1 (no retries).
+    #[serde(default = "default_max_attempts")]
+    pub max_attempts: u32,
+    /// Base backoff in seconds. Exponential: backoff * 2^(attempt-1).
+    #[serde(default = "default_backoff_secs")]
+    pub backoff_secs: u64,
+    /// Error patterns that specifically trigger retry (regex-like strings).
+    /// Empty = retry on any failure.
+    #[serde(default)]
+    pub retry_on: Vec<String>,
+}
+
+fn default_max_attempts() -> u32 {
+    1
+}
+fn default_backoff_secs() -> u64 {
+    2
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self { max_attempts: 1, backoff_secs: 2, retry_on: Vec::new() }
+    }
+}
+
+impl RetryPolicy {
+    pub fn matches_retry_condition(&self, error: &str) -> bool {
+        if self.retry_on.is_empty() {
+            return true;
+        }
+
+        self.retry_on.iter().any(|pattern| {
+            Regex::new(pattern)
+                .ok()
+                .map(|regex| regex.is_match(error))
+                .unwrap_or_else(|| error.to_ascii_lowercase().contains(&pattern.to_ascii_lowercase()))
+        })
+    }
+}
+
+/// Schema enforcement mode — configurable per-step, defaults to Strict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SchemaMode {
+    /// Fail the step if input/output doesn't match the schema.
+    Strict,
+    /// Log a warning but continue execution.
+    Warn,
+    /// No validation — skip schema checks entirely.
+    Off,
+}
+
+impl Default for SchemaMode {
+    fn default() -> Self {
+        SchemaMode::Strict
+    }
 }
 
 /// Complete, typed execution guidelines for an agent role.
@@ -489,6 +575,9 @@ pub struct ExecutionGuidelines {
     /// Permission posture used by runtime policy evaluation.
     #[serde(default)]
     pub permission_mode: PermissionMode,
+    /// Strict workflow compiler artifact for deterministic execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compiled_workflow: Option<CompiledWorkflow>,
 }
 
 impl ExecutionGuidelines {
@@ -505,6 +594,7 @@ impl ExecutionGuidelines {
             && self.priorities.is_empty()
             && self.completion_criteria.is_empty()
             && self.workflow_outline.is_empty()
+            && self.compiled_workflow.is_none()
     }
 
     /// Returns true when the role has an enriched workflow outline that can
@@ -533,6 +623,8 @@ impl ExecutionGuidelines {
                 args_template: step.tool_args.clone(),
                 success_criteria: step.success_criteria.clone(),
                 condition: step.condition.clone(),
+                depends_on: step.depends_on.clone(),
+                ..Default::default()
             })
             .take(Self::MAX_WORKFLOW)
             .collect();
@@ -647,6 +739,7 @@ impl ExecutionGuidelines {
             match self.execution_strategy {
                 ExecutionStrategy::DeterministicWorkflow => "deterministic_workflow",
                 ExecutionStrategy::AdaptivePlanning => "adaptive_planning",
+                ExecutionStrategy::CoordinatorShell => "coordinator_shell",
             },
             match self.tool_pool {
                 ToolPool::Worker => "worker",
@@ -1893,5 +1986,17 @@ mod tests {
         assert!(!permissions.allow_workspace_write);
         assert!(!permissions.allow_env);
         assert!(permissions.allowed_env_keys.is_empty());
+    }
+
+    #[test]
+    fn test_execution_guidelines_prompt_includes_coordinator_shell() {
+        let mut guidelines = ExecutionGuidelines::default();
+        guidelines.execution_strategy = ExecutionStrategy::CoordinatorShell;
+        guidelines.tool_pool = ToolPool::Coordinator;
+
+        let prompt = guidelines.to_prompt();
+
+        assert!(prompt.contains("coordinator_shell"));
+        assert!(prompt.contains("coordinator"));
     }
 }

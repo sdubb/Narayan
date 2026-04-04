@@ -7,7 +7,7 @@
 
 use async_trait::async_trait;
 
-use crate::tools::{ParameterSchema, Tool, ToolResult};
+use crate::tools::{ParameterSchema, Tool, ToolResult, schema_string, schema_boolean, schema_array};
 
 pub struct SuggestConnectorsTool;
 
@@ -43,6 +43,25 @@ impl Tool for SuggestConnectorsTool {
                 "Credential key names the operator should provide, e.g. ['gmail_token', 'github_key'].",
             ),
         ]
+    }
+
+
+
+    fn output_schema(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
+            "type": "object",
+            "required": ["suggested", "reason", "blocking", "credential_keys", "operator_message", "status", "resume_endpoint"],
+            "properties": {
+                "suggested": schema_array(schema_string()),
+                "reason": schema_string(),
+                "blocking": schema_boolean(),
+                "credential_keys": schema_array(schema_string()),
+                "operator_message": schema_string(),
+                "status": schema_string(),
+                "resume_endpoint": schema_string(),
+            },
+            "additionalProperties": true,
+        }))
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
