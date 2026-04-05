@@ -407,8 +407,8 @@ function PlanInspector({ snapshot, currentQuestion, selectedTemplate, testResult
   const compiledWorkflow = extractCompiledWorkflow(snapshot);
   const workflowSteps = Array.isArray(compiledWorkflow?.steps)
     ? compiledWorkflow.steps
-    : Array.isArray(executionGuidelines.workflow_outline)
-      ? executionGuidelines.workflow_outline
+    : Array.isArray(snapshot?.intent_cache?.workflow_dsl)
+      ? snapshot.intent_cache.workflow_dsl
       : [];
   const connectors = Array.isArray(draftRole?.connectors) ? draftRole.connectors : [];
   const memo = extractResearchMemo(snapshot);
@@ -430,7 +430,11 @@ function PlanInspector({ snapshot, currentQuestion, selectedTemplate, testResult
     ? formatModeLabel(compiledWorkflow.variant_policy.fallback)
     : '';
   const llmWorkerSteps = workflowSteps.filter(step =>
-    step?.tool === 'llm_worker' || step?.dsl_type === 'llm_worker' || step?.llm_role || step?.llm_generation?.role
+    step?.tool === 'llm_worker'
+    || step?.dsl_type === 'llm_worker'
+    || step?.type === 'llm_worker'
+    || step?.llm_role
+    || step?.llm_generation?.role
   ).length;
 
   function stepLabel(step, idx) {
@@ -593,7 +597,7 @@ function TestResultPanel({ result, onRevise, revising = false }) {
   if (!result) {
     return (
       <div className="rounded-xl border border-dashed border-border bg-bg px-3 py-3 text-xs text-tx-3">
-        Run the deterministic test to validate the workflow outline before saving.
+        Run the deterministic test to validate the compiled workflow before saving.
       </div>
     );
   }
@@ -1376,9 +1380,7 @@ export default function PlanModeChat({
   const workflowSteps = useMemo(() => {
     const compiledWorkflow = extractCompiledWorkflow(sessionSnapshot);
     if (Array.isArray(compiledWorkflow?.steps)) return compiledWorkflow.steps;
-    const draftRole = sessionSnapshot?.draft_role || null;
-    const outline = draftRole?.execution_guidelines?.workflow_outline;
-    return Array.isArray(outline) ? outline : [];
+    return Array.isArray(sessionSnapshot?.intent_cache?.workflow_dsl) ? sessionSnapshot.intent_cache.workflow_dsl : [];
   }, [sessionSnapshot]);
   const unresolvedDatabaseSelection = useMemo(() => {
     const intentDb = sessionSnapshot?.intent_cache?.uses_external_db;

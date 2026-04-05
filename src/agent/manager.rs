@@ -117,7 +117,7 @@ impl AgentManager {
             "needed_connector_categories": [],
             "candidate_connectors": [],
             "missing_capabilities": [],
-            "workflow_outline": [],
+            "workflow_dsl": [],
             "uses_external_db": null,
             "uses_external_api": null,
             "trigger_hint": trigger_hint,
@@ -168,6 +168,9 @@ impl AgentManager {
             reused_from_session_id: None,
             repair_root_session_id: None,
             phase: crate::agent::definition::PlanModePhase::CapturingClarifications,
+            compiler_stage: crate::agent::definition::PlanModeCompilerStage::Review,
+            compiler_repair_passes: 0,
+            compiler_validation_issues: Vec::new(),
             intent_cache: Some(synthetic_intent.clone()),
             pending_steps: generate_steps(&synthetic_intent, "general", &[], &existing_role_names)
                 .into_iter()
@@ -377,20 +380,8 @@ impl AgentManager {
                     agent_state.metadata["plan_mode_reused_from_session_id"] = value;
                 }
             }
+            agent_state.metadata["compiled_workflow"] = serde_json::to_value(compiled).unwrap_or_default();
         }
-        agent_state.metadata["workflow_outline"] = serde_json::json!({
-            "steps": role
-                .execution_guidelines
-                .workflow_outline
-                .iter()
-                .map(|step| serde_json::json!({
-                    "description": step.description.clone(),
-                    "tool": step.tool.clone(),
-                    "tool_args": step.args_template.clone(),
-                    "success_criteria": step.success_criteria.clone(),
-                }))
-                .collect::<Vec<_>>()
-        });
 
         let gi = GoalInstance {
             id: gi_id,

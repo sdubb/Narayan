@@ -95,7 +95,60 @@ pub trait Tool: Send + Sync {
     ///   "connector/project_management", "connector/communication",
     ///   "connector/finance", "connector/hr", "connector/itsm", "other"
     fn category(&self) -> &'static str {
-        "other"
+        category_for_tool_name(self.name())
+    }
+}
+
+/// Resolve a tool category from its registered name.
+///
+/// Most tools rely on this fallback, while a few special cases override
+/// `Tool::category()` directly when they need a bespoke category string.
+pub fn category_for_tool_name(name: &str) -> &'static str {
+    match name {
+        // Filesystem and local workspace operations.
+        "shell" | "file_read" | "file_write" | "file_edit" | "glob_search" | "content_search" | "compress"
+        | "decompress" | "create_workspace_tool" => "filesystem",
+
+        // Web access and browser automation.
+        "web_search_tool" | "web_fetch" | "http_request" | "browser" | "browser_interact" | "browser_network"
+        | "browser_open" | "browser_pdf" | "screenshot" => "web",
+
+        // Code execution, patching, and repository operations.
+        "code_run" | "sql_query" | "diff" | "patch" | "git_operations" | "enter_worktree" | "exit_worktree" => "code",
+
+        // Deterministic data extraction and transformation.
+        "data_engine" | "data_extractor" | "image_info" | "image_process" => "data",
+        "pdf_read" | "pdf_create" => "data",
+        "spreadsheet_read" | "spreadsheet_write" => "data",
+
+        // Persistent memory and vector retrieval.
+        "memory_store" | "memory_recall" | "memory_forget" | "memory_consolidate" => "memory",
+        "vector_store" | "vector_search" | "vector_delete" => "memory",
+
+        // Infrastructure and host administration.
+        "docker" | "kubernetes" | "ssh_exec" | "process_monitor" | "hardware_board_info" | "hardware_memory_map"
+        | "hardware_memory_read" | "proxy_config" => "infra",
+
+        // Connector and API integration.
+        "external_api" | "external_db" | "api_call" | "register_api_tool" | "mcp_session"
+        | "search_mcp_registry" | "acp_session" => "integration",
+
+        // Human-facing communication.
+        "ask_user" | "email" | "notification" | "pushover" => "communication",
+
+        // Policy and secret-handling operations.
+        "crypto_tool" | "request_credential" | "plane_guard" => "security",
+
+        // Scheduling, delegation, and orchestration.
+        "schedule" | "delegate" => "automation",
+        name if name.starts_with("cron_") => "automation",
+
+        // Internal coordination and meta tools.
+        "send_message" | "message_inbox" | "tool_search" | "request_more_tools" | "list_connectors_in_category"
+        | "request_more_connectors" | "create_custom_connector" | "tool_output" | "tool_validation"
+        | "skill_wrapper" | "model_routing" | "suggest_connectors" | "session_tasks" => "meta",
+
+        _ => "other",
     }
 }
 
@@ -180,6 +233,7 @@ pub mod memory_store_internal;
 pub mod request_more_connectors;
 pub mod request_more_tools;
 pub mod selector;
+pub mod toolregistry;
 
 pub mod acp_session;
 pub mod api_call;
@@ -1332,6 +1386,14 @@ pub fn default_output_schema<T: Tool + ?Sized>(tool: &T) -> Option<serde_json::V
                         "to": schema_string(),
                     },
                     "additionalProperties": true,
+                },
+                {
+                    "type": "object",
+                    "required": ["messages"],
+                    "properties": {
+                        "messages": schema_string(),
+                    },
+                    "additionalProperties": true,
                 }
             ]
         }),
@@ -2457,7 +2519,7 @@ fn default_input_contract<T: Tool + ?Sized>(tool: &T) -> String {
         "create_custom_connector" => "Request shape: { name, category, creation_path, product_name?, base_url?, auth_type?, auth_header_name?, auth_credential_key?, api_docs?, endpoints?, summary? }. Pick one creation path and provide the matching fields.".into(),
         "create_workspace_tool" => "Request shape: { name, language, code, description?, timeout_secs?, input_schema? }. Use only in plan mode for approved custom workspace logic.".into(),
         "request_more_tools" => "Request shape: { categories, reason? }. categories must be a non-empty array of core tool categories such as filesystem, web, code, data, memory, infra, security, or automation.".into(),
-        "acp_session" => "Request shape: { server_url, action, message?, target_agent?, auth_token? }. action must be list_agents or send_message for the current implementation.".into(),
+        "acp_session" => "Request shape: { server_url, action, message?, target_agent?, auth_token? }. action must be list_agents, receive_messages, or send_message for the current implementation.".into(),
         "register_api_tool" => "Request shape: { name, base_url, description?, auth_type?, auth_header_name?, endpoints?, credential_key? }. Register a reusable API-backed tool definition.".into(),
         "external_api" => "Request shape: { api, method, path, params?, headers?, tenant_id? }. Use a tenant-registered REST API and keep params JSON-serializable.".into(),
         "external_db" => "Request shape: { db, operation, sql?, table?, params?, max_rows?, allow_writes? }. operation must be schema, query, execute, table_preview, or explain.".into(),
@@ -2483,7 +2545,7 @@ fn default_output_contract<T: Tool + ?Sized>(tool: &T) -> String {
         "create_custom_connector" => "Output depends on the creation path: { status: 'created', name, category, message } or { status: 'pending', name, category, creation_path, note }. The executor later turns this into a live tenant connector.".into(),
         "create_workspace_tool" => "Output: { status, message }. The runtime intercepts this path and keeps it as plan-mode-only workflow setup.".into(),
         "request_more_tools" => "Output depends on expansion state: { status, requested_categories, tools_added, available_categories, message } or { status, requested_categories, note }.".into(),
-        "acp_session" => "Output depends on action: list_agents => { agents }; send_message => { sent, to }. The agents field may contain the raw remote response payload.".into(),
+        "acp_session" => "Output depends on action: list_agents => { agents }; receive_messages => { messages }; send_message => { sent, to }. The messages and agents fields may contain the raw remote response payload.".into(),
         "register_api_tool" => "Output: { registered, tool_name, base_url }. This confirms a reusable API-backed tool definition was saved.".into(),
         "external_api" => "Output: { status, success, data, url }. data is the parsed response JSON from the tenant API on success.".into(),
         "external_db" => "Output depends on operation: schema => { schema, tables, table_count }; query / table_preview / explain => { rows, row_count, truncated, sql }; execute => { rows_affected, success }.".into(),
@@ -2689,6 +2751,37 @@ mod tests {
         assert!(input.contains("url"));
         assert!(input.contains("credential_key"));
         assert!(output.contains("status, body"));
+    }
+
+    #[test]
+    fn test_category_fallback_groups_core_tools() {
+        let registry = default_registry();
+        let categories = registry.by_category();
+
+        let filesystem = categories.get("filesystem").expect("filesystem category");
+        assert!(filesystem.contains(&"decompress"));
+
+        let web = categories.get("web").expect("web category");
+        assert!(web.contains(&"browser_open"));
+        assert!(web.contains(&"browser_network"));
+
+        let communication = categories.get("communication").expect("communication category");
+        assert!(communication.contains(&"ask_user"));
+        assert!(communication.contains(&"email"));
+        assert!(communication.contains(&"notification"));
+        assert!(communication.contains(&"pushover"));
+
+        let automation = categories.get("automation").expect("automation category");
+        assert!(automation.contains(&"delegate"));
+        assert!(automation.iter().any(|name| name.starts_with("cron_")));
+
+        let security = categories.get("security").expect("security category");
+        assert!(security.contains(&"plane_guard"));
+
+        let integration = categories.get("integration").expect("integration category");
+        assert!(integration.contains(&"api_call"));
+        assert!(integration.contains(&"mcp_session"));
+        assert!(integration.contains(&"search_mcp_registry"));
     }
 
     #[test]

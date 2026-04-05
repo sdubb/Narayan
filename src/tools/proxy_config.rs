@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use crate::tools::{ParameterSchema, Tool, ToolResult, schema_string, schema_boolean};
+use crate::tools::{ParameterSchema, Tool, ToolResult, schema_boolean};
 pub struct ProxyConfigTool;
 #[async_trait]
 impl Tool for ProxyConfigTool {

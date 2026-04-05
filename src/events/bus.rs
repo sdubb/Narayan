@@ -58,6 +58,9 @@ pub enum AgentEvent {
         rationale: String,
         job_type: Option<String>,
         steps: Vec<PlanStepEvent>,
+        compiler_stage: Option<String>,
+        compiler_repair_passes: u8,
+        compiler_validation_issues: Vec<String>,
     },
 
     // ── Step execution ─────────────────────────────────────────────────────

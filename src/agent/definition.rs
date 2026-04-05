@@ -1,17 +1,17 @@
-//! Core data model for the multi-role agent system.
+﻿//! Core data model for the multi-role agent system.
 //!
 //! ## Hierarchy
 //!
-//!   AgentDefinition   — the employee: identity, allowed connectors, constraints
-//!       └── AgentRole — a role the employee plays: trigger, purpose, guidelines,
+//!   AgentDefinition   â€” the employee: identity, allowed connectors, constraints
+//!       â””â”€â”€ AgentRole â€” a role the employee plays: trigger, purpose, guidelines,
 //!                       scoped connectors, output spec, execution limits
-//!           └── GoalInstance (in goal_instance.rs) — one run of a role
+//!           â””â”€â”€ GoalInstance (in goal_instance.rs) â€” one run of a role
 //!
 //! ## Design decisions
 //!
 //! - Connectors are declared at TWO levels:
 //!     AgentDefinition.connectors  = allowed universe (security boundary)
-//!     AgentRole.connectors        = relevant subset for this role (planner scope)
+//!     AgentRole.connectors        = relevant subset for this role (compiler scope)
 //!   A role cannot use a connector that isn't in the agent's allowed list.
 //!   Validated on save, enforced at execution time.
 //!
@@ -19,7 +19,7 @@
 //!   started with so a mid-flight edit never corrupts an in-progress run.
 //!
 //! - WorkforceEvent triggers enable cross-agent chaining via a pub/sub bus.
-//!   No central orchestrator needed — each role declares what event it listens to.
+//!   No central orchestrator needed â€” each role declares what event it listens to.
 //!
 //! - RoleStatus::Testing lets you validate a role against sandbox data before
 //!   going live. Testing-mode GoalInstances are flagged and never write to
@@ -31,9 +31,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::agent::workflow_compiler::CompiledWorkflow;
 
-// ── AgentDefinition ────────────────────────────────────────────────────────
+// â”€â”€ AgentDefinition â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-/// The agent's persistent identity — the "employee record".
+/// The agent's persistent identity â€” the "employee record".
 /// Created once during plan mode, referenced by every role and goal instance.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentDefinition {
@@ -48,7 +48,7 @@ pub struct AgentDefinition {
     pub persona: String,
 
     /// Allowed connector universe for this agent.
-    /// Acts as a security boundary — roles can only use a subset of these.
+    /// Acts as a security boundary â€” roles can only use a subset of these.
     /// e.g. ["salesforce", "slack", "web_search"]
     pub connectors: Vec<String>,
 
@@ -68,13 +68,13 @@ pub struct AgentDefinition {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentDefinitionStatus {
-    /// Being configured in plan mode — not yet deployable.
+    /// Being configured in plan mode â€” not yet deployable.
     Draft,
     /// Fully configured and accepting goal instances.
     Active,
-    /// Temporarily disabled — no new goal instances created.
+    /// Temporarily disabled â€” no new goal instances created.
     Paused,
-    /// Archived — hidden from UI, no new instances.
+    /// Archived â€” hidden from UI, no new instances.
     Archived,
 }
 
@@ -102,9 +102,9 @@ impl AgentDefinition {
     }
 }
 
-// ── AgentRole ──────────────────────────────────────────────────────────────
+// â”€â”€ AgentRole â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-/// One role an agent plays — a reusable template that generates GoalInstances.
+/// One role an agent plays â€” a reusable template that generates GoalInstances.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentRole {
     pub id: String,
@@ -133,7 +133,7 @@ pub struct AgentRole {
     #[serde(default)]
     pub role_category: RoleCategory,
 
-    /// Structured guidelines used by plan mode and runtime — happy path AND failure handling.
+    /// Structured guidelines used by plan mode and runtime â€” happy path AND failure handling.
     /// These are injected verbatim into the system prompt that drives execution.
     ///
     /// Example:
@@ -141,12 +141,12 @@ pub struct AgentRole {
     ///   - Perform at least 2 independent web searches per lead
     ///   - If Salesforce update fails, save result to workspace and notify Slack
     ///   - Skip leads with no valid email address
-    /// Structured execution guidelines — rules, failure handling, and priorities.
+    /// Structured execution guidelines â€” rules, failure handling, and priorities.
     /// Stored as JSON in the DB and injected verbatim into the execution prompt.
     #[serde(default)]
     pub execution_guidelines: ExecutionGuidelines,
 
-    /// Connectors this role uses — must be a subset of AgentDefinition.connectors.
+    /// Connectors this role uses â€” must be a subset of AgentDefinition.connectors.
     /// Only these connectors are shown to plan mode and executor flows.
     pub connectors: Vec<String>,
 
@@ -170,15 +170,15 @@ pub struct AgentRole {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RoleStatus {
-    /// Being configured — not yet accepting goal instances.
+    /// Being configured â€” not yet accepting goal instances.
     Draft,
     /// Runs against sandbox/synthetic data. Instances flagged, no real writes.
     Testing,
-    /// Live — accepts real goal instances from triggers.
+    /// Live â€” accepts real goal instances from triggers.
     Active,
-    /// Trigger disabled — existing instances continue, no new ones created.
+    /// Trigger disabled â€” existing instances continue, no new ones created.
     Paused,
-    /// Soft-deleted — hidden, no new instances.
+    /// Soft-deleted â€” hidden, no new instances.
     Archived,
 }
 
@@ -323,9 +323,9 @@ impl AgentRole {
     }
 }
 
-// ── TriggerDef ─────────────────────────────────────────────────────────────
+// â”€â”€ TriggerDef â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-// ── Execution guideline types ──────────────────────────────────────────────
+// â”€â”€ Execution guideline types â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// When a rule applies relative to a tool call.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -337,7 +337,7 @@ pub enum RulePhase {
     Always,
 }
 
-/// A single behavioural rule — verb-led, tool-scoped where possible.
+/// A single behavioural rule â€” verb-led, tool-scoped where possible.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GuidelineRule {
     pub text: String,
@@ -452,39 +452,7 @@ pub fn infer_failure_action(lower: &str) -> FailureAction {
     FailureAction::SkipAndLog { log_path: "workspace/errors.txt".into() }
 }
 
-/// One enriched workflow step — tool-resolved at plan mode save time.
-/// Templates like `{input.topic}` are rendered at runtime from trigger input_data.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct WorkflowStep {
-    pub description: String,
-    pub tool: Option<String>,
-    #[serde(default)]
-    pub args_template: Option<serde_json::Value>,
-    #[serde(default)]
-    pub success_criteria: String,
-    #[serde(default)]
-    pub condition: Option<crate::agent::planner::StepCondition>,
-    /// Optional JSONPath for iterating over a collection.
-    #[serde(default)]
-    pub foreach: Option<String>,
-    /// DAG dependency edges — indices of predecessor steps.
-    #[serde(default)]
-    pub depends_on: Vec<usize>,
-    /// Engine-managed retry policy for this step.
-    #[serde(default)]
-    pub retry_policy: Option<RetryPolicy>,
-    /// Schema validation mode for this step's input/output.
-    #[serde(default)]
-    pub schema_mode: SchemaMode,
-    /// JSON Schema for expected input from predecessor steps.
-    #[serde(default)]
-    pub input_schema: Option<serde_json::Value>,
-    /// JSON Schema for the output this step must produce.
-    #[serde(default)]
-    pub output_schema: Option<serde_json::Value>,
-}
-
-/// Engine-managed retry policy — declared per-step, enforced by the DAG engine.
+/// Engine-managed retry policy â€” declared per-step, enforced by the DAG engine.
 /// No LLM evaluator involved; the engine decides retries deterministically.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RetryPolicy {
@@ -528,7 +496,7 @@ impl RetryPolicy {
     }
 }
 
-/// Schema enforcement mode — configurable per-step, defaults to Strict.
+/// Schema enforcement mode â€” configurable per-step, defaults to Strict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SchemaMode {
@@ -536,7 +504,7 @@ pub enum SchemaMode {
     Strict,
     /// Log a warning but continue execution.
     Warn,
-    /// No validation — skip schema checks entirely.
+    /// No validation â€” skip schema checks entirely.
     Off,
 }
 
@@ -559,14 +527,9 @@ pub struct ExecutionGuidelines {
     pub priorities: Vec<String>,
     #[serde(default)]
     pub completion_criteria: Vec<CompletionCriterion>,
-    /// Enriched workflow steps with tool resolution and arg templates.
-    /// When non-empty, runtime builds a deterministic Plan from these
-    /// instead of calling the LLM planner.
-    #[serde(default)]
-    pub workflow_outline: Vec<WorkflowStep>,
     /// DeterministicWorkflow is the steady-state runtime contract.
-    /// AdaptivePlanning is a temporary planning phase that must compile back
-    /// into workflow_outline before execution proceeds.
+    /// AdaptivePlanning is a temporary authoring phase that must compile into
+    /// `compiled_workflow` before execution proceeds.
     #[serde(default)]
     pub execution_strategy: ExecutionStrategy,
     /// Preferred tool pool for the role during normal execution.
@@ -586,52 +549,15 @@ impl ExecutionGuidelines {
     const MAX_PRIORITIES: usize = 5;
     const MAX_COMPLETION: usize = 6;
 
-    const MAX_WORKFLOW: usize = 12;
-
     pub fn is_empty(&self) -> bool {
         self.rules.is_empty()
             && self.failure_handling.is_empty()
             && self.priorities.is_empty()
             && self.completion_criteria.is_empty()
-            && self.workflow_outline.is_empty()
             && self.compiled_workflow.is_none()
     }
 
-    /// Returns true when the role has an enriched workflow outline that can
-    /// be converted directly into a deterministic Plan (no LLM planner needed).
-    pub fn has_workflow_outline(&self) -> bool {
-        !self.workflow_outline.is_empty()
-    }
-
-    pub fn needs_adaptive_compilation(&self) -> bool {
-        self.execution_strategy == ExecutionStrategy::AdaptivePlanning && self.workflow_outline.is_empty()
-    }
-
-    pub fn add_workflow_step(&mut self, step: WorkflowStep) {
-        if self.workflow_outline.len() < Self::MAX_WORKFLOW {
-            self.workflow_outline.push(step);
-        }
-    }
-
-    pub fn compile_plan_to_workflow_outline(&mut self, plan: &crate::agent::planner::Plan) {
-        self.workflow_outline = plan
-            .steps
-            .iter()
-            .map(|step| WorkflowStep {
-                description: step.description.clone(),
-                tool: step.tool.clone(),
-                args_template: step.tool_args.clone(),
-                success_criteria: step.success_criteria.clone(),
-                condition: step.condition.clone(),
-                depends_on: step.depends_on.clone(),
-                ..Default::default()
-            })
-            .take(Self::MAX_WORKFLOW)
-            .collect();
-        self.execution_strategy = ExecutionStrategy::DeterministicWorkflow;
-    }
-
-    /// Render a structured, numbered prompt block — LLMs follow numbered lists more reliably.
+    /// Render a structured, numbered prompt block â€” LLMs follow numbered lists more reliably.
     pub fn to_prompt(&self) -> String {
         let mut parts: Vec<String> = Vec::new();
 
@@ -663,14 +589,14 @@ impl ExecutionGuidelines {
                 .map(|(i, f)| {
                     let scope = f.tool_scope.as_deref().map(|t| format!("[{} fails] ", t)).unwrap_or_default();
                     let act = match &f.action {
-                        FailureAction::SkipAndLog { log_path } => format!("→ Skip, log to {}", log_path),
-                        FailureAction::SkipSilently => "→ Skip silently".into(),
-                        FailureAction::RetryOnce => "→ Retry once".into(),
+                        FailureAction::SkipAndLog { log_path } => format!("â†’ Skip, log to {}", log_path),
+                        FailureAction::SkipSilently => "â†’ Skip silently".into(),
+                        FailureAction::RetryOnce => "â†’ Retry once".into(),
                         FailureAction::EscalateToHuman { notify_channel: Some(ch) } => {
-                            format!("→ Escalate, notify {}", ch)
+                            format!("â†’ Escalate, notify {}", ch)
                         }
-                        FailureAction::EscalateToHuman { notify_channel: None } => "→ Escalate to human".into(),
-                        FailureAction::Abort => "→ Abort run".into(),
+                        FailureAction::EscalateToHuman { notify_channel: None } => "â†’ Escalate to human".into(),
+                        FailureAction::Abort => "â†’ Abort run".into(),
                     };
                     format!("{}. {}{} {}", i + 1, scope, f.text, act)
                 })
@@ -701,37 +627,6 @@ impl ExecutionGuidelines {
                 .map(|(i, c)| format!("{}. [ ] {}", i + 1, c.description))
                 .collect();
             parts.push(format!("DONE WHEN ALL OF:\n{}", items.join("\n")));
-        }
-
-        if !self.workflow_outline.is_empty() {
-            let items: Vec<String> = self
-                .workflow_outline
-                .iter()
-                .take(Self::MAX_WORKFLOW)
-                .enumerate()
-                .map(|(i, step)| {
-                    let tool = step.tool.as_deref().unwrap_or("no tool");
-                    let criteria = if step.success_criteria.trim().is_empty() {
-                        format!("step {} complete", i + 1)
-                    } else {
-                        step.success_criteria.clone()
-                    };
-                    let args = step
-                        .args_template
-                        .as_ref()
-                        .map(|value| serde_json::to_string(value).unwrap_or_default())
-                        .unwrap_or_else(|| "{}".into());
-                    format!(
-                        "{}. {}\n   tool: {}\n   args: {}\n   success: {}",
-                        i + 1,
-                        step.description,
-                        tool,
-                        args,
-                        criteria
-                    )
-                })
-                .collect();
-            parts.push(format!("WORKFLOW OUTLINE:\n{}", items.join("\n")));
         }
 
         parts.push(format!(
@@ -851,7 +746,7 @@ impl ExecutionGuidelines {
         let mut sec = Sec::Rules;
 
         for line in text.lines() {
-            let t = line.trim().trim_start_matches("- ").trim_start_matches("• ").trim_start_matches("* ");
+            let t = line.trim().trim_start_matches("- ").trim_start_matches("â€¢ ").trim_start_matches("* ");
             if t.is_empty() {
                 continue;
             }
@@ -960,7 +855,7 @@ impl ExecutionGuidelines {
 
 impl From<&str> for ExecutionGuidelines {
     fn from(s: &str) -> Self {
-        // Try JSON parse first — allows passing a full serialised ExecutionGuidelines
+        // Try JSON parse first â€” allows passing a full serialised ExecutionGuidelines
         if let Ok(parsed) = serde_json::from_str::<ExecutionGuidelines>(s) {
             return parsed;
         }
@@ -985,12 +880,12 @@ impl From<&str> for ExecutionGuidelines {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum TriggerConfidence {
-    /// Parsed unambiguously — no confirmation needed.
+    /// Parsed unambiguously â€” no confirmation needed.
     High,
-    /// Parsed with reasonable confidence but ambiguous details — ask to confirm.
+    /// Parsed with reasonable confidence but ambiguous details â€” ask to confirm.
     #[default]
     Medium,
-    /// Could not parse reliably — must ask.
+    /// Could not parse reliably â€” must ask.
     Low,
 }
 
@@ -1008,19 +903,19 @@ pub struct RoleResponsibility {
 pub struct TriggerDef {
     pub trigger_type: TriggerType,
 
-    // ── Webhook fields ─────────────────────────────────────────────────────
+    // â”€â”€ Webhook fields â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     /// Connector that delivers the webhook, e.g. "salesforce".
     pub source_connector: Option<String>,
     /// Event name to match, e.g. "lead_created".
     pub event_filter: Option<String>,
 
-    // ── Schedule fields ────────────────────────────────────────────────────
+    // â”€â”€ Schedule fields â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     /// Cron expression, e.g. "0 9 * * 5" for Friday 9am.
     pub cron: Option<String>,
     /// IANA timezone, e.g. "America/New_York". Defaults to UTC.
     pub timezone: Option<String>,
 
-    // ── UserMessage fields ─────────────────────────────────────────────────
+    // â”€â”€ UserMessage fields â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     /// If set, only these user IDs can invoke this role via message.
     /// Empty vec means any authenticated user.
     pub allowed_users: Option<Vec<String>>,
@@ -1028,7 +923,7 @@ pub struct TriggerDef {
     /// e.g. ["enrich", "lead", "prospect"] for a lead enrichment role.
     pub intent_keywords: Option<Vec<String>>,
 
-    // ── WorkforceEvent fields ──────────────────────────────────────────────
+    // â”€â”€ WorkforceEvent fields â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     /// JSONPath-style filter on the workforce event, e.g.:
     ///   "role_name == 'Lead Enrichment' AND status == 'completed'"
     pub workforce_event_filter: Option<String>,
@@ -1036,7 +931,7 @@ pub struct TriggerDef {
     /// e.g. { "lead_id": "$.output_data.lead_id" }
     pub input_mapping: Option<serde_json::Value>,
 
-    // ── AgentCompletion (within-agent chaining) ────────────────────────────
+    // â”€â”€ AgentCompletion (within-agent chaining) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     /// Role ID within this agent that must complete before this role fires.
     pub depends_on_role_id: Option<String>,
 
@@ -1079,7 +974,7 @@ impl Default for TriggerDef {
     }
 }
 
-// ── OutputSpec ─────────────────────────────────────────────────────────────
+// â”€â”€ OutputSpec â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Structured description of what this role produces and where it goes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1139,7 +1034,7 @@ impl Default for OutputSpec {
     }
 }
 
-// ── MemoryScope ────────────────────────────────────────────────────────────
+// â”€â”€ MemoryScope â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Controls what memory this role can read and write.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -1149,7 +1044,7 @@ pub enum MemoryScope {
     /// Use for reference data: company info, preferences, shared knowledge.
     Global,
     /// Shared across all roles of this agent.
-    /// Default — most roles should use this.
+    /// Default â€” most roles should use this.
     #[default]
     Agent,
     /// Isolated to this role only.
@@ -1158,13 +1053,13 @@ pub enum MemoryScope {
     Role,
 }
 
-// ── ExecutionLimits ────────────────────────────────────────────────────────
+// â”€â”€ ExecutionLimits â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Safety limits applied to every GoalInstance of this role.
 /// Prevents runaway agents and controls cost.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExecutionLimits {
-    /// Maximum number of planner steps. Default 40.
+    /// Maximum number of compiler steps. Default 40.
     pub max_steps: u32,
     /// Maximum retry attempts per step. Default 3.
     pub max_retries: u32,
@@ -1261,7 +1156,7 @@ impl RoleCategory {
     }
 }
 
-// ── Plan mode conversation state ────────────────────────────────────────────
+// â”€â”€ Plan mode conversation state â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Tracks the state of an in-progress plan mode configuration session.
 /// Stored temporarily while the user is answering questions.
@@ -1311,6 +1206,19 @@ pub struct PlanModeSession {
 
     /// Which step of the plan mode flow we're on.
     pub phase: PlanModePhase,
+
+    /// Internal compiler stage for the current draft.
+    /// This is separate from the user-facing plan mode phase.
+    #[serde(default)]
+    pub compiler_stage: PlanModeCompilerStage,
+
+    /// Number of bounded repair passes already attempted for this draft.
+    #[serde(default)]
+    pub compiler_repair_passes: u8,
+
+    /// Most recent compiler validation issues or repair blockers.
+    #[serde(default)]
+    pub compiler_validation_issues: Vec<String>,
 
     /// Cached intent extracted in CapturingIntent phase.
     #[serde(default)]
@@ -1456,11 +1364,23 @@ pub enum PlanModePhase {
     CapturingConstraints,
     /// Reviewing the complete configuration with the user before saving.
     Reviewing,
-    /// Configuration saved — session complete.
+    /// Configuration saved â€” session complete.
     Complete,
 }
 
-// ── TenantConnector ────────────────────────────────────────────────────────
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanModeCompilerStage {
+    #[default]
+    Intent,
+    Dsl,
+    Validate,
+    Repair,
+    Bind,
+    Review,
+}
+
+// â”€â”€ TenantConnector â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// A user-defined custom connector, specific to one tenant.
 /// Created when the LLM discovers a needed connector isn't built-in.
@@ -1491,7 +1411,7 @@ pub struct TenantConnector {
     /// Raw documentation content (OpenAPI spec, markdown, etc.) if uploaded.
     pub source_docs: Option<String>,
 
-    /// Derived endpoint definitions — either from docs parsing or manual input.
+    /// Derived endpoint definitions â€” either from docs parsing or manual input.
     pub endpoints: Vec<EndpointDef>,
 
     /// One-line summary shown in the connector directory.
@@ -1556,7 +1476,7 @@ pub enum ParamLocation {
     Header,
 }
 
-// ── TenantWasmTool (user-defined deterministic compute tools) ─────────────
+// â”€â”€ TenantWasmTool (user-defined deterministic compute tools) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Execution permissions for a tenant-registered WASM tool.
 /// Deliberately narrow by default; each permission must be explicitly enabled.
@@ -1653,9 +1573,9 @@ pub struct WasmToolRunAudit {
     pub created_at: DateTime<Utc>,
 }
 
-// ── WorkforceEvent (subscription model) ────────────────────────────────────
+// â”€â”€ WorkforceEvent (subscription model) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-/// Persisted subscription record — "role X listens for event matching filter Y".
+/// Persisted subscription record â€” "role X listens for event matching filter Y".
 /// Created when a role with TriggerType::WorkforceEvent is saved.
 /// Polled by the scheduler to fire new GoalInstances.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1750,7 +1670,7 @@ impl WorkforceEventPayload {
     }
 }
 
-/// Minimal JSONPath resolver — supports "$.field.subfield" dot notation only.
+/// Minimal JSONPath resolver â€” supports "$.field.subfield" dot notation only.
 /// Full JSONPath (arrays, filters) is out of scope for V1.
 fn resolve_jsonpath(value: &serde_json::Value, path: &str) -> Option<serde_json::Value> {
     let path = path.strip_prefix("$.").unwrap_or(path);
@@ -1761,7 +1681,7 @@ fn resolve_jsonpath(value: &serde_json::Value, path: &str) -> Option<serde_json:
     Some(current.clone())
 }
 
-// ── Tests ──────────────────────────────────────────────────────────────────
+// â”€â”€ Tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[cfg(test)]
 mod tests {
@@ -1777,7 +1697,7 @@ mod tests {
         AgentRole::new("role-1".into(), "ag-1".into(), "t-1".into(), "Lead Enrichment".into())
     }
 
-    // ── AgentDefinition ────────────────────────────────────────────────────
+    // â”€â”€ AgentDefinition â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     #[test]
     fn test_agent_defaults_to_draft() {
@@ -1806,7 +1726,7 @@ mod tests {
         assert!(violations.is_empty());
     }
 
-    // ── AgentRole ──────────────────────────────────────────────────────────
+    // â”€â”€ AgentRole â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     #[test]
     fn test_role_defaults_to_draft() {
@@ -1825,7 +1745,7 @@ mod tests {
         assert_eq!(r.version, 3);
     }
 
-    // ── ExecutionLimits ────────────────────────────────────────────────────
+    // â”€â”€ ExecutionLimits â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     #[test]
     fn test_execution_limits_defaults() {
@@ -1846,7 +1766,7 @@ mod tests {
         assert!(!category.default_persona().is_empty());
     }
 
-    // ── WorkforceEventPayload ──────────────────────────────────────────────
+    // â”€â”€ WorkforceEventPayload â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     fn make_event() -> WorkforceEventPayload {
         WorkforceEventPayload {
@@ -1935,7 +1855,7 @@ mod tests {
         assert!(result.is_none());
     }
 
-    // ── Serialisation round-trips ──────────────────────────────────────────
+    // â”€â”€ Serialisation round-trips â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     #[test]
     fn test_trigger_def_serialises() {
@@ -2000,3 +1920,4 @@ mod tests {
         assert!(prompt.contains("coordinator"));
     }
 }
+

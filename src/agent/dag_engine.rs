@@ -37,7 +37,7 @@ use crate::{
         planner::{ConditionOp, Plan, StepCondition, StructuredCondition},
         prompts::StepHistory,
         step_artifacts::write_step_artifact,
-        workflow_compiler::{PrimitiveType, TypeSpec, TypedExpression},
+        workflow_compiler::TypedExpression,
     },
     events::{AgentEvent, EventBus},
     state::AgentState,

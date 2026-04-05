@@ -29,6 +29,9 @@ impl Tool for ShellTool {
     fn name(&self) -> &str {
         "shell"
     }
+    fn category(&self) -> &'static str {
+        "filesystem"
+    }
     fn description(&self) -> &str {
         "Execute a shell command in the agent workspace with an isolated environment."
     }

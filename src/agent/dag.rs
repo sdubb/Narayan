@@ -642,67 +642,6 @@ impl Workflow {
         }
     }
 
-    /// Build a Workflow from a role's enriched workflow outline.
-    /// Preserves depends_on, retry_policy, and schema settings from the definition.
-    pub fn from_workflow_outline(
-        role: &crate::agent::definition::AgentRole,
-        agent_id: &str,
-        tenant_id: &str,
-        goal: &str,
-    ) -> Self {
-        let workflow_steps = role.execution_guidelines.workflow_outline.as_slice();
-
-        let nodes = workflow_steps
-            .iter()
-            .enumerate()
-            .map(|(index, ws)| {
-                let depends_on = if ws.depends_on.is_empty() {
-                    if index > 0 {
-                        vec![format!("step-{}", index - 1)]
-                    } else {
-                        vec![]
-                    }
-                } else {
-                    ws.depends_on.iter().map(|i| format!("step-{}", i)).collect()
-                };
-
-                StepNode {
-                    id: format!("step-{}", index),
-                    index,
-                    description: ws.description.clone(),
-                    tool: ws.tool.clone(),
-                    tool_args: ws.args_template.clone(),
-                    success_criteria: ws.success_criteria.clone(),
-                    condition: ws.condition.clone(),
-                    foreach: ws.foreach.clone(),
-                    kind: if ws.foreach.is_some() { StepKind::ForEachTemplate } else { StepKind::Normal },
-                    depends_on,
-                    status: StepStatus::Pending,
-                    attempt: 0,
-                    retry_policy: ws.retry_policy.clone().unwrap_or_default(),
-                    schema_mode: ws.schema_mode,
-                    input_schema: ws.input_schema.clone(),
-                    output_schema: ws.output_schema.clone(),
-                    output_data: None,
-                    started_at: None,
-                    completed_at: None,
-                    error: None,
-                }
-            })
-            .collect();
-
-        let now = Utc::now();
-        Self {
-            id: format!("wf-{}", uuid::Uuid::new_v4()),
-            agent_id: agent_id.to_string(),
-            tenant_id: tenant_id.to_string(),
-            goal: goal.to_string(),
-            nodes,
-            status: WorkflowStatus::Running,
-            created_at: now,
-            updated_at: now,
-        }
-    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

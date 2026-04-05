@@ -6,7 +6,7 @@
 //! DESIGN PRINCIPLES:
 //!   - Prompts are specific, not generic — job-type specialisation throughout
 //!   - StepHistory uses tiered compression (recent = full, old = summary)
-//!   - Planner receives grouped tool manifest (not a flat list of 65 names)
+//!   - Compiler receives grouped tool manifest (not a flat list of 65 names)
 //!   - Evaluator sees actual tool names called (not just ok/fail counts)
 //!   - All JSON output formats specify exact field names and types
 
@@ -15,6 +15,7 @@ use crate::{
         definition::RoleCategory,
         executor::StepResult,
         planner::{Plan, PlannedStep},
+        plan_mode_steps::workflow_contract_prompt_fragment,
     },
     gateway::LlmGenerationConfig,
     state::AgentState,
@@ -116,7 +117,7 @@ pub fn is_direct_response_goal(goal: &str) -> bool {
 
     let lower = trimmed.to_lowercase();
 
-    // Only bypass the planner for trivial greetings and pure arithmetic.
+    // Only bypass the compiler for trivial greetings and pure arithmetic.
     // Everything else goes through normal planning so the LLM can decide
     // whether tools/connectors are needed.
 
@@ -582,12 +583,12 @@ fn clarification_context(state: &AgentState) -> Option<String> {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// PLANNER PROMPTS
+// COMPILER PROMPTS
 // ═══════════════════════════════════════════════════════════════════════════
 
-pub struct PlannerPrompt;
+pub struct CompilerPrompt;
 
-impl PlannerPrompt {
+impl CompilerPrompt {
     pub fn system(job_type: &JobType) -> String {
         let job_guidance = match job_type {
             JobType::SoftwareEngineer => {
@@ -730,6 +731,7 @@ PLANNING RULES:
 STEP SEQUENCE: read_runbook → observe_state → notify_oncall_if_needed → execute_steps → verify_health → update_ticket → write_postmortem"
             }
         };
+        let workflow_contract = workflow_contract_prompt_fragment();
 
         format!(
             r#"{job_guidance}
@@ -743,12 +745,25 @@ OUTPUT FORMAT — return ONLY valid JSON, no markdown fences, no other text:
       "index": 0,
       "description": "specific, concrete description of what this step does",
       "tool": "exact_tool_name_or_null",
+      "tool_operation": "exact_operation_or_null",
+      "resource_id": "resource_id_or_null",
+      "resource_type": "database|http_endpoint|connector|filesystem|api_key|ssh_host|docker_daemon|kube_cluster|mcp_server|acp_peer|null",
       "tool_args": {{}},
+      "input_mapping": {{}},
+      "output_schema": {{}},
+      "read_only": true,
       "condition": {{
         "reference": "result_of_step_0.output.count",
         "operator": "gt",
         "value": 0
-      }}
+      }},
+      "depends_on": ["step_0"],
+      "next_steps": ["step_1"],
+      "branch_condition": "optional explicit branch condition or null",
+      "repeat_until": "optional repeat condition or null",
+      "fallback_step": "optional fallback step id or null",
+      "loop_back_to": "optional step id to revisit or null",
+      "retry_policy": {{"max_attempts": 1, "backoff_secs": 2, "retry_on": []}}
     }}
   ],
   "rationale": "one sentence: why this sequence achieves the goal"
@@ -771,12 +786,16 @@ CONSTRAINTS:
 - Use compress/decompress for archives; never use file_write to create .zip, .tar.gz, or other archive files
 - Prefer code_run for calculations or short executable snippets; only create a script file first when the user explicitly asks for a saved script
 - Tool contracts are authoritative: read the Purpose, Use when, Avoid when, Input, Output, and Output schema sections before choosing a tool
+- Shared workflow contract fragment:
+{workflow_contract}
 - Prefer data_engine for deterministic record transforms, scoring, aggregation, cleaning, and schema-aligned extraction when the task fits the typed DSL
 - Do not use data_engine for free-form scripts, browser automation, remote execution, or arbitrary custom code
 - Use data_extractor for semi-structured source extraction from HTML/text/PDF-like content, then pass the results into data_engine for deterministic transforms
+- If the workflow revisits a prior tool, make the revisit explicit with `loop_back_to` or `repeat_until`
 - Never plan a step you cannot verify as complete or failed"#,
             job_guidance = job_guidance,
             label = job_type.label(),
+            workflow_contract = workflow_contract,
         )
     }
 
@@ -1581,3 +1600,5 @@ mod tests {
         assert!(prompt.contains("child-1"));
     }
 }
+
+

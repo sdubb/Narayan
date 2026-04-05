@@ -20,6 +20,9 @@ impl Tool for CompressTool {
     fn name(&self) -> &str {
         "compress"
     }
+    fn category(&self) -> &'static str {
+        "filesystem"
+    }
     fn description(&self) -> &str {
         "Compress files or directories into a zip, tar.gz, or tar.bz2 archive."
     }

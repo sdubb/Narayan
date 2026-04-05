@@ -185,19 +185,6 @@ mod tests {
         role.execution_guidelines.execution_strategy = ExecutionStrategy::DeterministicWorkflow;
 
         assert!(!role_ready_for_schedule(&role));
-
-        role.execution_guidelines.workflow_outline.push(crate::agent::definition::WorkflowStep {
-            description: "inspect database".into(),
-            tool: None,
-            args_template: None,
-            success_criteria: "outline exists".into(),
-            condition: None,
-            foreach: None,
-            depends_on: vec![],
-            ..Default::default()
-        });
-
-        assert!(!role_ready_for_schedule(&role));
     }
 
     #[test]

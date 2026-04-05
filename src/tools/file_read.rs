@@ -12,6 +12,9 @@ impl Tool for FileReadTool {
     fn name(&self) -> &str {
         "file_read"
     }
+    fn category(&self) -> &'static str {
+        "filesystem"
+    }
     fn description(&self) -> &str {
         "Read the contents of a file. Returns UTF-8 text. \
          Supports optional line range. Capped at 10 MiB."

@@ -16,6 +16,8 @@
 //! Domain-specific steps come from per-category generators at the bottom of this file.
 //! The domain skill registry provides execution brief text; this file provides typed steps.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::agent::definition::{
@@ -983,4 +985,216 @@ fn source_discovery_step_for(category: &str) -> ClarificationStep {
     };
 
     ClarificationStep::new("source_discovery", question, StepField::SourceDiscovery)
+}
+
+// Workflow contract schema used by plan mode when drafting explicit workflow steps.
+// This keeps the schema definition close to the clarification step pipeline, rather than
+// embedding the same long JSON shape directly in plan_mode.rs and prompt builders.
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct PlanModeRetryPolicy {
+    #[serde(default)]
+    pub max_attempts: u32,
+    #[serde(default)]
+    pub backoff_secs: u32,
+    #[serde(default)]
+    pub retry_on: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct PlanModeWorkflowResponsibility {
+    pub name: String,
+    #[serde(default)]
+    pub actions: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_hint: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct PlanModeWorkflowStep {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub step_type: String,
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_hint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_hint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_operation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_type: Option<String>,
+    #[serde(default)]
+    pub args_hint: serde_json::Value,
+    #[serde(default)]
+    pub input_mapping: BTreeMap<String, String>,
+    #[serde(default)]
+    pub output_schema: serde_json::Value,
+    #[serde(default)]
+    pub read_only: bool,
+    #[serde(default)]
+    pub success_criteria: Vec<String>,
+    #[serde(default)]
+    pub depends_on: Vec<String>,
+    #[serde(default)]
+    pub next_steps: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_condition: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repeat_until: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_step: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loop_back_to: Option<String>,
+    #[serde(default)]
+    pub retry_policy: PlanModeRetryPolicy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct PlanModeWorkflowDraft {
+    #[serde(default)]
+    pub preferred_tool_categories: Vec<String>,
+    #[serde(default)]
+    pub preferred_tools: Vec<String>,
+    #[serde(default)]
+    pub candidate_connectors: Vec<String>,
+    #[serde(default)]
+    pub missing_capabilities: Vec<String>,
+    #[serde(default)]
+    pub workflow_dsl: Vec<PlanModeWorkflowStep>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uses_external_db: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uses_external_api: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_hint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_cron: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_event: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_confidence: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_confirmation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_hint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_destination_hint: Option<String>,
+    #[serde(default)]
+    pub output_questions: Vec<String>,
+    #[serde(default)]
+    pub responsibilities: Vec<PlanModeWorkflowResponsibility>,
+    #[serde(default)]
+    pub multi_role_suggested: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multi_role_reason: Option<String>,
+    #[serde(default)]
+    pub clarifying_questions: Vec<String>,
+}
+
+pub fn workflow_contract_prompt_fragment() -> &'static str {
+    r#"WORKFLOW CONTRACT:
+{
+  "preferred_tool_categories": ["web", "data"],
+  "preferred_tools": ["web_search_tool", "web_fetch", "data_engine"],
+  "candidate_connectors": [],
+  "missing_capabilities": [],
+  "workflow_dsl": [
+    {
+      "id": "step_1",
+      "type": "fetch_records|filter|compute|aggregate|detect_anomaly|branch|notify|store_result|llm_worker",
+      "description": "short ordered DSL step description",
+      "resource_hint": "database|api|mcp|connector name or null",
+      "tool_hint": "exact tool name or null",
+      "tool": "exact tool name or null",
+      "tool_operation": "exact operation string or null",
+      "integration_protocol": "mcp|acp|rest|null",
+      "integration_action": "connect|list_tools|call_tool|list_resources|read_resource|list_agents|send_message|null",
+      "integration_sub_operation": "optional protocol-specific method or remote action name",
+      "resource_id": "bound resource id or null",
+      "resource_type": "database|http_endpoint|connector|filesystem|api_key|ssh_host|docker_daemon|kube_cluster|mcp_server|acp_peer|null",
+      "server_url": "integration server URL or null",
+      "target_agent": "ACP target agent or null",
+      "args_hint": {},
+      "input_mapping": {},
+      "output_schema": {},
+      "read_only": true,
+      "success_criteria": ["what success looks like"],
+      "depends_on": ["step_0"],
+      "next_steps": ["step_2"],
+      "branch_condition": "optional explicit branch condition or null",
+      "repeat_until": "optional repeat condition or null",
+      "fallback_step": "optional fallback step id or null",
+      "loop_back_to": "optional step id to revisit or null",
+      "retry_policy": {"max_attempts": 1, "backoff_secs": 2, "retry_on": []}
+    }
+  ],
+  "uses_external_db": "exact saved database name, true if a database is needed but no saved name is known yet, or null",
+  "uses_external_api": "registered API name or null",
+  "trigger_hint": "schedule|webhook|user_message|manual",
+  "trigger_cron": "best-guess cron expression if schedule, else null",
+  "trigger_source": "connector name if webhook, else null",
+  "trigger_event": "event name if webhook e.g. lead_created, else null",
+  "trigger_confidence": "high|medium|low",
+  "trigger_confirmation": "confirmation question if medium/low confidence, else null",
+  "output_hint": "workspace|connector_record|slack_message|email_draft|email_send|report|notification",
+  "output_destination_hint": "where exactly - workspace path, connector name, or channel",
+  "output_questions": ["specific missing output detail questions, empty array if clear"],
+  "responsibilities": [
+    {"name": "short role name", "actions": ["verbs"], "trigger_hint": "schedule|webhook|manual"}
+  ],
+  "multi_role_suggested": false,
+  "multi_role_reason": "why split is recommended, or null",
+  "clarifying_questions": []
+}
+
+Rules:
+- Use exact tool names only from the capability directory or detailed context
+- Tool contracts in the detailed context are authoritative; read Purpose, Use when, Avoid when, Input, Output, and Output schema before choosing a tool
+- Prefer emitting the explicit contract fields: `tool`, `tool_operation`, `resource_id`, `resource_type`, `input_mapping`, `output_schema`, `read_only`, `depends_on`, `next_steps`, `branch_condition`, `repeat_until`, `fallback_step`, `loop_back_to`, `retry_policy`
+- Prefer data_engine for deterministic record workflows when the task fits the typed DSL
+- Do not suggest free-form code or runtime custom tools when data_engine can express the workflow
+- Use data_extractor first for semi-structured source extraction from HTML/text/PDF-like content, then use data_engine for deterministic record transforms
+- Use exact connector names only when they are clearly supported by the context
+- Use `mcp_session` for MCP-backed workflows and `acp_session` for ACP-backed workflows when those appear in the candidate set
+- For MCP, prefer explicit `integration_protocol: "mcp"` and actions such as `connect`, `list_tools`, `list_resources`, `read_resource`, or `call_tool`
+- For ACP, prefer explicit `integration_protocol: "acp"` and actions such as `list_agents`, `receive_messages`, or `send_message` on the currently available protocol surface, including internal agent-to-agent workflows
+- workflow_dsl should be ordered and typed. Use the smallest set of steps needed to express the workflow.
+- Same tool may appear multiple times in one workflow, and workflows may loop back to earlier steps when `loop_back_to` / `repeat_until` makes that explicit.
+- When a REGISTRY CANDIDATE SET JSON block is provided during repair, treat it as authoritative and choose from those candidates instead of inventing tools or connectors.
+- If a workflow needs arbitrary code or a dedicated execution sandbox later, mark that as a missing capability instead of inventing a runtime tool
+"#
+}
+
+pub fn intent_extractor_system_prompt(capability_section: &str, dsl_fragment: &str) -> String {
+    let capability_section = if capability_section.is_empty() {
+        String::new()
+    } else {
+        format!("\n\nCAPABILITY DIRECTORY:\n{}", capability_section)
+    };
+
+    format!(
+        r#"You are a business analyst helping configure an AI automation agent.
+Extract structured intent AND generate specific clarifying questions.
+
+Work in two stages internally:
+1. Infer the business workflow shape and the capability categories needed.
+2. Pick exact connectors or tools only when the directory/context makes them clear.
+3. Treat the detailed capability context as three candidate slices and choose from the most specific matching slice first.
+{capability_section}
+
+Respond ONLY with valid JSON.
+{workflow_contract}
+
+{dsl_fragment}"#,
+        capability_section = capability_section,
+        workflow_contract = workflow_contract_prompt_fragment(),
+        dsl_fragment = dsl_fragment,
+    )
 }

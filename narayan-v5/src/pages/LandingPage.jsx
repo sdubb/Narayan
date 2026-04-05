@@ -300,6 +300,206 @@ function ExampleCard({ example }) {
   );
 }
 
+/* ─── ACP 3-D Orbital Diagram ────────────────────────────────────────────── */
+function ACPDiagram() {
+  const specialists = [
+    { label: 'Invoice\nAgent',    color: '#c96a2e', bg: 'rgba(201,106,46,0.15)', border: 'rgba(201,106,46,0.45)', angle: 270 },
+    { label: 'Search\nAgent',    color: '#3b82f6', bg: 'rgba(59,130,246,0.15)',  border: 'rgba(59,130,246,0.45)',  angle: 0   },
+    { label: 'Notify\nAgent',    color: '#8b5cf6', bg: 'rgba(139,92,246,0.15)', border: 'rgba(139,92,246,0.45)', angle: 90  },
+    { label: 'Audit\nAgent',     color: '#10b981', bg: 'rgba(16,185,129,0.15)', border: 'rgba(16,185,129,0.45)', angle: 180 },
+  ];
+
+  const R = 110; // orbit radius (px)
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 24 }}
+      whileInView={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.7 }}
+      viewport={{ once: true }}
+      className="relative overflow-hidden rounded-[2rem] border border-white/10 bg-[#0f0d0b] shadow-[0_24px_72px_rgba(0,0,0,0.45)]"
+      style={{ minHeight: 420 }}
+    >
+      {/* Ambient glows */}
+      <div className="pointer-events-none absolute inset-0" style={{
+        background: 'radial-gradient(circle at 50% 54%, rgba(201,106,46,0.18) 0%, transparent 55%), radial-gradient(circle at 80% 20%, rgba(59,130,246,0.12) 0%, transparent 40%)'
+      }} />
+
+      {/* Header bar */}
+      <div className="relative flex items-center justify-between border-b border-white/8 px-6 py-4">
+        <div>
+          <p className="text-[0.6rem] font-bold uppercase tracking-[0.3em] text-white/35">Live ACP Network</p>
+          <p className="mt-0.5 text-sm font-medium text-white/80">Narayan orchestrator</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <motion.span
+            animate={{ opacity: [1, 0.3, 1] }}
+            transition={{ duration: 1.6, repeat: Infinity }}
+            className="size-2 rounded-full bg-emerald-400"
+          />
+          <span className="text-xs text-white/40">4 agents active</span>
+        </div>
+      </div>
+
+      {/* 3-D scene */}
+      <div className="relative flex items-center justify-center" style={{ height: 300, perspective: '900px' }}>
+        <motion.div
+          animate={{ rotateY: [0, 8, 0, -8, 0] }}
+          transition={{ duration: 14, repeat: Infinity, ease: 'easeInOut' }}
+          style={{ transformStyle: 'preserve-3d', width: '100%', height: '100%', position: 'relative' }}
+        >
+          {/* Orbit ellipse (CSS 3-D rotated ring) */}
+          <div style={{
+            position: 'absolute', top: '50%', left: '50%',
+            width: R * 2 + 80, height: R * 2 + 80,
+            marginLeft: -(R + 40), marginTop: -(R + 40),
+            borderRadius: '50%',
+            border: '1px solid rgba(255,255,255,0.06)',
+            transform: 'rotateX(62deg)',
+            boxShadow: 'inset 0 0 40px rgba(201,106,46,0.04)',
+          }} />
+          <div style={{
+            position: 'absolute', top: '50%', left: '50%',
+            width: R * 2 + 20, height: R * 2 + 20,
+            marginLeft: -(R + 10), marginTop: -(R + 10),
+            borderRadius: '50%',
+            border: '1px dashed rgba(255,255,255,0.04)',
+            transform: 'rotateX(62deg)',
+          }} />
+
+          {/* Specialist agent nodes around the orbit */}
+          {specialists.map(({ label, color, bg, border, angle }) => {
+            const rad = (angle * Math.PI) / 180;
+            const x = Math.cos(rad) * R;
+            const y = Math.sin(rad) * R * 0.42; // flattened for 3-D feel
+            const zOff = Math.sin(rad) * 20;
+            return (
+              <motion.div
+                key={label}
+                animate={{ y: [y, y - 4, y] }}
+                transition={{ duration: 3.5 + angle * 0.01, repeat: Infinity, ease: 'easeInOut' }}
+                style={{
+                  position: 'absolute',
+                  top: '50%', left: '50%',
+                  width: 64, height: 64,
+                  marginLeft: x - 32,
+                  marginTop: -32,
+                  background: bg,
+                  border: `1.5px solid ${border}`,
+                  borderRadius: 16,
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  flexDirection: 'column',
+                  transform: `translateZ(${zOff}px)`,
+                  boxShadow: `0 0 24px ${color}33`,
+                  backdropFilter: 'blur(6px)',
+                  cursor: 'default',
+                }}
+              >
+                {label.split('\n').map((ln, i) => (
+                  <span key={i} style={{ fontSize: 9, fontWeight: 700, color, lineHeight: 1.35, textAlign: 'center', letterSpacing: '0.06em' }}>{ln}</span>
+                ))}
+              </motion.div>
+            );
+          })}
+
+          {/* Centre orchestrator node */}
+          <div style={{
+            position: 'absolute', top: '50%', left: '50%',
+            width: 72, height: 72,
+            marginLeft: -36, marginTop: -36,
+            borderRadius: 20,
+            background: 'linear-gradient(135deg, rgba(201,106,46,0.3), rgba(201,106,46,0.08))',
+            border: '2px solid rgba(201,106,46,0.6)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column',
+            boxShadow: '0 0 36px rgba(201,106,46,0.25), inset 0 1px 0 rgba(255,255,255,0.08)',
+            zIndex: 10,
+          }}>
+            <motion.div
+              animate={{ scale: [1, 1.08, 1] }}
+              transition={{ duration: 2.2, repeat: Infinity }}
+              style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}
+            >
+              <span style={{ fontSize: 10, fontWeight: 800, color: '#c96a2e', letterSpacing: '0.1em' }}>NARAYAN</span>
+              <span style={{ fontSize: 8, color: 'rgba(201,106,46,0.6)', letterSpacing: '0.06em', marginTop: 2 }}>ORCHESTRATOR</span>
+            </motion.div>
+          </div>
+
+          {/* Animated SVG message packets (lines from centre → each agent) */}
+          <svg
+            style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', pointerEvents: 'none', overflow: 'visible' }}
+          >
+            <defs>
+              {specialists.map(({ color, angle }) => (
+                <radialGradient key={`rg-${angle}`} id={`rg${angle}`}>
+                  <stop offset="0%" stopColor={color} stopOpacity="0.8" />
+                  <stop offset="100%" stopColor={color} stopOpacity="0" />
+                </radialGradient>
+              ))}
+            </defs>
+            {specialists.map(({ color, angle }, si) => {
+              const rad = (angle * Math.PI) / 180;
+              const cx = 0, cy = 0;
+              const tx = Math.cos(rad) * R;
+              const ty = Math.sin(rad) * R * 0.42;
+              return (
+                <motion.circle
+                  key={`pkt-${angle}`}
+                  r="4"
+                  fill={color}
+                  initial={{ cx: '50%', cy: '50%', opacity: 0.9, scale: 1 }}
+                  animate={{
+                    cx: ['50%', `calc(50% + ${tx}px)`, '50%'],
+                    cy: ['50%', `calc(50% + ${ty}px)`, '50%'],
+                    opacity: [0, 1, 0.8, 0],
+                    scale: [0.5, 1, 0.8, 0],
+                  }}
+                  transition={{
+                    duration: 2.2,
+                    repeat: Infinity,
+                    delay: si * 0.6,
+                    ease: 'easeInOut',
+                  }}
+                />
+              );
+            })}
+          </svg>
+
+          {/* Pulse ring on orchestrator */}
+          {[0, 1].map(i => (
+            <motion.div
+              key={`ring-${i}`}
+              animate={{ scale: [1, 2.2], opacity: [0.4, 0] }}
+              transition={{ duration: 2.4, repeat: Infinity, delay: i * 1.2, ease: 'easeOut' }}
+              style={{
+                position: 'absolute', top: '50%', left: '50%',
+                width: 72, height: 72,
+                marginLeft: -36, marginTop: -36,
+                borderRadius: 20,
+                border: '1.5px solid rgba(201,106,46,0.5)',
+                pointerEvents: 'none',
+              }}
+            />
+          ))}
+        </motion.div>
+      </div>
+
+      {/* Legend */}
+      <div className="relative flex flex-wrap items-center justify-center gap-3 border-t border-white/8 px-6 py-3">
+        {specialists.map(({ label, color }) => (
+          <div key={label} className="flex items-center gap-1.5">
+            <span className="size-2 rounded-full" style={{ background: color }} />
+            <span className="text-[0.6rem] uppercase tracking-[0.1em]" style={{ color: 'rgba(255,255,255,0.45)' }}>{label.replace('\n', ' ')}</span>
+          </div>
+        ))}
+        <div className="flex items-center gap-1.5">
+          <span className="inline-block h-px w-4 bg-gradient-to-r from-amber-500 to-transparent" />
+          <span className="text-[0.6rem] uppercase tracking-[0.1em] text-white/30">ACP message</span>
+        </div>
+      </div>
+    </motion.div>
+  );
+}
+
 export default function LandingPage({ onEnterApp, onSignIn }) {
   return (
     <main className="relative min-h-screen overflow-hidden bg-[radial-gradient(circle_at_top_left,_rgba(201,106,46,0.16),_transparent_28%),radial-gradient(circle_at_top_right,_rgba(59,130,246,0.12),_transparent_24%),linear-gradient(180deg,_#f9f6f2_0%,_#f4f0ea_48%,_#efe8de_100%)] text-tx-1">
@@ -500,6 +700,68 @@ export default function LandingPage({ onEnterApp, onSignIn }) {
         </section>
 
         <BenefitsScroller />
+
+        <div className="my-12 flex items-center gap-4">
+          <div className="h-px flex-1 bg-gradient-to-r from-transparent via-border to-transparent" />
+          <Layers3 className="size-4 text-accent/40" />
+          <div className="h-px flex-1 bg-gradient-to-r from-transparent via-border to-transparent" />
+        </div>
+
+        <section className="pb-12">
+          <SectionHeading
+            eyebrow="Open Standard"
+            title="Built on ACP: agents that collaborate, not just compute"
+            text="Narayan is built natively on the Agent Communication Protocol (ACP) — an open IBM/BeeAI standard that lets autonomous agents delegate, stream results, and coordinate across trust boundaries without any centralised controller."
+          />
+
+          <div className="mt-12 grid gap-8 lg:grid-cols-2">
+            {/* Left: how Narayan uses ACP */}
+            <div className="space-y-4">
+              {[
+                {
+                  badge: 'Delegation',
+                  color: 'bg-accent-soft text-accent',
+                  title: 'One agent, many specialists',
+                  body: 'Your top-level Narayan agent breaks a job into sub-tasks and spawns specialist agents via ACP. The invoice agent calls a PO-matching agent. The support agent calls a knowledge-search agent. Each runs independently and returns a typed result.',
+                },
+                {
+                  badge: 'Streaming',
+                  color: 'bg-info-soft text-info',
+                  title: 'Real-time progress, not black boxes',
+                  body: 'ACP supports server-sent streaming, so Narayan surfaces live progress as agents work — partial answers, intermediate steps, and status changes appear in your audit trail the moment they happen.',
+                },
+                {
+                  badge: 'Orchestration',
+                  color: 'bg-vio/15 text-vio',
+                  title: 'Multi-agent DAG execution',
+                  body: 'Complex workflows fan out across agent networks. Narayan\'s DAG engine schedules ACP calls in parallel, waits for dependencies, and merges results — all expressed in the same job spec you write in plain English.',
+                },
+                {
+                  badge: 'Fault isolation',
+                  color: 'bg-accent-soft text-accent',
+                  title: 'Agents fail safely, not silently',
+                  body: 'Because every ACP call is an isolated request with a typed response, a failing specialist agent never crashes the whole workflow. Narayan catches, logs, and either retries or escalates — with a full trace attached.',
+                },
+              ].map(({ badge, color, title, body }) => (
+                <div
+                  key={badge}
+                  className="group relative overflow-hidden rounded-[1.5rem] border border-border bg-bg-card/90 p-5 hover:border-accent/30 transition-all duration-300"
+                >
+                  <div className="flex items-start gap-4">
+                    <span className={`shrink-0 rounded-xl px-2.5 py-1 text-[0.65rem] font-bold uppercase tracking-[0.15em] ${color}`}>{badge}</span>
+                    <div>
+                      <h3 className="text-sm font-semibold text-tx-1">{title}</h3>
+                      <p className="mt-1.5 text-xs leading-6 text-tx-2">{body}</p>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {/* Right: 3-D ACP diagram */}
+            <ACPDiagram />
+          </div>
+        </section>
 
         <div className="my-12 flex items-center gap-4">
           <div className="h-px flex-1 bg-gradient-to-r from-transparent via-border to-transparent" />

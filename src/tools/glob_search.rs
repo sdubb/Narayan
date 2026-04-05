@@ -10,6 +10,9 @@ impl Tool for GlobSearchTool {
     fn name(&self) -> &str {
         "glob_search"
     }
+    fn category(&self) -> &'static str {
+        "filesystem"
+    }
     fn description(&self) -> &str {
         "Find files matching a glob pattern (e.g. '**/*.rs', 'src/*.toml')."
     }

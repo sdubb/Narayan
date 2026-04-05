@@ -9,6 +9,9 @@ impl Tool for FileEditTool {
     fn name(&self) -> &str {
         "file_edit"
     }
+    fn category(&self) -> &'static str {
+        "filesystem"
+    }
     fn description(&self) -> &str {
         "Edit a file by replacing occurrences of a string or regex pattern with a new string. \
          Fails if the 'old' string is not found, preventing silent no-ops."

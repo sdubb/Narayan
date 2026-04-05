@@ -3,7 +3,7 @@
 //! Plan mode is the one-time setup phase where a user describes what an agent
 //! should do in plain business language. The LLM infers the workflow, and the
 //! plan-mode flow either asks the next missing question or turns structured
-//! setup needs into inline cards. There is no separate planner the user has
+//! setup needs into inline cards. There is no separate planning service the user has
 //! to interact with.
 //! The user never sees tool names or connector IDs.
 //!
@@ -23,7 +23,6 @@
 //!   Complete               → save and close
 
 use std::{
-    collections::BTreeMap,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -37,7 +36,8 @@ use uuid::Uuid;
 use crate::{
     agent::definition::{
         AgentDefinition, AgentDefinitionStatus, AgentRole, ExecutionStrategy, PermissionMode, PlanModeMessage,
-        PlanModePhase, PlanModePreflightResult, PlanModeSandboxResult, PlanModeSession, PlanModeTestCheck,
+        PlanModeCompilerStage, PlanModePhase, PlanModePreflightResult, PlanModeSandboxResult, PlanModeSession,
+        PlanModeTestCheck,
         PlanModeTestConfidence, PlanModeTestResult, PlanModeTestStatus, PlanModeTestStepResult, RoleCategory,
         RoleStatus, TenantConnector, ToolPool, TriggerDef, TriggerType,
     },
@@ -48,7 +48,11 @@ use crate::{
     providers::Message,
     state::{SessionTask, SessionTaskOutput, SessionTaskResultStatus, SessionTaskStatus},
     storage::PostgresStore,
-    tools::ToolRegistry,
+    tools::{toolregistry::dsl_generation_prompt_fragment, ToolRegistry},
+    agent::plan_mode_registry::{
+        build_capability_directory, build_detailed_capability_context, inferred_preferred_tools,
+        missing_tool_categories,
+    },
 };
 
 // ── Built-in connector catalogue ─────────────────────────────────────────────
@@ -77,79 +81,8 @@ impl IntentExtractor {
         description: &str,
         capability_directory: &str,
     ) -> Result<serde_json::Value> {
-        let capability_section = if capability_directory.is_empty() {
-            String::new()
-        } else {
-            format!("\n\nCAPABILITY DIRECTORY:\n{}", capability_directory)
-        };
-
-        let system = format!(
-            r#"You are a business analyst helping configure an AI automation agent.
-Extract structured intent AND generate specific clarifying questions.
-
-Work in two stages internally:
-1. Infer the business workflow shape and the capability categories needed.
-2. Pick exact connectors or tools only when the directory/context makes them clear.
-
-Respond ONLY with valid JSON. Schema:
-{{
-  "data_sources": ["systems the agent reads from"],
-  "write_targets": ["systems the agent writes to"],
-  "actions": ["what the agent does, plain English verbs"],
-  "category": "sales_revops|customer_support|devops|finance_accounting|hr_people_ops|legal_contract|research_analyst|software_engineer|marketing|general",
-  "preferred_tool_categories": ["tool category names such as data, web, automation"],
-  "preferred_tools": ["exact tool names from the capability directory only"],
-  "data_engine_use_cases": ["filtering, mapping, cleaning, scoring, ranking, grouping, aggregation, schema-aligned extraction"],
-  "data_engine_limits": ["no free-form scripts", "no browser automation", "no remote execution", "no arbitrary custom code"],
-  "needed_connector_categories": ["connector category suffixes such as crm, support, communication"],
-  "candidate_connectors": ["exact installed or built-in connector names if likely"],
-  "missing_capabilities": ["custom_db|custom_api|connector/<category>|tool/<category>"],
-  "workflow_outline": ["short ordered workflow hints. If exact tool arguments are known, append them as inline JSON e.g., 'Fetch users {{\"query\": \"SELECT * FROM u\"}}'"],
-  "uses_external_db": "exact saved database name, true if a database is needed but no saved name is known yet, or null",
-  "uses_external_api": "registered API name or null",
-  "trigger_hint": "schedule|webhook|user_message|manual",
-  "trigger_cron": "best-guess cron expression if schedule, else null",
-  "trigger_source": "connector name if webhook, else null",
-  "trigger_event": "event name if webhook e.g. lead_created, else null",
-  "trigger_confidence": "high|medium|low",
-  "trigger_confirmation": "confirmation question if medium/low confidence, else null",
-  "output_hint": "workspace|connector_record|slack_message|email_draft|email_send|report|notification",
-  "output_destination_hint": "where exactly — workspace path, connector name, or channel",
-  "output_questions": ["specific missing output detail questions, empty array if clear"],
-  "responsibilities": [
-    {{"name": "short role name", "actions": ["verbs"], "trigger_hint": "schedule|webhook|manual"}}
-  ],
-  "multi_role_suggested": false,
-  "multi_role_reason": "why split is recommended, or null",
-  "clarifying_questions": []
-}}{}
-
-Rules:
-- Use exact tool names only from the capability directory or detailed context
-- Tool contracts in the detailed context are authoritative; read Purpose, Use when, Avoid when, Input, Output, and Output schema before choosing a tool
-- Prefer data_engine for deterministic record workflows when the task fits the typed DSL
-- Do not suggest free-form code or runtime custom tools when data_engine can express the workflow
-- Use data_extractor first for semi-structured source extraction from HTML/text/PDF-like content, then use data_engine for deterministic record transforms
-- Use exact connector names only when they are clearly supported by the context
-- Uploaded documents, local files, and workspace-only summaries do not imply an external connector.
-  If the agent only reads uploaded documents or local files and summarizes them in chat/workspace,
-  leave candidate_connectors empty, needed_connector_categories empty, and missing_capabilities empty.
-- If the user likely needs a database not in the installed connectors, prefer missing_capabilities=["custom_db"]
-- If the user likely needs a custom REST backend, prefer missing_capabilities=["custom_api"]
-- If the needed connector category is clear but no installed connector is obvious, add connector/<category> to missing_capabilities
-- workflow_outline should be ordered. If the exact arguments for a specific tool are known, append them as inline JSON to the hint string to enable deterministic fast-path execution.
-- For deterministic filtering, mapping, cleaning, scoring, ranking, grouping, aggregation, and schema-aligned extraction, use data_engine
-- If a workflow needs arbitrary code or a dedicated execution sandbox later, mark it as a missing capability instead of inventing a runtime tool
-- Use data_extractor first when the input is semi-structured source material; use data_engine after extraction for record-level workflows
-- trigger_confidence is high only when cron/event is fully unambiguous
-- trigger_confidence medium: parsed but missing detail (no time, no connector named)
-- trigger_confidence low: trigger type itself unclear
-- output_questions: only ask what you cannot infer
-- multi_role_suggested: true only if 2+ clearly distinct responsibilities with different triggers or outputs
-- responsibilities: always list at least one entry"#,
-            capability_section
-        );
-
+        let system =
+            crate::agent::plan_mode_steps::intent_extractor_system_prompt(capability_directory, dsl_generation_prompt_fragment());
         let user = format!("Configure an agent to do:\n\n{}", description);
 
         let first_pass = GatewayRequest::new(
@@ -171,9 +104,11 @@ Rules:
         detailed_context: &str,
     ) -> Result<serde_json::Value> {
         let refine_system = format!(
-            r#"You are refining a previously inferred agent configuration.
+            r#"You are repairing a previously inferred compiler draft.
 Use the detailed capability context below to keep what was right, correct what was vague,
 and choose exact tools/connectors where supported.
+The detailed capability context is organized as three candidate slices. Prefer the most specific matching slice and only widen when necessary.
+If a REGISTRY CANDIDATE SET JSON block is present, treat it as authoritative and choose tools/connectors only from those slices.
 
 Return ONLY valid JSON with the exact same schema as before.
 
@@ -189,9 +124,11 @@ Rules:
 - Fill candidate_connectors with exact names only when the connector is clearly relevant
 - Uploaded documents, local files, and workspace-only summaries remain connector-free unless the detailed context explicitly requires a connector.
 - Keep missing_capabilities accurate if no installed/custom option satisfies the need
-- Keep workflow_outline ordered and practical
+- Keep workflow_dsl ordered, typed, and practical
+{}
 "#,
-            detailed_context
+            detailed_context,
+            dsl_generation_prompt_fragment()
         );
 
         let refine_user = format!(
@@ -211,9 +148,9 @@ Rules:
     }
 
     fn parse_json_response(&self, raw: String) -> Result<serde_json::Value> {
-        let cleaned = raw.trim().trim_start_matches("```json").trim_start_matches("```").trim_end_matches("```").trim();
+        let cleaned = clean_json_markdown_response(&raw);
 
-        serde_json::from_str(cleaned).map_err(|e| {
+        serde_json::from_str(&cleaned).map_err(|e| {
             anyhow::anyhow!("intent extraction returned invalid JSON: {} — raw: {}", e, &raw[..raw.len().min(200)])
         })
     }
@@ -223,7 +160,7 @@ Rules:
 
 /// Maps extracted intent to specific connector names + tool overrides.
 /// Returns (resolved_connectors, tool_overrides, clarifying_question)
-/// tool_overrides are non-connector tools like external_db, external_api
+/// tool_overrides are non-connector tools like external_db, external_api, or acp_session bindings
 pub struct ConnectorResolver;
 
 impl ConnectorResolver {
@@ -266,13 +203,18 @@ impl ConnectorResolver {
             .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
             .unwrap_or_default();
 
-        // ── Tool overrides for external_db and external_api ─────────────
+        // ── Tool overrides for external_db, external_api, and ACP ─────────────
         let needs_db_connection = intent_needs_database_connection(intent);
+        let needs_acp_connection = intent_needs_acp_connection(intent);
         let mut tool_overrides: Vec<String> = Vec::new();
         let database_connectors: Vec<&TenantConnector> =
             tenant_connectors.iter().filter(|tc| tc.category == "connector/database").collect();
+        let acp_connectors: Vec<&TenantConnector> =
+            tenant_connectors.iter().filter(|tc| tc.category.contains("acp") || tc.category.contains("agent")).collect();
         let explicit_db_name = intent_named_external_db(intent)
             .filter(|db_name| database_connectors.iter().any(|connector| connector.name == *db_name));
+        let explicit_acp_name = intent_named_acp_peer(intent)
+            .filter(|peer_name| acp_connectors.iter().any(|connector| connector.name == *peer_name));
 
         // If the intent explicitly named an external_db
         if let Some(db_name) = explicit_db_name.as_ref() {
@@ -284,6 +226,11 @@ impl ConnectorResolver {
         if let Some(api_name) = intent["uses_external_api"].as_str() {
             if !api_name.is_empty() && api_name != "null" {
                 tool_overrides.push(format!("external_api:{}", api_name));
+            }
+        }
+        if let Some(peer_name) = explicit_acp_name.as_ref() {
+            if !peer_name.is_empty() && peer_name != "null" {
+                tool_overrides.push(format!("acp_session:{}", peer_name));
             }
         }
 
@@ -299,6 +246,32 @@ impl ConnectorResolver {
                     let names = multiple.iter().map(|tc| tc.name.clone()).collect::<Vec<_>>();
                     let question = format!(
                         "You have multiple database connections installed: {}. Which one should this agent use?",
+                        names.join(", ")
+                    );
+                    return (Vec::new(), Vec::new(), Some(question));
+                }
+            }
+        }
+
+        if explicit_acp_name.is_none() && needs_acp_connection {
+            match acp_connectors.as_slice() {
+                [] => {
+                    return (
+                        Vec::new(),
+                        Vec::new(),
+                        Some(
+                            "This workflow needs an ACP peer for internal agent-to-agent communication. Use the inline ACP connection card to add it, or tell me the exact saved ACP peer name if it already exists."
+                                .into(),
+                        ),
+                    );
+                }
+                [only_acp] => {
+                    tool_overrides.push(format!("acp_session:{}", only_acp.name));
+                }
+                multiple => {
+                    let names = multiple.iter().map(|tc| tc.name.clone()).collect::<Vec<_>>();
+                    let question = format!(
+                        "You have multiple ACP peers installed for internal agent-to-agent communication: {}. Which one should this agent use?",
                         names.join(", ")
                     );
                     return (Vec::new(), Vec::new(), Some(question));
@@ -327,6 +300,18 @@ impl ConnectorResolver {
         let mut resolved: Vec<String> = Vec::new();
         let mut ambiguous_categories: Vec<(&str, Vec<&str>)> = Vec::new();
         let mut resolved_categories: std::collections::HashSet<&str> = Default::default();
+
+        if let Some(peer_name) = explicit_acp_name.as_ref() {
+            if !resolved.iter().any(|name| name == peer_name) {
+                resolved.push(peer_name.clone());
+            }
+        }
+        if needs_acp_connection && explicit_acp_name.is_none() && acp_connectors.len() == 1 {
+            let only_peer = acp_connectors[0].name.clone();
+            if !resolved.iter().any(|name| name == &only_peer) {
+                resolved.push(only_peer);
+            }
+        }
 
         for requested in &candidate_connectors {
             if installed.iter().any(|name| name == requested)
@@ -457,6 +442,11 @@ fn build_missing_connector_question(
             "This may need an MCP server connection. Use the inline connection card to add it, or tell me the exact saved MCP server name if it already exists.".into()
         );
     }
+    if missing_capabilities.iter().any(|value| value == "connector/acp") {
+        return Some(
+            "This may need an ACP peer connection for internal agent-to-agent communication. Use the inline connection card to add it, or tell me the exact saved ACP peer name if it already exists.".into()
+        );
+    }
 
     None
 }
@@ -474,18 +464,65 @@ fn text_mentions_local_document_workflow(text: &str) -> bool {
     has_document_terms && has_read_terms
 }
 
-fn intent_prefers_local_document_workflow(intent: &serde_json::Value) -> bool {
+fn intent_text_for_keys(intent: &serde_json::Value, keys: &[&str]) -> String {
     let mut text = String::new();
-    for key in ["data_sources", "actions", "workflow_outline"] {
-        if let Some(values) = intent[key].as_array() {
+
+    for key in keys {
+        if let Some(values) = intent[*key].as_array() {
             for value in values {
                 if let Some(text_value) = value.as_str() {
+                    text.push_str(text_value);
+                    text.push(' ');
+                } else if let Some(object) = value.as_object() {
+                    if let Some(text_value) = object.get("description").and_then(|v| v.as_str()) {
+                        text.push_str(text_value);
+                        text.push(' ');
+                    }
+                    if let Some(text_value) = object.get("type").and_then(|v| v.as_str()) {
+                        text.push_str(text_value);
+                        text.push(' ');
+                    }
+                    if let Some(text_value) = object.get("tool_hint").or_else(|| object.get("tool")).and_then(|v| v.as_str()) {
+                        text.push_str(text_value);
+                        text.push(' ');
+                    }
+                    if let Some(text_value) = object.get("resource_hint").or_else(|| object.get("resource")).and_then(|v| v.as_str()) {
+                        text.push_str(text_value);
+                        text.push(' ');
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(steps) = intent["workflow_dsl"].as_array() {
+        for value in steps {
+            if let Some(object) = value.as_object() {
+                if let Some(text_value) = object.get("description").and_then(|v| v.as_str()) {
+                    text.push_str(text_value);
+                    text.push(' ');
+                }
+                if let Some(text_value) = object.get("type").and_then(|v| v.as_str()) {
+                    text.push_str(text_value);
+                    text.push(' ');
+                }
+                if let Some(text_value) = object.get("tool_hint").or_else(|| object.get("tool")).and_then(|v| v.as_str()) {
+                    text.push_str(text_value);
+                    text.push(' ');
+                }
+                if let Some(text_value) = object.get("resource_hint").or_else(|| object.get("resource")).and_then(|v| v.as_str()) {
                     text.push_str(text_value);
                     text.push(' ');
                 }
             }
         }
     }
+
+    text
+}
+
+fn intent_prefers_local_document_workflow(intent: &serde_json::Value) -> bool {
+    let mut text = intent_text_for_keys(intent, &["data_sources", "actions", "workflow_dsl"]);
     if let Some(output_hint) = intent["output_hint"].as_str() {
         text.push_str(output_hint);
         text.push(' ');
@@ -499,18 +536,7 @@ fn intent_prefers_local_document_workflow(intent: &serde_json::Value) -> bool {
 }
 
 fn intent_contains_database_terms(intent: &serde_json::Value) -> bool {
-    let mut text = String::new();
-    for key in ["data_sources", "write_targets", "actions", "workflow_outline"] {
-        if let Some(values) = intent[key].as_array() {
-            for value in values {
-                if let Some(text_value) = value.as_str() {
-                    text.push_str(text_value);
-                    text.push(' ');
-                }
-            }
-        }
-    }
-
+    let text = intent_text_for_keys(intent, &["data_sources", "write_targets", "actions", "workflow_dsl"]);
     let lower = text.to_lowercase();
     [
         "database",
@@ -531,18 +557,7 @@ fn intent_contains_database_terms(intent: &serde_json::Value) -> bool {
 }
 
 fn intent_contains_api_terms(intent: &serde_json::Value) -> bool {
-    let mut text = String::new();
-    for key in ["data_sources", "write_targets", "actions", "workflow_outline"] {
-        if let Some(values) = intent[key].as_array() {
-            for value in values {
-                if let Some(text_value) = value.as_str() {
-                    text.push_str(text_value);
-                    text.push(' ');
-                }
-            }
-        }
-    }
-
+    let text = intent_text_for_keys(intent, &["data_sources", "write_targets", "actions", "workflow_dsl"]);
     let lower = text.to_lowercase();
     ["rest api", "api", "endpoint", "endpoints", "backend", "http", "web service", "service api", "internal api"]
         .iter()
@@ -550,22 +565,33 @@ fn intent_contains_api_terms(intent: &serde_json::Value) -> bool {
 }
 
 fn intent_contains_mcp_terms(intent: &serde_json::Value) -> bool {
-    let mut text = String::new();
-    for key in ["data_sources", "write_targets", "actions", "workflow_outline"] {
-        if let Some(values) = intent[key].as_array() {
-            for value in values {
-                if let Some(text_value) = value.as_str() {
-                    text.push_str(text_value);
-                    text.push(' ');
-                }
-            }
-        }
-    }
-
+    let text = intent_text_for_keys(intent, &["data_sources", "write_targets", "actions", "workflow_dsl"]);
     let lower = text.to_lowercase();
     ["mcp", "model context protocol", "tools/list", "tools/call", "json-rpc", "json rpc", "mcp server"]
         .iter()
         .any(|term| lower.contains(term))
+}
+
+fn intent_contains_acp_terms(intent: &serde_json::Value) -> bool {
+    let text = intent_text_for_keys(intent, &["data_sources", "write_targets", "actions", "workflow_dsl"]);
+    let lower = text.to_lowercase();
+    [
+        "acp",
+        "agent communication protocol",
+        "agent-to-agent",
+        "agent to agent",
+        "internal agent",
+        "internal agents",
+        "child agent",
+        "parent agent",
+        "teammate agent",
+        "peer",
+        "send message",
+        "receive messages",
+        "message another agent",
+    ]
+    .iter()
+    .any(|term| lower.contains(term))
 }
 
 pub(crate) fn intent_named_external_db(intent: &serde_json::Value) -> Option<String> {
@@ -579,9 +605,26 @@ pub(crate) fn intent_named_external_db(intent: &serde_json::Value) -> Option<Str
     None
 }
 
+pub(crate) fn intent_named_acp_peer(intent: &serde_json::Value) -> Option<String> {
+    if let Some(peer_name) = intent["uses_acp_peer"].as_str() {
+        let trimmed = peer_name.trim();
+        if !trimmed.is_empty() && trimmed != "null" {
+            return Some(trimmed.to_string());
+        }
+    }
+
+    None
+}
+
 fn persist_selected_external_db(intent: &mut serde_json::Value, db_name: &str) {
     if let Some(intent_object) = intent.as_object_mut() {
         intent_object.insert("uses_external_db".into(), serde_json::json!(db_name));
+    }
+}
+
+fn persist_selected_acp_peer(intent: &mut serde_json::Value, peer_name: &str) {
+    if let Some(intent_object) = intent.as_object_mut() {
+        intent_object.insert("uses_acp_peer".into(), serde_json::json!(peer_name));
     }
 }
 
@@ -616,10 +659,30 @@ pub(crate) fn intent_needs_mcp_connection(intent: &serde_json::Value) -> bool {
         .map(|arr| arr.iter().any(|value| value.as_str() == Some("connector/mcp")))
         .unwrap_or(false)
         || intent["needed_connector_categories"]
-            .as_array()
-            .map(|arr| arr.iter().any(|value| value.as_str() == Some("mcp")))
-            .unwrap_or(false)
+        .as_array()
+        .map(|arr| arr.iter().any(|value| value.as_str() == Some("mcp")))
+        .unwrap_or(false)
         || intent_contains_mcp_terms(intent)
+}
+
+pub(crate) fn intent_needs_acp_connection(intent: &serde_json::Value) -> bool {
+    intent["missing_capabilities"]
+        .as_array()
+        .map(|arr| arr.iter().any(|value| value.as_str() == Some("connector/acp")))
+        .unwrap_or(false)
+        || intent["needed_connector_categories"]
+            .as_array()
+            .map(|arr| arr.iter().any(|value| value.as_str() == Some("acp")))
+            .unwrap_or(false)
+        || intent["uses_acp_peer"].as_bool().unwrap_or(false)
+        || intent["uses_acp_peer"]
+            .as_str()
+            .map(|value| {
+                let trimmed = value.trim();
+                !trimmed.is_empty() && trimmed != "null"
+            })
+            .unwrap_or(false)
+        || intent_contains_acp_terms(intent)
 }
 
 #[cfg(test)]
@@ -679,6 +742,14 @@ fn answer_mentions_tenant_mcp(answer_lower: &str, tenant_connectors: &[TenantCon
     tenant_connectors
         .iter()
         .filter(|tc| tc.category.contains("mcp"))
+        .find(|tc| contains_connector_name(answer_lower, &tc.name))
+        .map(|tc| tc.name.clone())
+}
+
+fn answer_mentions_tenant_acp(answer_lower: &str, tenant_connectors: &[TenantConnector]) -> Option<String> {
+    tenant_connectors
+        .iter()
+        .filter(|tc| tc.category.contains("acp") || tc.category.contains("agent"))
         .find(|tc| contains_connector_name(answer_lower, &tc.name))
         .map(|tc| tc.name.clone())
 }
@@ -853,7 +924,7 @@ impl PlanModeManager {
         let research_context = self.build_plan_mode_research_context(session, role);
         let system = "You are synthesizing a plan-mode research memo for an automation role. \
 Return strict JSON only. Do not produce executable runtime output. \
-The memo must help compile the configuration into a deterministic workflow outline.\n\n\
+The memo must help compile the configuration into a deterministic workflow artifact.\n\n\
 Required JSON shape:\n{\n  \"summary\": \"...\",\n  \"findings\": [\"...\"],\n  \"assumptions\": [\"...\"],\n  \"risks\": [\"...\"],\n  \"workflow_hints\": [\"...\"]\n}\n\n\
 Rules:\n\
 - Capture only durable planning signal, not chatty prose\n\
@@ -870,7 +941,8 @@ Rules:\n\
             vec![Message::system(system), Message::user(user)],
         );
         let raw = self.gateway.chat(request).await?.content.unwrap_or_default();
-        let memo = match serde_json::from_str::<AdaptiveResearchMemo>(clean_json_markdown_response(&raw)) {
+        let cleaned = clean_json_markdown_response(&raw);
+        let memo = match serde_json::from_str::<AdaptiveResearchMemo>(&cleaned) {
             Ok(memo) => memo,
             Err(error) => {
                 tracing::warn!(
@@ -994,9 +1066,8 @@ Rules:\n\
             role.tools.dedup();
         }
 
-        role.execution_guidelines.workflow_outline.clear();
+        role.execution_guidelines.compiled_workflow = None;
         apply_execution_hints(role, &refined);
-        materialize_workflow_outline(role, &refined);
         // Only overwrite the trigger if the user hasn't already confirmed it
         // during the clarification step (confidence == High). Otherwise the
         // refinement LLM response may omit or null-out trigger_cron, discarding
@@ -1099,9 +1170,63 @@ Rules:\n\
             }
         };
 
-        if role.execution_guidelines.workflow_outline.is_empty() {
-            if let Some(intent) = session.intent_cache.as_ref() {
-                materialize_workflow_outline(&mut role, intent);
+        if role.execution_guidelines.compiled_workflow.is_none() {
+            let intent = session.intent_cache.as_ref().cloned().unwrap_or_else(|| serde_json::json!({}));
+            match WorkflowCompiler::compile(&role, &intent, &self.tools) {
+                Ok(CompilerResult::Ready(compiled)) => {
+                    role.execution_guidelines.compiled_workflow = Some(compiled);
+                }
+                Ok(CompilerResult::NeedsCard(card)) => {
+                    let summary = format!(
+                        "Compiler needs setup card before the draft can be tested: {} ({})",
+                        card.card_type, card.binding_target
+                    );
+                    return Ok(PlanModeTestResult {
+                        status: PlanModeTestStatus::Fail,
+                        confidence: PlanModeTestConfidence::Low,
+                        preflight: PlanModePreflightResult {
+                            status: PlanModeTestStatus::Fail,
+                            checks: vec![PlanModeTestCheck {
+                                label: "compiled workflow available".into(),
+                                success: false,
+                                detail: Some(summary.clone()),
+                            }],
+                            summary: summary.clone(),
+                        },
+                        sandbox: PlanModeSandboxResult {
+                            status: PlanModeTestStatus::Fail,
+                            steps: Vec::new(),
+                            summary: "Sandbox skipped because the compiler needs setup first.".into(),
+                        },
+                        steps: Vec::new(),
+                        criteria_checks: vec![],
+                        summary,
+                    });
+                }
+                Err(error) => {
+                    let summary = format!("Compiler failed before sandboxing: {}", error);
+                    return Ok(PlanModeTestResult {
+                        status: PlanModeTestStatus::Fail,
+                        confidence: PlanModeTestConfidence::Low,
+                        preflight: PlanModePreflightResult {
+                            status: PlanModeTestStatus::Fail,
+                            checks: vec![PlanModeTestCheck {
+                                label: "compiled workflow available".into(),
+                                success: false,
+                                detail: Some(summary.clone()),
+                            }],
+                            summary: summary.clone(),
+                        },
+                        sandbox: PlanModeSandboxResult {
+                            status: PlanModeTestStatus::Fail,
+                            steps: Vec::new(),
+                            summary: "Sandbox skipped because compiler validation failed.".into(),
+                        },
+                        steps: Vec::new(),
+                        criteria_checks: vec![],
+                        summary,
+                    });
+                }
             }
         }
 
@@ -1120,8 +1245,33 @@ Rules:\n\
         .await;
         let _ = tokio::fs::write(&sandbox_output_path, b"").await;
 
-        let synthetic_input = synthetic_input_data_for_role(&role, session, &workspace_root);
-        let plan = crate::agent::planner::Plan::from_workflow_outline(&role, &synthetic_input);
+        let _synthetic_input = synthetic_input_data_for_role(&role, session, &workspace_root);
+        let plan = match role.execution_guidelines.compiled_workflow.as_ref() {
+            Some(compiled) => crate::agent::planner::Plan::from_compiled_workflow(compiled, &role),
+            None => {
+                return Ok(PlanModeTestResult {
+                    status: PlanModeTestStatus::Fail,
+                    confidence: PlanModeTestConfidence::Low,
+                    preflight: PlanModePreflightResult {
+                        status: PlanModeTestStatus::Fail,
+                        checks: vec![PlanModeTestCheck {
+                            label: "compiled workflow".into(),
+                            success: false,
+                            detail: Some("compiler preview did not produce a compiled workflow artifact".into()),
+                        }],
+                        summary: "No compiled workflow artifact is available for testing.".into(),
+                    },
+                    sandbox: PlanModeSandboxResult {
+                        status: PlanModeTestStatus::Fail,
+                        steps: Vec::new(),
+                        summary: "Sandbox skipped because no compiled workflow was available.".into(),
+                    },
+                    steps: Vec::new(),
+                    criteria_checks: vec![],
+                    summary: "No compiled workflow artifact is available for testing.".into(),
+                });
+            }
+        };
 
         let preflight = self.preflight_workflow(&plan, &role).await;
         let sandbox = if matches!(preflight.status, PlanModeTestStatus::Fail) {
@@ -1202,6 +1352,9 @@ Rules:\n\
             reused_from_session_id: None,
             repair_root_session_id: Some(session_id.clone()),
             phase: PlanModePhase::CapturingIntent,
+            compiler_stage: crate::agent::definition::PlanModeCompilerStage::Intent,
+            compiler_repair_passes: 0,
+            compiler_validation_issues: Vec::new(),
             intent_cache: None,
             pending_steps: Vec::new(),
             created_at: now,
@@ -1589,9 +1742,126 @@ Rules:\n\
         }
 
         // Move to the combined clarifications phase — steps queue drives it
+        let draft_role = session.draft_role.clone().unwrap();
+        let (repaired_intent, compiler_question) = self
+            .validate_and_repair_compiler_draft(
+                session,
+                &draft_role,
+                cached_intent.clone(),
+                &installed,
+                &tenant_connectors,
+            )
+            .await?;
+        cached_intent = repaired_intent;
+        session.intent_cache = Some(cached_intent.clone());
+        if let Some(question) = compiler_question {
+            return Ok(question);
+        }
         session.phase = PlanModePhase::CapturingClarifications;
         Ok(self.build_step_queue_and_ask(session, &cached_intent).await)
     }
+    async fn validate_and_repair_compiler_draft(
+        &self,
+        session: &mut PlanModeSession,
+        role: &AgentRole,
+        intent: serde_json::Value,
+        installed: &[String],
+        tenant_connectors: &[TenantConnector],
+    ) -> Result<(serde_json::Value, Option<String>)> {
+        let mut current_intent = intent;
+        let mut repair_passes = session.compiler_repair_passes;
+        let mut last_issues: Vec<String> = Vec::new();
+
+        loop {
+            session.compiler_stage = PlanModeCompilerStage::Validate;
+            session.compiler_validation_issues = last_issues.clone();
+
+            match WorkflowCompiler::compile(role, &current_intent, &self.tools) {
+                Ok(CompilerResult::Ready(_compiled)) => {
+                    if let Some(role) = session.draft_role.as_mut() {
+                        role.execution_guidelines.compiled_workflow = Some(_compiled.clone());
+                    }
+                    session.compiler_stage = PlanModeCompilerStage::Bind;
+                    session.compiler_repair_passes = repair_passes;
+                    session.compiler_validation_issues.clear();
+                    return Ok((current_intent, None));
+                }
+                Ok(CompilerResult::NeedsCard(card)) => {
+                    session.compiler_stage = PlanModeCompilerStage::Review;
+                    session.compiler_repair_passes = repair_passes;
+                    let question = match card.card_type.as_str() {
+                        "database" => format!(
+                            "The compiler needs a database connection before it can finish this workflow.\nPlease open the database card for `{}` and then reply with the saved database name.",
+                            card.binding_target
+                        ),
+                        "api_auth" => format!(
+                            "The compiler needs API auth before it can finish this workflow.\nPlease open the API card for `{}` and then reply once the connection is saved.",
+                            card.binding_target
+                        ),
+                        "mcp" => format!(
+                            "The compiler needs an MCP connection before it can finish this workflow.\nPlease open the MCP card for `{}` and then reply once the server is saved.",
+                            card.binding_target
+                        ),
+                        _ => format!(
+                            "The compiler needs additional setup before it can finish this workflow: {}",
+                            card.card_type
+                        ),
+                    };
+                    session.compiler_validation_issues = vec![question.clone()];
+                    return Ok((current_intent, Some(question)));
+                }
+                Err(error) => {
+                    let issue = error.to_string();
+                    last_issues = vec![issue.clone()];
+                    session.compiler_validation_issues = last_issues.clone();
+                    if repair_passes >= 2 {
+                        session.compiler_stage = PlanModeCompilerStage::Review;
+                        session.compiler_repair_passes = repair_passes;
+                        return Ok((current_intent, Some(self.compiler_followup_question(&last_issues))));
+                    }
+
+                    repair_passes = repair_passes.saturating_add(1);
+                    session.compiler_stage = PlanModeCompilerStage::Repair;
+                    session.compiler_repair_passes = repair_passes;
+
+                    let detail_context = format!(
+                        "VALIDATION ISSUES:\n{}\n\n{}",
+                        last_issues.join("\n"),
+                        crate::agent::plan_mode_registry::build_registry_candidate_context(
+                            &self.tools,
+                            &current_intent,
+                            installed,
+                            tenant_connectors,
+                        )
+                    );
+                    current_intent = self
+                        .extractor
+                        .refine(&session.id, &session.tenant_id, &role.purpose, &current_intent, &detail_context)
+                        .await?;
+                }
+            }
+        }
+    }
+
+    fn compiler_followup_question(&self, issues: &[String]) -> String {
+        let mut unique = Vec::new();
+        for issue in issues {
+            let trimmed = issue.trim();
+            if !trimmed.is_empty() && !unique.iter().any(|existing: &String| existing.eq_ignore_ascii_case(trimmed)) {
+                unique.push(trimmed.to_string());
+            }
+        }
+
+        if unique.is_empty() {
+            return "I still need one more compiler detail before I can finish the workflow draft.".into();
+        }
+
+        format!(
+            "I still need a bit more detail before I can finish the workflow draft:\n- {}\n\nPlease clarify the missing step or setup detail, then I’ll recompile.",
+            unique.join("\n- ")
+        )
+    }
+
     async fn handle_connector_clarification(&self, session: &mut PlanModeSession, answer: &str) -> Result<String> {
         let answer_lower = answer.to_lowercase();
         let mut pending_connector_resolution = false;
@@ -1607,6 +1877,7 @@ Rules:\n\
         let local_document_workflow =
             session.intent_cache.as_ref().map(intent_prefers_local_document_workflow).unwrap_or(false);
         let needs_db_connection = session.intent_cache.as_ref().map(intent_needs_database_connection).unwrap_or(false);
+        let needs_acp_connection = session.intent_cache.as_ref().map(intent_needs_acp_connection).unwrap_or(false);
 
         if let Some(role) = session.draft_role.as_mut() {
             if !pending_custom_tool_categories.is_empty() {
@@ -1629,8 +1900,10 @@ Rules:\n\
                 let matched_db_name = answer_mentions_tenant_database(&answer_lower, &tenant_connectors);
                 let matched_api_name = answer_mentions_tenant_api(&answer_lower, &tenant_connectors);
                 let matched_mcp_name = answer_mentions_tenant_mcp(&answer_lower, &tenant_connectors);
+                let matched_acp_name = answer_mentions_tenant_acp(&answer_lower, &tenant_connectors);
 
                 if !needs_db_connection
+                    && !needs_acp_connection
                     && (answer_declines_external_connector(&answer_lower)
                         || (local_document_workflow && matched.is_empty()))
                 {
@@ -1712,6 +1985,25 @@ Rules:\n\
                             intent.remove("_pending_connector_resolution");
                         }
                         pending_connector_resolution = false;
+                    } else if let Some(acp_name) = matched_acp_name {
+                        if !role.connectors.iter().any(|connector_name| connector_name == &acp_name) {
+                            role.connectors.push(acp_name.clone());
+                            role.connectors.sort();
+                            role.connectors.dedup();
+                            session.draft_agent.connectors = role.connectors.clone();
+                        }
+                        if !role.tools.iter().any(|tool| tool == &format!("acp_session:{}", acp_name)) {
+                            role.tools.push(format!("acp_session:{}", acp_name));
+                            role.tools.sort();
+                            role.tools.dedup();
+                        }
+                        if let Some(intent) = session.intent_cache.as_mut().and_then(|value| value.as_object_mut()) {
+                            intent.remove("_pending_connector_resolution");
+                        }
+                        if let Some(intent) = session.intent_cache.as_mut() {
+                            persist_selected_acp_peer(intent, &acp_name);
+                        }
+                        pending_connector_resolution = false;
                     } else if needs_db_connection {
                         if let Some(intent) = session.intent_cache.as_mut().and_then(|value| value.as_object_mut()) {
                             intent.remove("_pending_connector_resolution");
@@ -1719,6 +2011,14 @@ Rules:\n\
                         session.phase = PlanModePhase::ResolvingConnectors;
                         return Ok(
                             "Please add the database using the inline connection card, then reply with the saved database name so I can continue.".into(),
+                        );
+                    } else if needs_acp_connection {
+                        if let Some(intent) = session.intent_cache.as_mut().and_then(|value| value.as_object_mut()) {
+                            intent.remove("_pending_connector_resolution");
+                        }
+                        session.phase = PlanModePhase::ResolvingConnectors;
+                        return Ok(
+                            "Please add the ACP peer using the inline connection card, then reply with the saved peer name so I can continue.".into(),
                         );
                     } else if local_document_workflow {
                         if let Some(intent) = session.intent_cache.as_mut().and_then(|value| value.as_object_mut()) {
@@ -1827,14 +2127,12 @@ Rules:\n\
             }
 
             let _ = self.ensure_research_memo(session).await?;
-            self.materialize_review_workflow_outline(session);
             session.phase = PlanModePhase::Reviewing;
             return Ok(format!("✓ {}\n\n{}", summary, self.build_review_summary(session).await));
         }
 
         // pending_steps was already empty — go straight to review
         let _ = self.ensure_research_memo(session).await?;
-        self.materialize_review_workflow_outline(session);
         session.phase = PlanModePhase::Reviewing;
         Ok(self.build_review_summary(session).await)
     }
@@ -1868,7 +2166,6 @@ Rules:\n\
         }
 
         let _ = self.ensure_research_memo(session).await?;
-        self.materialize_review_workflow_outline(session);
         session.phase = PlanModePhase::Reviewing;
         Ok(self.build_review_summary(session).await)
     }
@@ -1876,18 +2173,7 @@ Rules:\n\
     /// Public wrapper for build_review_summary — used by the template fast-path in routes.rs
     pub async fn build_review_summary_pub(&self, session: &mut PlanModeSession) -> String {
         let _ = self.ensure_research_memo(session).await;
-        self.materialize_review_workflow_outline(session);
         self.build_review_summary(session).await
-    }
-
-    fn materialize_review_workflow_outline(&self, session: &mut PlanModeSession) {
-        if let Some(intent) = session.intent_cache.as_ref() {
-            if let Some(role) = session.draft_role.as_mut() {
-                if role.execution_guidelines.workflow_outline.is_empty() {
-                    materialize_workflow_outline(role, intent);
-                }
-            }
-        }
     }
 
     async fn sync_review_scaffold_tasks(&self, session: &PlanModeSession) -> Vec<SessionTask> {
@@ -1920,17 +2206,11 @@ Rules:\n\
 
     async fn build_review_summary(&self, session: &PlanModeSession) -> String {
         let agent = &session.draft_agent;
-        let mut preview_role = match session.draft_role.as_ref() {
+        let preview_role = match session.draft_role.as_ref() {
             Some(r) => r.clone(),
             None => return "Configuration incomplete — no role defined.".into(),
         };
-        if preview_role.execution_guidelines.workflow_outline.is_empty() {
-            if let Some(intent) = session.intent_cache.as_ref() {
-                materialize_workflow_outline(&mut preview_role, intent);
-            }
-        }
         let role = &preview_role;
-        let outline_required = role_requires_runnable_workflow_outline(role);
         let scaffold_tasks = self.sync_review_scaffold_tasks(session).await;
         let research_memo = session
             .intent_cache
@@ -1980,6 +2260,8 @@ Rules:\n\
                     parts.push(format!("database '{}'", db_name));
                 } else if let Some(api_name) = t.strip_prefix("external_api:") {
                     parts.push(format!("REST API '{}'", api_name));
+                } else if let Some(peer_name) = t.strip_prefix("acp_session:") {
+                    parts.push(format!("ACP peer '{}'", peer_name));
                 } else {
                     parts.push(t.clone());
                 }
@@ -2019,14 +2301,18 @@ Rules:\n\
         };
 
         let review_focus = if self.superpowers_guidance_text(&PlanModePhase::Reviewing).await.is_some() {
-            "\n**Review checklist:** validate the workflow outline, run the sandbox test, then save only if the result is clear."
+            "\n**Review checklist:** validate the compiler draft, run the sandbox test, then save only if the result is clear."
                 .to_string()
         } else {
             String::new()
         };
 
-        let save_guardrail = if outline_required && role.execution_guidelines.workflow_outline.is_empty() {
-            "\n\n⚠️ **Save guardrail:** this role still does not have a runnable workflow outline. Please add or clarify the missing workflow steps before saving.".to_string()
+        let save_guardrail = if session
+            .intent_cache
+            .as_ref()
+            .map_or(true, |intent| workflow_hints_for_compilation(intent).is_empty())
+        {
+            "\n\n⚠️ **Save guardrail:** this role still does not have a runnable compiler draft. Please add or clarify the missing workflow steps before saving.".to_string()
         } else {
             String::new()
         };
@@ -2035,7 +2321,7 @@ Rules:\n\
             "\n**Runtime policy:** execution={} | tool pool={} | permission mode={}",
             match role.execution_guidelines.execution_strategy {
                 ExecutionStrategy::DeterministicWorkflow => "deterministic_workflow",
-                ExecutionStrategy::AdaptivePlanning => "adaptive_planning -> compile into workflow_outline",
+                ExecutionStrategy::AdaptivePlanning => "adaptive_planning -> compile into compiled_workflow",
                 ExecutionStrategy::CoordinatorShell => "coordinator_shell -> research / synthesize / verify",
             },
             match role.execution_guidelines.tool_pool {
@@ -2099,6 +2385,26 @@ Rules:\n\
             }
         });
 
+        let compiler_state = {
+            let issues = if session.compiler_validation_issues.is_empty() {
+                "none".to_string()
+            } else {
+                session.compiler_validation_issues.join(" | ")
+            };
+            let stage = match session.compiler_stage {
+                PlanModeCompilerStage::Intent => "intent",
+                PlanModeCompilerStage::Dsl => "dsl",
+                PlanModeCompilerStage::Validate => "validate",
+                PlanModeCompilerStage::Repair => "repair",
+                PlanModeCompilerStage::Bind => "bind",
+                PlanModeCompilerStage::Review => "review",
+            };
+            format!(
+                "\n**Compiler stage:** {} | repair passes: {} | validation issues: {}",
+                stage, session.compiler_repair_passes, issues
+            )
+        };
+
         format!(
             "Here's what I've configured:\n\n\
             **Agent:** {name}\n\
@@ -2107,7 +2413,7 @@ Rules:\n\
             **Connectors:** {connectors}{tools}\n\
             **Output:** {output}\n\
             **Uploaded docs:** {attachments}\n\
-            **Constraints:** {constraints}{services}{runtime_policy}{tooling_notes}{research_summary}{scaffold}{review_focus}{save_guardrail}\n\n\
+            **Constraints:** {constraints}{services}{compiler_state}{runtime_policy}{tooling_notes}{research_summary}{scaffold}{review_focus}{save_guardrail}\n\n\
             Does this look right? Say **yes** to save, or tell me what to change.",
             name = agent.name,
             purpose = role.purpose,
@@ -2118,6 +2424,7 @@ Rules:\n\
             attachments = attachments,
             constraints = constraints,
             services = services_line,
+            compiler_state = compiler_state,
             runtime_policy = runtime_policy,
             tooling_notes = tooling_notes,
             research_summary = research_summary,
@@ -2128,17 +2435,6 @@ Rules:\n\
 
     async fn handle_review(&self, session: &mut PlanModeSession, answer: &str) -> Result<String> {
         if is_explicit_review_confirmation(answer) {
-            if let Some(role) = session.draft_role.as_ref() {
-                if role_requires_runnable_workflow_outline(role)
-                    && role.execution_guidelines.workflow_outline.is_empty()
-                {
-                    session.phase = PlanModePhase::Reviewing;
-                    return Ok(
-                        "⚠️ I still do not have a runnable workflow outline for this role, so I cannot save it yet.\n\nPlease add more detail or answer the missing questions and then try again."
-                            .into(),
-                    );
-                }
-            }
             session.phase = PlanModePhase::Complete;
             return Ok("✓ Agent saved. You can find it in your agent list. \
                        Add more roles anytime from the agent settings page."
@@ -2166,11 +2462,7 @@ Rules:\n\
                 r.status = RoleStatus::Active;
                 r.updated_at = Utc::now();
 
-                // Enrich workflow outline — map prose hints to tools + arg templates
-                // so the runtime can build a deterministic Plan without an LLM call.
-                // If the draft already has a workflow outline and the final intent
-                // does not add any new hints, preserve the existing outline instead
-                // of clearing it out.
+                // Compile the draft into the immutable workflow artifact.
                 let intent = session.intent_cache.as_ref().cloned().unwrap_or_else(|| serde_json::json!({}));
                 match WorkflowCompiler::compile(&r, &intent, &self.tools) {
                     Ok(CompilerResult::Ready(mut compiled)) => {
@@ -2190,6 +2482,18 @@ Rules:\n\
                                 "plan_mode_reused_from_session_id".into(),
                                 serde_json::json!(session.reused_from_session_id.clone()),
                             );
+                            metadata.insert(
+                                "compiler_stage".into(),
+                                serde_json::json!(format!("{:?}", session.compiler_stage).to_lowercase()),
+                            );
+                            metadata.insert(
+                                "compiler_repair_passes".into(),
+                                serde_json::json!(session.compiler_repair_passes),
+                            );
+                            metadata.insert(
+                                "compiler_validation_issues".into(),
+                                serde_json::json!(session.compiler_validation_issues.clone()),
+                            );
                         }
                         r.execution_guidelines.compiled_workflow = Some(compiled.clone());
                     }
@@ -2205,10 +2509,7 @@ Rules:\n\
                         anyhow::bail!("workflow compilation failed: {}", error);
                     }
                 }
-                if role_requires_runnable_workflow_outline(&r)
-                    && r.execution_guidelines.workflow_outline.is_empty()
-                    && r.execution_guidelines.compiled_workflow.is_none()
-                {
+                if r.execution_guidelines.compiled_workflow.is_none() {
                     anyhow::bail!("workflow compiler did not produce a runnable artifact before save");
                 }
                 finalize_saved_role_execution_strategy(&mut r);
@@ -2257,11 +2558,11 @@ Rules:\n\
             return PlanModePreflightResult {
                 status: PlanModeTestStatus::Fail,
                 checks: vec![PlanModeTestCheck {
-                    label: "workflow outline".into(),
+                    label: "compiled workflow".into(),
                     success: false,
-                    detail: Some("workflow_outline is empty".into()),
+                    detail: Some("compiled workflow artifact is empty".into()),
                 }],
-                summary: "No workflow outline was drafted, so there is nothing to preflight.".into(),
+                summary: "No compiled workflow artifact was drafted, so there is nothing to preflight.".into(),
             };
         }
 
@@ -2562,17 +2863,14 @@ fn plan_mode_scaffold_specs(
     let intent_output = session.intent_cache.as_ref().map(|intent| SessionTaskOutput {
         status: SessionTaskResultStatus::Complete,
         artifacts: Vec::new(),
-        findings: intent["workflow_outline"]
-            .as_array()
-            .map(|items| items.iter().filter_map(|value| value.as_str().map(str::to_string)).take(4).collect())
-            .unwrap_or_default(),
+        findings: workflow_hints_for_compilation(intent).into_iter().take(4).collect(),
         confidence: 1.0,
         note: Some("intent, workflow shape, and operating category captured".into()),
     });
     specs.push((
         format!("planmode:{}:intent", session.id),
         "Capture intent and workflow shape".into(),
-        "Lock down the business goal, workflow outline, trigger guess, and output direction before execution design."
+        "Lock down the business goal, compiler draft, trigger guess, and output direction before execution design."
             .into(),
         if session.intent_cache.is_some() { SessionTaskStatus::Completed } else { SessionTaskStatus::InProgress },
         serde_json::json!({
@@ -2704,7 +3002,7 @@ fn shared_plan_mode_tooling_notes(role: &AgentRole) -> Vec<String> {
         notes.push("runtime writes stay scoped by permission mode and workspace boundary checks".into());
     }
     if matches!(role.execution_guidelines.execution_strategy, ExecutionStrategy::AdaptivePlanning) {
-        notes.push("adaptive planning must compile back into workflow_outline before deterministic execution".into());
+        notes.push("adaptive planning must compile back into compiled_workflow before deterministic execution".into());
     } else if matches!(role.execution_guidelines.execution_strategy, ExecutionStrategy::CoordinatorShell) {
         notes.push("coordinator-shell runs task-first research -> synthesis -> implementation -> verification".into());
     }
@@ -2739,12 +3037,6 @@ fn combine_test_status(preflight: &PlanModeTestStatus, sandbox: &PlanModeTestSta
         PlanModeTestStatus::Partial
     } else {
         PlanModeTestStatus::Pass
-    }
-}
-
-fn materialize_workflow_outline(role: &mut AgentRole, intent: &serde_json::Value) {
-    if role.execution_guidelines.workflow_outline.is_empty() {
-        enrich_workflow_outline(role, intent);
     }
 }
 
@@ -2936,9 +3228,10 @@ fn synthetic_input_data_for_role(
         }
     }
 
-    for step in &role.execution_guidelines.workflow_outline {
-        if let Some(template) = &step.args_template {
-            collect_template_placeholders(template, &mut values, workspace_root);
+    if let Some(compiled) = role.execution_guidelines.compiled_workflow.as_ref() {
+        for step in &compiled.steps {
+            let template = crate::agent::workflow_compiler::legacy_args_template_from_compiled_step(step);
+            collect_template_placeholders(&template, &mut values, workspace_root);
         }
     }
 
@@ -3278,251 +3571,6 @@ fn attachment_kind_label(kind: &crate::agent::definition::PlanModeAttachmentKind
     }
 }
 
-/// Build a human-readable summary of the tenant's custom connections
-/// to inject into the IntentExtractor prompt so the LLM knows what's available
-/// and can match user descriptions to registered names exactly.
-fn build_custom_context(_installed: &[String], tenant_connectors: &[TenantConnector]) -> String {
-    if tenant_connectors.is_empty() {
-        return String::new();
-    }
-
-    let mut lines: Vec<String> = Vec::new();
-
-    // Databases (tool: external_db)
-    let dbs: Vec<&TenantConnector> =
-        tenant_connectors.iter().filter(|tc| tc.category == "connector/database").collect();
-    if !dbs.is_empty() {
-        lines.push("Databases (use external_db tool, reference by name):".into());
-        for db in &dbs {
-            lines.push(format!("  - name='{}' — {}", db.name, db.summary));
-        }
-    }
-
-    // REST APIs (tool: external_api)
-    let apis: Vec<&TenantConnector> = tenant_connectors
-        .iter()
-        .filter(|tc| !tc.category.contains("database") && !tc.category.contains("mcp"))
-        .collect();
-    if !apis.is_empty() {
-        lines.push("Custom REST APIs (use external_api tool, reference by name):".into());
-        for api in &apis {
-            lines.push(format!("  - name='{}' — {}", api.name, api.summary));
-        }
-    }
-
-    // MCP servers (use as named connector)
-    let mcps: Vec<&TenantConnector> = tenant_connectors.iter().filter(|tc| tc.category.contains("mcp")).collect();
-    if !mcps.is_empty() {
-        lines.push("MCP servers (available as connector tools):".into());
-        for mcp in &mcps {
-            lines.push(format!("  - name='{}' — {}", mcp.name, mcp.summary));
-        }
-    }
-
-    lines.join("\n")
-}
-
-fn build_capability_directory(
-    registry: &ToolRegistry,
-    installed: &[String],
-    tenant_connectors: &[TenantConnector],
-) -> String {
-    let mut lines: Vec<String> = vec![
-        "Use categories first. Do not assume every connector is installed or every tool is needed.".into(),
-        "Only installed connectors and registered custom connections are immediately usable.".into(),
-        "If no installed connector fits, prefer missing_capabilities such as custom_db, custom_api, or connector/<category>.".into(),
-        "Tool category quick map 1: filesystem=shell,file_read,file_write,file_edit,glob_search,content_search; web=web_search_tool,web_fetch,http_request,browser,browser_interact,browser_pdf".into(),
-        "Tool category quick map 2: code=code_run,diff,patch,git_operations,sql_query; data=data_engine,data_extractor,pdf_read,pdf_create,spreadsheet_read,spreadsheet_write,image_process,image_info".into(),
-        "Tool category quick map 3: memory=memory_store,memory_recall,memory_forget,vector_store,vector_search,vector_delete; infra=docker,kubernetes,ssh_exec,process_monitor".into(),
-        "Tool category quick map 4: integration=mcp_session,search_mcp_registry,acp_session,api_call,register_api_tool; communication=email,notification,pushover,ask_user; security=crypto_tool,plane_guard,request_credential; automation=schedule,cron_add,cron_list,cron_remove,cron_run,delegate".into(),
-    ];
-
-    let mut tool_categories: Vec<(String, Vec<String>)> = registry
-        .by_category()
-        .into_iter()
-        .filter(|(category, _)| !category.starts_with("connector/"))
-        .map(|(category, names)| {
-            (
-                category.to_string(),
-                names
-                    .into_iter()
-                    .filter(|name| {
-                        !name.starts_with("request_more_")
-                            && *name != "list_connectors_in_category"
-                            && *name != "create_workspace_tool"
-                    })
-                    .take(4)
-                    .map(String::from)
-                    .collect::<Vec<String>>(),
-            )
-        })
-        .filter(|(_, names)| !names.is_empty())
-        .collect();
-    tool_categories.sort_by(|a, b| a.0.cmp(&b.0));
-    lines.push("Core tool categories (examples only, more detail comes later if relevant):".into());
-    for (category, names) in tool_categories {
-        lines.push(format!("  - {}: {}", category, names.join(", ")));
-    }
-
-    let mut connector_groups: BTreeMap<&str, Vec<String>> = BTreeMap::new();
-    for entry in BUILTIN_CONNECTORS {
-        let cat = entry.category.strip_prefix("connector/").unwrap_or(entry.category);
-        let status = if installed.iter().any(|name| name == entry.name) { "installed" } else { "available" };
-        connector_groups.entry(cat).or_default().push(format!("{} ({}, {})", entry.name, status, entry.summary));
-    }
-    lines.push("Built-in connector categories:".into());
-    for (category, connectors) in connector_groups {
-        let preview = connectors.into_iter().take(4).collect::<Vec<_>>();
-        lines.push(format!("  - {}: {}", category, preview.join("; ")));
-    }
-
-    let custom_context = build_custom_context(installed, tenant_connectors);
-    if !custom_context.is_empty() {
-        lines.push("Tenant custom connections:".into());
-        lines.push(custom_context);
-    }
-
-    lines.push(
-        "Deterministic data workflows should use data_engine. If a workflow needs arbitrary code or a future sandbox runtime, mark that as a missing capability instead of inventing a runtime tool."
-            .into(),
-    );
-
-    lines.join("\n")
-}
-
-fn build_detailed_capability_context(
-    registry: &ToolRegistry,
-    intent: &serde_json::Value,
-    installed: &[String],
-    tenant_connectors: &[TenantConnector],
-) -> String {
-    let mut lines: Vec<String> = Vec::new();
-
-    let tool_categories: Vec<String> = intent["preferred_tool_categories"]
-        .as_array()
-        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-        .unwrap_or_default();
-    for category in tool_categories {
-        let specs = registry.tool_specs_for_category(&category);
-        if specs.is_empty() {
-            continue;
-        }
-        lines.push(format!("Detailed tools for category '{}':", category));
-        for spec in specs.into_iter().take(8) {
-            let param_summary = spec.parameters["properties"]
-                .as_object()
-                .map(|properties| {
-                    let mut parameters = Vec::new();
-                    let required_names = spec.parameters["required"]
-                        .as_array()
-                        .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect::<std::collections::HashSet<_>>())
-                        .unwrap_or_default();
-                    for (name, value) in properties {
-                        let param_type = value["type"].as_str().unwrap_or("unknown");
-                        let required = if required_names.contains(name.as_str()) { "required" } else { "optional" };
-                        parameters.push(format!("{}:{} ({})", name, param_type, required));
-                    }
-                    if parameters.is_empty() {
-                        "none".to_string()
-                    } else {
-                        parameters.join(", ")
-                    }
-                })
-                .unwrap_or_else(|| "none".to_string());
-            let output_schema = spec
-                .output_schema
-                .as_ref()
-                .map(|schema| format!("\n    output_schema: {}", crate::tools::render_output_schema(schema)))
-                .unwrap_or_default();
-            lines.push(format!(
-                "  - {}:\n    {}\n    parameters: {}{}",
-                spec.name, spec.description, param_summary, output_schema
-            ));
-        }
-    }
-
-    let mut requested_connector_names: Vec<String> = intent["candidate_connectors"]
-        .as_array()
-        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-        .unwrap_or_default();
-    let requested_connector_categories: Vec<String> = intent["needed_connector_categories"]
-        .as_array()
-        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-        .unwrap_or_default();
-
-    for category in &requested_connector_categories {
-        for entry in BUILTIN_CONNECTORS {
-            let cat = entry.category.strip_prefix("connector/").unwrap_or(entry.category);
-            if cat == category && !requested_connector_names.iter().any(|name| name == entry.name) {
-                requested_connector_names.push(entry.name.to_string());
-            }
-        }
-    }
-
-    for connector_name in requested_connector_names {
-        if let Some(entry) = BUILTIN_CONNECTORS.iter().find(|entry| entry.name == connector_name) {
-            let installed_status =
-                if installed.iter().any(|name| name == entry.name) { "installed" } else { "not_installed" };
-            lines.push(format!(
-                "Connector '{}': category={} status={} summary={} operations={}",
-                entry.name,
-                entry.category,
-                installed_status,
-                entry.summary,
-                entry.operations.join("; "),
-            ));
-        } else if let Some(connector) = tenant_connectors.iter().find(|connector| connector.name == connector_name) {
-            let operations =
-                connector.endpoints.iter().map(|endpoint| endpoint.path.as_str()).take(6).collect::<Vec<_>>();
-            let operation_text =
-                if operations.is_empty() { "custom endpoints configured".to_string() } else { operations.join(", ") };
-            lines.push(format!(
-                "Tenant connector '{}': category={} summary={} endpoints={}",
-                connector.name, connector.category, connector.summary, operation_text,
-            ));
-        }
-    }
-
-    let missing_capabilities: Vec<String> = intent["missing_capabilities"]
-        .as_array()
-        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-        .unwrap_or_default();
-    if !missing_capabilities.is_empty() {
-        lines.push(format!("Missing capability hints already inferred: {}", missing_capabilities.join(", ")));
-    }
-
-    lines.join("\n")
-}
-
-fn inferred_preferred_tools(registry: &ToolRegistry, intent: &serde_json::Value) -> Vec<String> {
-    intent["preferred_tools"]
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|value| value.as_str())
-                .filter(|tool_name| registry.get(tool_name).is_some())
-                .map(String::from)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default()
-}
-
-fn missing_tool_categories(intent: &serde_json::Value) -> Vec<String> {
-    let mut out: Vec<String> = intent["missing_capabilities"]
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|value| value.as_str())
-                .filter_map(|value| value.strip_prefix("tool/"))
-                .map(String::from)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    out.sort();
-    out.dedup();
-    out
-}
-
 fn apply_execution_hints(role: &mut AgentRole, intent: &serde_json::Value) {
     const TOOL_CATEGORY_RULE_PREFIX: &str = "Prefer these tool categories when relevant:";
     const CONNECTOR_CATEGORY_RULE_PREFIX: &str = "Prefer connectors from these categories when relevant:";
@@ -3532,8 +3580,8 @@ fn apply_execution_hints(role: &mut AgentRole, intent: &serde_json::Value) {
     role.execution_guidelines.remove_rules_with_prefix(CONNECTOR_CATEGORY_RULE_PREFIX);
     role.execution_guidelines.remove_priority_prefix("step: ");
 
-    let workflow_outline = workflow_hints_for_compilation(intent);
-    for item in workflow_outline.into_iter().take(5) {
+    let workflow_hints = workflow_hints_for_compilation(intent);
+    for item in workflow_hints.into_iter().take(5) {
         role.execution_guidelines.add_priority(format!("step: {}", item.trim()));
     }
 
@@ -3560,50 +3608,40 @@ fn apply_execution_hints(role: &mut AgentRole, intent: &serde_json::Value) {
     }
 }
 
-/// Build enriched `WorkflowStep`s from the intent's `workflow_outline` hints.
-/// Maps each prose hint to the best matching tool and builds an arg template.
-/// Called at save() time so the runtime can build a deterministic Plan.
-fn enrich_workflow_outline(role: &mut AgentRole, intent: &serde_json::Value) {
-    let hints = workflow_hints_for_compilation(intent);
-
-    if hints.is_empty() {
-        return;
-    }
-
-    role.execution_guidelines.workflow_outline.clear();
-
-    let connectors = &role.connectors;
-    let tools = &role.tools;
-
-    for hint in hints.into_iter().take(12) {
-        let (tool, args_template) = resolve_tool_for_hint(&hint, connectors, tools);
-        role.execution_guidelines.add_workflow_step(crate::agent::definition::WorkflowStep {
-            description: hint,
-            tool,
-            args_template,
-            success_criteria: String::new(),
-            condition: None,
-            ..Default::default()
-        });
-    }
-}
-
 fn finalize_saved_role_execution_strategy(role: &mut AgentRole) {
     if !matches!(role.execution_guidelines.execution_strategy, ExecutionStrategy::CoordinatorShell) {
         role.execution_guidelines.execution_strategy = ExecutionStrategy::DeterministicWorkflow;
     }
 }
 
-fn role_requires_runnable_workflow_outline(role: &AgentRole) -> bool {
-    !matches!(role.execution_guidelines.execution_strategy, ExecutionStrategy::CoordinatorShell)
-        && role.execution_guidelines.compiled_workflow.is_none()
-}
-
 fn workflow_hints_for_compilation(intent: &serde_json::Value) -> Vec<String> {
-    let mut hints: Vec<String> = intent["workflow_outline"]
-        .as_array()
-        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+    let mut hints: Vec<String> = intent
+        .get("workflow_dsl")
+        .and_then(|value| value.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|value| {
+                    if let Some(text) = value.as_str() {
+                        Some(text.trim().to_string())
+                    } else {
+                        value.as_object().and_then(|object| {
+                            object
+                                .get("description")
+                                .or_else(|| object.get("type"))
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.trim().to_string())
+                        })
+                    }
+                })
+                .collect()
+        })
         .unwrap_or_default();
+
+    if hints.is_empty() {
+        if let Some(actions) = intent["actions"].as_array() {
+            hints.extend(actions.iter().filter_map(|v| v.as_str().map(|s| s.trim().to_string())));
+        }
+    }
 
     if let Some(memo) = intent
         .get("_adaptive_research_memo")
@@ -3625,25 +3663,49 @@ fn workflow_hints_for_compilation(intent: &serde_json::Value) -> Vec<String> {
     merged
 }
 
-fn clean_json_markdown_response(raw: &str) -> &str {
-    raw.trim().trim_start_matches("```json").trim_start_matches("```").trim_end_matches("```").trim()
+fn clean_json_markdown_response(raw: &str) -> String {
+    let trimmed = raw.trim();
+
+    if let Some(start) = trimmed.find("```json") {
+        let after_fence = trimmed[start + "```json".len()..].trim_start();
+        if let Some(end) = after_fence.find("```") {
+            let candidate = after_fence[..end].trim();
+            if !candidate.is_empty() {
+                return candidate.to_string();
+            }
+        }
+    }
+
+    if let Some(start) = trimmed.find("```") {
+        let after_fence = trimmed[start + 3..].trim_start_matches("json").trim_start();
+        if let Some(end) = after_fence.find("```") {
+            let candidate = after_fence[..end].trim();
+            if !candidate.is_empty() {
+                return candidate.to_string();
+            }
+        }
+    }
+
+    if let Some(start) = trimmed.find('{') {
+        if let Some(end) = trimmed.rfind('}') {
+            if end > start {
+                return trimmed[start..=end].trim().to_string();
+            }
+        }
+    }
+
+    trimmed.to_string()
 }
 
 fn fallback_plan_mode_research_memo(role: &AgentRole, intent: &serde_json::Value) -> AdaptiveResearchMemo {
     AdaptiveResearchMemo {
         summary: format!("Plan-mode research fallback for {}", role.purpose),
-        findings: intent["actions"]
-            .as_array()
-            .map(|arr| arr.iter().filter_map(|value| value.as_str().map(str::to_string)).take(4).collect())
-            .unwrap_or_default(),
+        findings: workflow_hints_for_compilation(intent).into_iter().take(4).collect(),
         assumptions: Vec::new(),
         risks: vec![
             "Research synthesis fell back to intent-derived hints because the memo response was not valid JSON.".into(),
         ],
-        workflow_hints: intent["workflow_outline"]
-            .as_array()
-            .map(|arr| arr.iter().filter_map(|value| value.as_str().map(str::to_string)).take(6).collect())
-            .unwrap_or_default(),
+        workflow_hints: workflow_hints_for_compilation(intent).into_iter().take(6).collect(),
     }
 }
 
@@ -3659,18 +3721,32 @@ fn compute_plan_mode_goal_fingerprint(description: &str, intent: &serde_json::Va
                 .map(|arr| arr.iter().filter_map(|value| value.as_str().map(normalize_fingerprint_text)).collect::<Vec<_>>())
                 .unwrap_or_default(),
         ),
-        "workflow_outline": role
-            .execution_guidelines
-            .workflow_outline
-            .iter()
-            .map(|step| serde_json::json!({
-                "description": normalize_fingerprint_text(&step.description),
-                "tool": step.tool.as_deref().map(normalize_fingerprint_text),
-                "args_template": step.args_template.as_ref().map(|value| normalize_fingerprint_text(&serde_json::to_string(value).unwrap_or_default())),
-                "success_criteria": normalize_fingerprint_text(&step.success_criteria),
-                "condition": step.condition.as_ref().map(|value| normalize_fingerprint_text(&serde_json::to_string(value).unwrap_or_default())),
-            }))
-            .collect::<Vec<_>>(),
+        "workflow_dsl": intent
+            .get("workflow_dsl")
+            .and_then(|value| value.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|value| value.as_object())
+                    .map(|step| {
+                        serde_json::json!({
+                            "id": normalize_fingerprint_text(step.get("id").and_then(|value| value.as_str()).unwrap_or("")),
+                            "type": normalize_fingerprint_text(step.get("type").and_then(|value| value.as_str()).unwrap_or("")),
+                            "description": normalize_fingerprint_text(step.get("description").and_then(|value| value.as_str()).unwrap_or("")),
+                            "resource_hint": normalize_fingerprint_text(step.get("resource_hint").and_then(|value| value.as_str()).unwrap_or("")),
+                            "tool_hint": normalize_fingerprint_text(step.get("tool_hint").and_then(|value| value.as_str()).unwrap_or("")),
+                            "success_criteria": step
+                                .get("success_criteria")
+                                .and_then(|value| value.as_array())
+                                .map(|arr| normalize_fingerprint_strings(
+                                    arr.iter().filter_map(|value| value.as_str().map(String::from)).collect::<Vec<_>>()
+                                ))
+                                .unwrap_or_default(),
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default(),
         "connectors": normalize_fingerprint_strings(role.connectors.clone()),
         "tools": normalize_fingerprint_strings(role.tools.clone()),
     });
@@ -4624,7 +4700,18 @@ mod tests {
     }
 
     #[test]
-    fn test_custom_connector_answer_matching_handles_api_and_mcp() {
+    fn test_acp_detection_triggers_on_internal_agent_language() {
+        let intent = serde_json::json!({
+            "data_sources": ["internal agent-to-agent workflow"],
+            "write_targets": [],
+            "actions": ["send a message to the internal agent"],
+            "uses_acp_peer": "ops_acp",
+        });
+        assert!(intent_needs_acp_connection(&intent));
+    }
+
+    #[test]
+    fn test_custom_connector_answer_matching_handles_api_mcp_and_acp() {
         let tenant_connectors = vec![
             TenantConnector {
                 id: "api-1".into(),
@@ -4656,6 +4743,21 @@ mod tests {
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
             },
+            TenantConnector {
+                id: "acp-1".into(),
+                tenant_id: "t-1".into(),
+                name: "ops_acp".into(),
+                category: "connector/acp".into(),
+                base_url: "https://acp.example.com".into(),
+                auth_type: ConnectorAuthType::Bearer,
+                auth_credential_key: None,
+                source: crate::agent::definition::ConnectorSource::Manual,
+                source_docs: None,
+                endpoints: Vec::new(),
+                summary: "Internal agent exchange peer".into(),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            },
         ];
 
         assert_eq!(
@@ -4663,6 +4765,7 @@ mod tests {
             Some("acme_backend".into())
         );
         assert_eq!(answer_mentions_tenant_mcp("Connected ops_mcp", &tenant_connectors), Some("ops_mcp".into()));
+        assert_eq!(answer_mentions_tenant_acp("Connected ops_acp", &tenant_connectors), Some("ops_acp".into()));
     }
 
     #[test]
@@ -4743,16 +4846,7 @@ mod tests {
             "actions": ["collect inputs", "draft summary"],
         });
 
-        let mut role = AgentRole::new("role-1".into(), "agent-1".into(), "tenant-1".into(), "Primary".into());
-        role.execution_guidelines.workflow_outline = vec![crate::agent::definition::WorkflowStep {
-            description: "Collect inputs".into(),
-            tool: Some("file_read".into()),
-            args_template: None,
-            success_criteria: "inputs collected".into(),
-            condition: None,
-            ..Default::default()
-        }];
-
+        let role = AgentRole::new("role-1".into(), "agent-1".into(), "tenant-1".into(), "Primary".into());
         let fp_a = compute_plan_mode_goal_fingerprint("   Draft   a summary  ", &intent, &role);
         let fp_b = compute_plan_mode_goal_fingerprint("draft a summary", &intent, &role);
         assert_eq!(fp_a, fp_b);
@@ -4903,7 +4997,7 @@ mod tests {
 
     #[test]
     fn test_build_custom_context_empty() {
-        let ctx = build_custom_context(&[], &[]);
+        let ctx = crate::agent::plan_mode_registry::build_custom_context(&[], &[]);
         assert!(ctx.is_empty());
     }
 
@@ -4927,7 +5021,26 @@ mod tests {
         let intent = serde_json::json!({
             "preferred_tool_categories": ["data", "web"],
             "needed_connector_categories": ["support", "crm"],
-            "workflow_outline": ["fetch source records", "transform", "write destination"]
+            "workflow_dsl": [
+                {
+                    "id": "step_1",
+                    "type": "fetch_records",
+                    "description": "fetch source records",
+                    "resource_hint": "database",
+                    "tool_hint": "sql_query",
+                    "args_hint": {},
+                    "success_criteria": ["records fetched"]
+                },
+                {
+                    "id": "step_2",
+                    "type": "compute",
+                    "description": "transform records",
+                    "resource_hint": null,
+                    "tool_hint": "data_engine",
+                    "args_hint": {},
+                    "success_criteria": ["records transformed"]
+                }
+            ]
         });
         apply_execution_hints(&mut role, &intent);
 
@@ -4945,7 +5058,26 @@ mod tests {
     #[test]
     fn test_workflow_hints_for_compilation_merges_research_memo_hints() {
         let intent = serde_json::json!({
-            "workflow_outline": ["inspect repository", "compile plan"],
+            "workflow_dsl": [
+                {
+                    "id": "step_1",
+                    "type": "compute",
+                    "description": "inspect repository",
+                    "resource_hint": null,
+                    "tool_hint": null,
+                    "args_hint": {},
+                    "success_criteria": ["inspection complete"]
+                },
+                {
+                    "id": "step_2",
+                    "type": "llm_worker",
+                    "description": "compile plan",
+                    "resource_hint": null,
+                    "tool_hint": null,
+                    "args_hint": {},
+                    "success_criteria": ["plan compiled"]
+                }
+            ],
             "_adaptive_research_memo": {
                 "summary": "research summary",
                 "findings": ["existing CI failures"],
@@ -4967,50 +5099,6 @@ mod tests {
     }
 
     #[test]
-    fn test_enrich_workflow_outline_uses_research_memo_hints() {
-        let mut role = AgentRole::new("role-1".into(), "agent-1".into(), "tenant-1".into(), "Primary Role".into());
-        let intent = serde_json::json!({
-            "workflow_outline": ["inspect repository"],
-            "_adaptive_research_memo": {
-                "summary": "research summary",
-                "findings": [],
-                "assumptions": [],
-                "risks": [],
-                "workflow_hints": ["verify behavior independently"]
-            }
-        });
-
-        enrich_workflow_outline(&mut role, &intent);
-
-        let descriptions =
-            role.execution_guidelines.workflow_outline.iter().map(|step| step.description.clone()).collect::<Vec<_>>();
-        assert!(descriptions.contains(&"inspect repository".to_string()));
-        assert!(descriptions.contains(&"verify behavior independently".to_string()));
-    }
-
-    #[test]
-    fn test_enrich_workflow_outline_preserves_existing_outline_when_no_hints_are_available() {
-        let mut role = AgentRole::new("role-1".into(), "agent-1".into(), "tenant-1".into(), "Primary Role".into());
-        role.execution_guidelines.workflow_outline = vec![crate::agent::definition::WorkflowStep {
-            description: "inspect repository".into(),
-            tool: Some("file_read".into()),
-            args_template: None,
-            success_criteria: "repository inspected".into(),
-            condition: None,
-            ..Default::default()
-        }];
-
-        let intent = serde_json::json!({
-            "actions": ["monitor database", "notify on new activity"]
-        });
-
-        enrich_workflow_outline(&mut role, &intent);
-
-        assert_eq!(role.execution_guidelines.workflow_outline.len(), 1);
-        assert_eq!(role.execution_guidelines.workflow_outline[0].description, "inspect repository");
-    }
-
-    #[test]
     fn test_finalize_saved_role_execution_strategy_normalizes_to_deterministic() {
         let mut role = AgentRole::new("role-1".into(), "agent-1".into(), "tenant-1".into(), "Primary Role".into());
         role.execution_guidelines.execution_strategy = ExecutionStrategy::DeterministicWorkflow;
@@ -5021,15 +5109,6 @@ mod tests {
         role.execution_guidelines.execution_strategy = ExecutionStrategy::AdaptivePlanning;
         finalize_saved_role_execution_strategy(&mut role);
         assert_eq!(role.execution_guidelines.execution_strategy, ExecutionStrategy::DeterministicWorkflow);
-    }
-
-    #[test]
-    fn test_role_requires_runnable_workflow_outline_skips_coordinator_shell() {
-        let mut role = AgentRole::new("role-1".into(), "agent-1".into(), "tenant-1".into(), "Primary Role".into());
-        assert!(role_requires_runnable_workflow_outline(&role));
-
-        role.execution_guidelines.execution_strategy = ExecutionStrategy::CoordinatorShell;
-        assert!(!role_requires_runnable_workflow_outline(&role));
     }
 
     #[test]
@@ -5048,8 +5127,21 @@ mod tests {
             reused_from_session_id: None,
             repair_root_session_id: None,
             phase: PlanModePhase::Reviewing,
+            compiler_stage: crate::agent::definition::PlanModeCompilerStage::Review,
+            compiler_repair_passes: 0,
+            compiler_validation_issues: Vec::new(),
             intent_cache: Some(serde_json::json!({
-                "workflow_outline": ["inspect repository"],
+                "workflow_dsl": [
+                    {
+                        "id": "step_1",
+                        "type": "compute",
+                        "description": "inspect repository",
+                        "resource_hint": null,
+                        "tool_hint": null,
+                        "args_hint": {},
+                        "success_criteria": ["repository inspected"]
+                    }
+                ],
                 "_adaptive_research_memo": {
                     "summary": "research summary",
                     "findings": [],
@@ -5071,3 +5163,6 @@ mod tests {
         assert_eq!(research.3, SessionTaskStatus::Completed);
     }
 }
+
+
+

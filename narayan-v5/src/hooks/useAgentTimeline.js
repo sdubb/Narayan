@@ -73,6 +73,7 @@ function buildGroupedEvents(events) {
       approvalNeeded: false, replanning: false,
       rejectionCount: 0, missingCredentials: [], stepConfidence: [],
       runtimePolicy: '', researchSummary: '',
+      compilerStage: '', compilerRepairPasses: 0, compilerValidationIssues: [],
       judgementCount: 0,
     },
     steps: [],
@@ -100,6 +101,9 @@ function buildGroupedEvents(events) {
       grouped.plan.steps     = ev.steps     || [];
       grouped.plan.runtimePolicy  = ev.runtime_policy  || '';
       grouped.plan.researchSummary = ev.research_summary || '';
+      grouped.plan.compilerStage = ev.compiler_stage || grouped.plan.compilerStage;
+      grouped.plan.compilerRepairPasses = ev.compiler_repair_passes ?? grouped.plan.compilerRepairPasses;
+      grouped.plan.compilerValidationIssues = ev.compiler_validation_issues || grouped.plan.compilerValidationIssues;
     }
     if (t === 'plan_approval_needed') {
       grouped.plan.approvalNeeded       = true;
@@ -113,6 +117,9 @@ function buildGroupedEvents(events) {
       grouped.plan.stepConfidence       = ev.step_confidence       || [];
       grouped.plan.runtimePolicy        = ev.runtime_policy        || grouped.plan.runtimePolicy;
       grouped.plan.researchSummary      = ev.research_summary      || grouped.plan.researchSummary;
+      grouped.plan.compilerStage        = ev.compiler_stage        || grouped.plan.compilerStage;
+      grouped.plan.compilerRepairPasses  = ev.compiler_repair_passes ?? grouped.plan.compilerRepairPasses;
+      grouped.plan.compilerValidationIssues = ev.compiler_validation_issues || grouped.plan.compilerValidationIssues;
     }
     if (t === 'plan_rejected') {
       grouped.plan.replanning     = true;

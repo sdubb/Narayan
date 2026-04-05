@@ -1437,7 +1437,7 @@ pub async fn approve_plan(
             .into_response();
         }
 
-        // Replan: clear the plan and store feedback for the planner prompt.
+        // Recompile: clear the plan and store feedback for the compiler prompt.
         agent.plan = None;
         agent.metadata["plan_rejection_feedback"] = serde_json::json!(feedback);
         agent.status = AgentStatus::Waiting;

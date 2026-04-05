@@ -27,7 +27,7 @@ use crate::{
     },
     events::{AgentEvent, EventBus},
     gateway::{
-        llm_controls::{LlmBudgetTier, LlmExecutionIntent, LlmGenerationConfig},
+        llm_controls::{LlmBudgetTier, LlmGenerationConfig},
         GatewayRequest, LlmGateway, TaskComplexity,
     },
     policy::{engine::PolicyContext, rules::PolicyRuleSet, PolicyDecision},
@@ -1986,7 +1986,7 @@ impl Executor for LlmExecutor {
                     step_index = step.index,
                     tool = %planned_call.name,
                     args = %truncate_for_log(&planned_call.arguments.to_string(), 400),
-                    "executor falling back to planner-provided tool args"
+                    "executor falling back to step-provided tool args"
                 );
                 tool_calls.push(planned_call);
             }

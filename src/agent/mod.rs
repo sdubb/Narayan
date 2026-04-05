@@ -9,6 +9,7 @@ pub mod r#loop;
 pub mod manager;
 pub mod orchestrator;
 pub mod plan_mode;
+pub mod plan_mode_registry;
 pub mod plan_mode_steps;
 pub mod planner;
 pub mod preflight;
@@ -45,6 +46,13 @@ pub use manager::AgentManager;
 #[allow(unused_imports)]
 pub use plan_mode::PlanModeManager;
 #[allow(unused_imports)]
+pub use plan_mode_steps::{
+    PlanModeRetryPolicy, PlanModeWorkflowDraft, PlanModeWorkflowResponsibility, PlanModeWorkflowStep,
+    workflow_contract_prompt_fragment,
+};
+#[allow(unused_imports)]
+pub use plan_mode_registry::{build_registry_candidate_context, build_registry_candidate_set};
+#[allow(unused_imports)]
 #[allow(unused_imports)]
 pub use preflight::LlmPreflight;
 #[allow(unused_imports)]
@@ -70,3 +78,5 @@ mod integration_tests;
 pub(crate) mod test_helpers;
 #[cfg(test)]
 pub(crate) mod tests;
+#[cfg(test)]
+mod tests2;

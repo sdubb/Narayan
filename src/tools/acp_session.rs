@@ -40,6 +40,14 @@ impl Tool for AcpSessionTool {
                         "to": schema_string(),
                     },
                     "additionalProperties": true,
+                },
+                {
+                    "type": "object",
+                    "required": ["messages"],
+                    "properties": {
+                        "messages": schema_string(),
+                    },
+                    "additionalProperties": true,
                 }
             ]
         }))
@@ -88,6 +96,23 @@ impl Tool for AcpSessionTool {
                         Ok(ToolResult::ok(serde_json::json!({"sent": resp.status().is_success(), "to": target})))
                     }
                     Err(e) => Ok(ToolResult::err(format!("ACP send failed: {e}"))),
+                }
+            }
+            "receive_messages" => {
+                let mut r = client.get(format!("{server}/messages"));
+                if let Some(target) = args["target_agent"].as_str() {
+                    if !target.trim().is_empty() {
+                        r = r.query(&[("agent_id", target)]);
+                    }
+                }
+                if let Some(t) = auth {
+                    r = r.bearer_auth(t);
+                }
+                match r.send().await {
+                    Ok(resp) => {
+                        Ok(ToolResult::ok(serde_json::json!({"messages": resp.text().await.unwrap_or_default()})))
+                    }
+                    Err(e) => Ok(ToolResult::err(format!("ACP receive_messages failed: {e}"))),
                 }
             }
             other => Ok(ToolResult::err(format!("Unknown ACP action: '{other}'"))),

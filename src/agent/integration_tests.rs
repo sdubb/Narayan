@@ -1,12 +1,12 @@
-//! Integration tests — verify that AgentLoop subsystems compose correctly.
+﻿//! Integration tests â€” verify that AgentLoop subsystems compose correctly.
 //!
 //! These tests exercise the full step pipeline WITHOUT requiring a database
 //! or an LLM provider.  They use the mock traits from `test_helpers` and
 //! cover three critical composition paths:
 //!
-//!   1. Full lifecycle: plan → execute → complete → consolidate
+//!   1. Full lifecycle: plan â†’ execute â†’ complete â†’ consolidate
 //!   2. Permission enforcement: tool pool restrictions block disallowed tools
-//!   3. Delegation: parent ↔ child messaging and result contract propagation
+//!   3. Delegation: parent â†” child messaging and result contract propagation
 
 use std::sync::Arc;
 
@@ -31,7 +31,7 @@ use crate::{
     tools::default_registry,
 };
 
-// ── Helpers ────────────────────────────────────────────────────────────────
+// â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 fn make_agent_loop(executor: MockExecutor, evaluator: MockEvaluator) -> AgentLoop {
     AgentLoop::new(
@@ -50,34 +50,64 @@ fn make_agent_loop(executor: MockExecutor, evaluator: MockEvaluator) -> AgentLoo
     )
     .with_limits(50, 300)
 }
-fn make_state_with_workflow(goal: &str, steps: Vec<serde_json::Value>) -> AgentState {
+
+fn make_state_with_compiled_workflow(goal: &str, compiled_workflow: serde_json::Value) -> AgentState {
     let mut state = AgentState::new(
         uuid::Uuid::new_v4().to_string(),
         "test-tenant".into(),
         goal.into(),
         "/tmp/test-workspace".into(),
     );
-    state.metadata["workflow_outline"] = serde_json::json!({
-        "steps": steps,
-    });
+    state.metadata["compiled_workflow"] = compiled_workflow;
     state
 }
 
-fn simple_workflow_steps() -> Vec<serde_json::Value> {
+fn simple_compiled_workflow_steps() -> Vec<serde_json::Value> {
     vec![
         serde_json::json!({
-            "description": "Read the input file",
+            "id": "step_1",
+            "dsl_type": "fetch_records",
             "tool": "file_read",
-            "tool_args": { "path": "/tmp/input.txt" },
-            "success_criteria": "File content is returned",
+            "operation": "read_file",
+            "args": { "path": "/tmp/input.txt" },
+            "output_schema": { "type": "string" },
+            "success_criteria": ["File content is returned"],
+            "input_mapping": {},
+            "output_mapping": {},
+            "depends_on": [],
+            "next_steps": [],
         }),
         serde_json::json!({
-            "description": "Write the summary",
+            "id": "step_2",
+            "dsl_type": "store_result",
             "tool": "file_write",
-            "tool_args": { "path": "/tmp/output.txt", "content": "summary" },
-            "success_criteria": "File is written successfully",
+            "operation": "write_file",
+            "args": { "path": "/tmp/output.txt", "content": "summary" },
+            "output_schema": { "type": "string" },
+            "success_criteria": ["File is written successfully"],
+            "input_mapping": {},
+            "output_mapping": {},
+            "depends_on": ["step_1"],
+            "next_steps": [],
         }),
     ]
+}
+
+fn simple_compiled_workflow(goal: &str, steps: Vec<serde_json::Value>) -> serde_json::Value {
+    serde_json::json!({
+        "workflow_id": format!("wf-{}", uuid::Uuid::new_v4()),
+        "version": "v1",
+        "workflow_version": "v1",
+        "dsl_version": "v1",
+        "binding_version": "v1",
+        "runtime_version": "v1",
+        "entry_step": "step_1",
+        "steps": steps,
+        "metadata": {
+            "goal": goal,
+            "category": "general"
+        }
+    })
 }
 
 fn make_step_result(step_index: usize, output: &str) -> StepResult {
@@ -94,10 +124,10 @@ fn make_step_result(step_index: usize, output: &str) -> StepResult {
     }
 }
 
-// ── Test 1: Full Lifecycle ─────────────────────────────────────────────────
+// â”€â”€ Test 1: Full Lifecycle â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-/// Verifies the full agent lifecycle from Pending → Preflight → Planning
-/// → Step Execution → Completion, ensuring all subsystems compose correctly.
+/// Verifies the full agent lifecycle from Pending â†’ Preflight â†’ Planning
+/// â†’ Step Execution â†’ Completion, ensuring all subsystems compose correctly.
 #[tokio::test]
 async fn test_full_lifecycle_plan_to_completion() -> Result<()> {
     let executor = MockExecutor::from_responses(vec![
@@ -107,11 +137,14 @@ async fn test_full_lifecycle_plan_to_completion() -> Result<()> {
     let evaluator = MockEvaluator::from_responses(vec![EvalVerdict::Continue, EvalVerdict::Continue]);
 
     let agent_loop = make_agent_loop(executor, evaluator);
-    let mut state = make_state_with_workflow("Read input and write summary", simple_workflow_steps());
+    let mut state = make_state_with_compiled_workflow(
+        "Read input and write summary",
+        simple_compiled_workflow("Read input and write summary", simple_compiled_workflow_steps()),
+    );
     let mut plan: Option<Plan> = None;
     let mut history = StepHistory::new();
 
-    // Step 1: Preflight — should transition from Pending to Running
+    // Step 1: Preflight â€” should transition from Pending to Running
     let outcome = agent_loop.run_step(&mut state, &mut plan, &mut history).await?;
     match outcome {
         StepOutcome::Continue { .. } => {}
@@ -120,9 +153,9 @@ async fn test_full_lifecycle_plan_to_completion() -> Result<()> {
     assert!(state.started_at.is_some(), "started_at should be stamped after preflight");
 
     // Step 2: Planning + first step execution
-    // The loop should pick up the workflow_outline and build a plan
+    // The loop should pick up the compiled workflow artifact and build a plan
     let outcome = agent_loop.run_step(&mut state, &mut plan, &mut history).await?;
-    assert!(plan.is_some(), "plan should be created from workflow_outline");
+    assert!(plan.is_some(), "plan should be created from compiled_workflow");
     let the_plan = plan.as_ref().unwrap();
     assert_eq!(the_plan.steps.len(), 2, "plan should have 2 steps from workflow");
 
@@ -152,7 +185,7 @@ async fn test_full_lifecycle_plan_to_completion() -> Result<()> {
         other => panic!("expected Continue or Complete after step 1, got {:?}", other),
     }
 
-    // Final assertions — verify composition artifacts
+    // Final assertions â€” verify composition artifacts
     assert_eq!(state.status, AgentStatus::Completed);
 
     // Step outputs should be persisted
@@ -163,23 +196,23 @@ async fn test_full_lifecycle_plan_to_completion() -> Result<()> {
     Ok(())
 }
 
-// ── Test 2: Deterministic Plan Required ────────────────────────────────────
+// â”€â”€ Test 2: Deterministic Plan Required â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-/// Verifies that the runtime refuses to execute when no workflow_outline
-/// is present — enforcing the deterministic-execution invariant.
+/// Verifies that the runtime refuses to execute when no compiled_workflow
+/// is present â€” enforcing the deterministic-execution invariant.
 #[tokio::test]
-async fn test_no_workflow_outline_fails_deterministically() -> Result<()> {
+async fn test_no_compiled_workflow_fails_deterministically() -> Result<()> {
     let executor = MockExecutor::new();
     let evaluator = MockEvaluator::new();
 
-    let agent_loop = make_agent_loop(planner, executor, evaluator);
+    let agent_loop = make_agent_loop(executor, evaluator);
     let mut state = AgentState::new(
         uuid::Uuid::new_v4().to_string(),
         "test-tenant".into(),
-        "Do something without a workflow outline".into(),
+        "Do something without a compiled workflow".into(),
         "/tmp/test-workspace".into(),
     );
-    // Deliberately no workflow_outline in metadata
+    // Deliberately no compiled_workflow in metadata
     let mut plan: Option<Plan> = None;
     let mut history = StepHistory::new();
 
@@ -190,24 +223,24 @@ async fn test_no_workflow_outline_fails_deterministically() -> Result<()> {
         other => panic!("expected Continue after preflight, got {:?}", other),
     }
 
-    // Planning phase — should fail because no workflow_outline exists
+    // Planning phase â€” should fail because no compiled_workflow exists
     let outcome = agent_loop.run_step(&mut state, &mut plan, &mut history).await?;
     match outcome {
         StepOutcome::Failed(reason) => {
             assert!(
-                reason.contains("runtime does not invent plans"),
+                reason.contains("compiled workflow artifact"),
                 "failure reason should mention deterministic requirement, got: {reason}"
             );
         }
-        other => panic!("expected Failed for missing workflow_outline, got {:?}", other),
+        other => panic!("expected Failed for missing compiled_workflow, got {:?}", other),
     }
 
-    assert_eq!(state.status, AgentStatus::Failed, "state should be Failed without workflow_outline");
+    assert_eq!(state.status, AgentStatus::Failed, "state should be Failed without compiled_workflow");
 
     Ok(())
 }
 
-// ── Test 3: Parent-Child Delegation Messaging ──────────────────────────────
+// â”€â”€ Test 3: Parent-Child Delegation Messaging â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Verifies that a child agent's completion triggers a parent notification
 /// message with the correct result contract (status, findings, confidence).
@@ -233,7 +266,7 @@ async fn test_child_completion_notifies_parent() -> Result<()> {
     )
     .with_limits(50, 300);
 
-    // Set up child agent state — note parent_agent_id is set
+    // Set up child agent state â€” note parent_agent_id is set
     let parent_id = uuid::Uuid::new_v4().to_string();
     let child_id = uuid::Uuid::new_v4().to_string();
     let mut state = AgentState::new(
@@ -250,14 +283,22 @@ async fn test_child_completion_notifies_parent() -> Result<()> {
     });
 
     // Give the child a 1-step workflow so it completes quickly
-    state.metadata["workflow_outline"] = serde_json::json!({
-        "steps": [{
-            "description": "Research competitor pricing",
+    state.metadata["compiled_workflow"] = simple_compiled_workflow(
+        "Research competitor pricing",
+        vec![serde_json::json!({
+            "id": "step_1",
+            "dsl_type": "fetch_records",
             "tool": "web_search_tool",
-            "tool_args": { "query": "competitor pricing 2026" },
-            "success_criteria": "Found pricing data",
-        }],
-    });
+            "operation": "search_web",
+            "args": { "query": "competitor pricing 2026" },
+            "output_schema": { "type": "string" },
+            "success_criteria": ["Found pricing data"],
+            "input_mapping": {},
+            "output_mapping": {},
+            "depends_on": [],
+            "next_steps": [],
+        })],
+    );
 
     let mut plan: Option<Plan> = None;
     let mut history = StepHistory::new();
@@ -296,10 +337,10 @@ async fn test_child_completion_notifies_parent() -> Result<()> {
     Ok(())
 }
 
-// ── Test 4: Event Bus Composition ──────────────────────────────────────────
+// â”€â”€ Test 4: Event Bus Composition â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Verifies that the event bus receives the expected sequence of events
-/// during a normal agent lifecycle (preflight → plan → step → complete).
+/// during a normal agent lifecycle (preflight â†’ plan â†’ step â†’ complete).
 #[tokio::test]
 async fn test_event_bus_receives_lifecycle_events() -> Result<()> {
     let executor = MockExecutor::from_responses(vec![make_step_result(0, "Step completed successfully")]);
@@ -322,14 +363,24 @@ async fn test_event_bus_receives_lifecycle_events() -> Result<()> {
     )
     .with_limits(50, 300);
 
-    let mut state = make_state_with_workflow(
+    let mut state = make_state_with_compiled_workflow(
         "Simple one-step task",
-        vec![serde_json::json!({
-            "description": "Do the thing",
-            "tool": "file_read",
-            "tool_args": { "path": "/tmp/test.txt" },
-            "success_criteria": "Done",
-        })],
+        simple_compiled_workflow(
+            "Simple one-step task",
+            vec![serde_json::json!({
+                "id": "step_1",
+                "dsl_type": "fetch_records",
+                "tool": "file_read",
+                "operation": "read_file",
+                "args": { "path": "/tmp/test.txt" },
+                "output_schema": { "type": "string" },
+                "success_criteria": ["Done"],
+                "input_mapping": {},
+                "output_mapping": {},
+                "depends_on": [],
+                "next_steps": [],
+            })],
+        ),
     );
     let mut plan: Option<Plan> = None;
     let mut history = StepHistory::new();
@@ -354,3 +405,4 @@ async fn test_event_bus_receives_lifecycle_events() -> Result<()> {
 
     Ok(())
 }
+

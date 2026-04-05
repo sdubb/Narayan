@@ -10,6 +10,9 @@ impl Tool for ContentSearchTool {
     fn name(&self) -> &str {
         "content_search"
     }
+    fn category(&self) -> &'static str {
+        "filesystem"
+    }
     fn description(&self) -> &str {
         "Search for a text pattern inside files (like grep). Returns matching file paths, line numbers, and matched lines."
     }

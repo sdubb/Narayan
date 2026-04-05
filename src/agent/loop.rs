@@ -6,6 +6,7 @@ use tokio::sync::{Mutex, RwLock};
 
 use crate::{
     agent::{
+        definition::{AgentRole, RoleCategory},
         clarifier::{ClarificationResult, Clarifier},
         evaluator::{check_completion_criteria, EvalVerdict, Evaluator},
         executor::Executor,
@@ -13,7 +14,7 @@ use crate::{
         preflight::{Preflight, PreflightResult},
         prompts::{is_direct_response_goal, StepHistory},
         reflector::Reflector,
-        workflow_compiler::{data_signature_from_value, TypedExpression},
+        workflow_compiler::{CompiledWorkflow, data_signature_from_value, TypedExpression},
     },
     cognition::{
         control_loop::CognitiveControlLoop,
@@ -94,6 +95,49 @@ fn step_history_summary(result: &crate::agent::executor::StepResult, fallback: &
     }
 
     fallback.to_string()
+}
+
+fn fallback_role_from_compiled_workflow(state: &AgentState, compiled: &CompiledWorkflow) -> AgentRole {
+    let role_id = state
+        .metadata
+        .get("role_id")
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| state.id.clone());
+    let agent_id = state
+        .metadata
+        .get("agent_definition_id")
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| state.id.clone());
+    let role_name = state
+        .metadata
+        .get("role_name")
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+        .or_else(|| {
+            compiled
+                .metadata
+                .get("name")
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| state.goal.clone());
+
+    let mut role = AgentRole::new(role_id, agent_id, state.tenant_id.clone(), role_name);
+    role.purpose = compiled
+        .metadata
+        .get("goal")
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| state.goal.clone());
+    role.role_category = compiled
+        .metadata
+        .get("category")
+        .and_then(|value| value.as_str())
+        .map(RoleCategory::from_slug)
+        .unwrap_or_default();
+    role
 }
 
 /// Maximum step_outputs entries kept in the metadata JSONB column.
@@ -841,6 +885,28 @@ impl AgentLoop {
                 rationale: new_plan.rationale.clone(),
                 job_type: new_plan.job_type.clone(),
                 steps: new_plan.steps.iter().map(plan_step_event).collect(),
+                compiler_stage: state
+                    .metadata
+                    .get("compiler_stage")
+                    .and_then(|value| value.as_str())
+                    .map(String::from),
+                compiler_repair_passes: state
+                    .metadata
+                    .get("compiler_repair_passes")
+                    .and_then(|value| value.as_u64())
+                    .map(|value| value as u8)
+                    .unwrap_or_default(),
+                compiler_validation_issues: state
+                    .metadata
+                    .get("compiler_validation_issues")
+                    .and_then(|value| value.as_array())
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(|value| value.as_str().map(String::from))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default(),
             });
 
             tracing::info!(
@@ -1617,9 +1683,35 @@ impl AgentLoop {
     /// Returns None if the role has no compiled workflow, allowing the caller
     /// to fail fast instead of invoking the old runtime repair path.
     async fn try_plan_from_compiled_workflow(&self, state: &mut AgentState) -> Option<Plan> {
-        let store = self.store.as_ref()?;
-        let role_id = state.metadata.get("role_id").and_then(|v| v.as_str())?.to_string();
-        let mut role = store.get_agent_role(&state.tenant_id, &role_id).await.ok()??;
+        let compiled_from_state = state
+            .metadata
+            .get("compiled_workflow")
+            .cloned()
+            .and_then(|value| serde_json::from_value::<CompiledWorkflow>(value).ok());
+
+        let (compiled, role) = if let Some(compiled) = compiled_from_state {
+            let role = if let Some(store) = self.store.as_ref() {
+                if let Some(role_id) = state.metadata.get("role_id").and_then(|v| v.as_str()) {
+                    store
+                        .get_agent_role(&state.tenant_id, role_id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .unwrap_or_else(|| fallback_role_from_compiled_workflow(state, &compiled))
+                } else {
+                    fallback_role_from_compiled_workflow(state, &compiled)
+                }
+            } else {
+                fallback_role_from_compiled_workflow(state, &compiled)
+            };
+            (compiled, role)
+        } else {
+            let store = self.store.as_ref()?;
+            let role_id = state.metadata.get("role_id").and_then(|v| v.as_str())?.to_string();
+            let role = store.get_agent_role(&state.tenant_id, &role_id).await.ok()??;
+            let compiled = role.execution_guidelines.compiled_workflow.as_ref()?.clone();
+            (compiled, role)
+        };
 
         if matches!(
             role.execution_guidelines.execution_strategy,
@@ -1636,7 +1728,6 @@ impl AgentLoop {
             return Some(self.build_coordinator_shell_plan(state, &role));
         }
 
-        let compiled = role.execution_guidelines.compiled_workflow.as_ref()?;
         let input_data = state.metadata.get("input_data").cloned().unwrap_or_else(|| serde_json::json!({}));
         let data_signature = data_signature_from_value(&input_data);
         state.metadata["workflow_data_signature"] =
@@ -1666,7 +1757,23 @@ impl AgentLoop {
             }
         }
 
-        Some(Plan::from_compiled_workflow(compiled, &role))
+        state.metadata["compiler_stage"] = compiled
+            .metadata
+            .get("compiler_stage")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!("review"));
+        state.metadata["compiler_repair_passes"] = compiled
+            .metadata
+            .get("compiler_repair_passes")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!(0));
+        state.metadata["compiler_validation_issues"] = compiled
+            .metadata
+            .get("compiler_validation_issues")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!([]));
+
+        Some(Plan::from_compiled_workflow(&compiled, &role))
     }
 
     fn build_coordinator_shell_plan(&self, state: &mut AgentState, role: &crate::agent::definition::AgentRole) -> Plan {

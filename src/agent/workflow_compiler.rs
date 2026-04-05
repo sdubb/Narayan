@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -7,7 +7,7 @@ use sha2::Digest;
 use crate::{
     agent::definition::{AgentRole, RetryPolicy},
     gateway::{LlmBudgetTier, LlmExecutionIntent, LlmGenerationConfig, LlmRole},
-    tools::ToolRegistry,
+    tools::{toolregistry as semantic_registry, ToolRegistry},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -171,6 +171,50 @@ pub enum DslStepType {
 }
 
 pub const LLM_WORKER_TOOL_NAME: &str = "llm_worker";
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DraftDslStep {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub dsl_type: DslStepType,
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_hint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_hint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_operation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args_hint: Option<serde_json::Value>,
+    #[serde(default)]
+    pub input_mapping: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_only: Option<bool>,
+    #[serde(default)]
+    pub success_criteria: Vec<String>,
+    #[serde(default)]
+    pub depends_on: Vec<String>,
+    #[serde(default)]
+    pub next_steps: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_condition: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repeat_until: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_step: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loop_back_to: Option<String>,
+    #[serde(default)]
+    pub retry_policy: RetryPolicy,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -625,6 +669,14 @@ pub struct CompiledStep {
     pub tool: Option<String>,
     pub operation: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_condition: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repeat_until: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_step: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loop_back_to: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub llm_role: Option<LlmRole>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_intent: Option<LlmExecutionIntent>,
@@ -785,11 +837,9 @@ impl WorkflowCompiler {
         intent: &serde_json::Value,
         tools: &ToolRegistry,
     ) -> Result<CompilerResult, CompilerError> {
-        let hints = workflow_hints(intent);
-        if hints.is_empty() && role.execution_guidelines.workflow_outline.is_empty() {
-            return Err(CompilerError::Message(
-                "workflow_outline is empty; compiler needs at least one intent hint or outline step".into(),
-            ));
+        let draft_steps = workflow_draft_steps(intent);
+        if draft_steps.is_empty() {
+            return Err(CompilerError::Message("workflow_dsl is empty; compiler needs at least one typed step".into()));
         }
 
         let mut resources = collect_resources(role, intent);
@@ -810,7 +860,7 @@ impl WorkflowCompiler {
         let mut previous_step_id: Option<String> = None;
         let mut previous_output_key: Option<String> = None;
 
-        if needs_database(&hints) && !resources.values().any(|resource| resource.resource_type == "database") {
+        if needs_database(&draft_steps) && !resources.values().any(|resource| resource.resource_type == "database") {
             return Ok(CompilerResult::NeedsCard(CompilerCardRequest {
                 card_type: "database".into(),
                 required_fields: vec!["host".into(), "port".into(), "db_name".into()],
@@ -818,7 +868,7 @@ impl WorkflowCompiler {
                 resume_token: "bind_database".into(),
             }));
         }
-        if needs_api(&hints) && !resources.values().any(|resource| resource.resource_type == "api") {
+        if needs_api(&draft_steps) && !resources.values().any(|resource| resource.resource_type == "api") {
             return Ok(CompilerResult::NeedsCard(CompilerCardRequest {
                 card_type: "api_auth".into(),
                 required_fields: vec!["base_url".into(), "api_key".into()],
@@ -826,7 +876,7 @@ impl WorkflowCompiler {
                 resume_token: "bind_api".into(),
             }));
         }
-        if needs_mcp(&hints) && !resources.values().any(|resource| resource.resource_type == "mcp") {
+        if needs_mcp(&draft_steps) && !resources.values().any(|resource| resource.resource_type == "mcp_server") {
             return Ok(CompilerResult::NeedsCard(CompilerCardRequest {
                 card_type: "mcp".into(),
                 required_fields: vec!["server_url".into()],
@@ -834,13 +884,20 @@ impl WorkflowCompiler {
                 resume_token: "bind_mcp".into(),
             }));
         }
+        if needs_acp(&draft_steps) && !resources.values().any(|resource| resource.resource_type == "acp_peer") {
+            return Ok(CompilerResult::NeedsCard(CompilerCardRequest {
+                card_type: "acp".into(),
+                required_fields: vec!["server_url".into(), "target_agent".into()],
+                binding_target: "acp".into(),
+                resume_token: "bind_acp".into(),
+            }));
+        }
 
-        for (index, hint) in hints.iter().enumerate() {
-            let dsl_type = infer_dsl_type(hint);
+        for (index, draft_step) in draft_steps.iter().enumerate() {
+            let dsl_type = draft_step.dsl_type.clone();
             let compiled = compile_step(
                 index,
-                hint,
-                &dsl_type,
+                draft_step,
                 &resources,
                 tools,
                 role,
@@ -942,20 +999,195 @@ impl WorkflowCompiler {
     }
 }
 
-fn workflow_hints(intent: &serde_json::Value) -> Vec<String> {
-    let mut hints = intent["workflow_outline"]
-        .as_array()
-        .map(|items| items.iter().filter_map(|value| value.as_str().map(|s| s.trim().to_string())).collect::<Vec<_>>())
-        .unwrap_or_default();
+fn typed_draft_steps(intent: &serde_json::Value) -> Vec<DraftDslStep> {
+    let Some(items) = intent.get("workflow_dsl").and_then(|value| value.as_array()) else {
+        return Vec::new();
+    };
 
-    if hints.is_empty() {
-        if let Some(actions) = intent["actions"].as_array() {
-            hints.extend(actions.iter().filter_map(|value| value.as_str().map(|s| s.trim().to_string())));
-        }
+    items
+        .iter()
+        .enumerate()
+        .filter_map(|(index, value)| {
+            let object = value.as_object()?;
+            let description = object
+                .get("description")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)?;
+            let dsl_type = object
+                .get("type")
+                .and_then(|value| value.as_str())
+                .and_then(parse_dsl_step_type)
+                .unwrap_or_else(|| infer_dsl_type(&description));
+            let id = object
+                .get("id")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("step_{}", index + 1));
+            let resource_hint = object
+                .get("resource_hint")
+                .or_else(|| object.get("resource"))
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
+            let tool_hint = object
+                .get("tool_hint")
+                .or_else(|| object.get("tool"))
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
+            let tool = object
+                .get("tool")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
+            let tool_operation = object
+                .get("tool_operation")
+                .or_else(|| object.get("operation"))
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
+            let resource_id = object
+                .get("resource_id")
+                .or_else(|| object.get("resource"))
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
+            let resource_type = object
+                .get("resource_type")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
+            let args_hint = object.get("args_hint").cloned().or_else(|| object.get("args").cloned());
+            let input_mapping = object
+                .get("input_mapping")
+                .and_then(|value| value.as_object())
+                .map(|map| {
+                    map.iter()
+                        .filter_map(|(key, value)| value.as_str().map(|source| (key.clone(), source.trim().to_string())))
+                        .filter(|(_, value)| !value.is_empty())
+                        .collect::<BTreeMap<_, _>>()
+                })
+                .unwrap_or_default();
+            let output_schema = object.get("output_schema").cloned();
+            let read_only = object.get("read_only").and_then(|value| value.as_bool());
+            let success_criteria = object
+                .get("success_criteria")
+                .and_then(|value| value.as_array())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|value| value.as_str().map(|s| s.trim().to_string()))
+                        .filter(|value| !value.is_empty())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let depends_on = object
+                .get("depends_on")
+                .and_then(|value| value.as_array())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|value| value.as_str().map(|s| s.trim().to_string()))
+                        .filter(|value| !value.is_empty())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let next_steps = object
+                .get("next_steps")
+                .and_then(|value| value.as_array())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|value| value.as_str().map(|s| s.trim().to_string()))
+                        .filter(|value| !value.is_empty())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let branch_condition = object
+                .get("branch_condition")
+                .or_else(|| object.get("condition"))
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
+            let repeat_until = object
+                .get("repeat_until")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
+            let fallback_step = object
+                .get("fallback_step")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
+            let loop_back_to = object
+                .get("loop_back_to")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
+            let retry_policy = object
+                .get("retry_policy")
+                .cloned()
+                .and_then(|value| serde_json::from_value::<RetryPolicy>(value).ok())
+                .unwrap_or_default();
+
+            Some(DraftDslStep {
+                id,
+                dsl_type,
+                description,
+                resource_hint,
+                tool_hint,
+                tool,
+                tool_operation,
+                resource_id,
+                resource_type,
+                args_hint,
+                input_mapping,
+                output_schema,
+                read_only,
+                success_criteria,
+                depends_on,
+                next_steps,
+                branch_condition,
+                repeat_until,
+                fallback_step,
+                loop_back_to,
+                retry_policy,
+            })
+        })
+        .collect()
+}
+
+fn workflow_draft_steps(intent: &serde_json::Value) -> Vec<DraftDslStep> {
+    typed_draft_steps(intent)
+}
+
+fn parse_dsl_step_type(value: &str) -> Option<DslStepType> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "fetch_records" => Some(DslStepType::FetchRecords),
+        "filter" => Some(DslStepType::Filter),
+        "compute" => Some(DslStepType::Compute),
+        "aggregate" => Some(DslStepType::Aggregate),
+        "detect_anomaly" => Some(DslStepType::DetectAnomaly),
+        "llm_worker" => Some(DslStepType::LlmWorker),
+        "branch" => Some(DslStepType::Branch),
+        "notify" => Some(DslStepType::Notify),
+        "store_result" => Some(DslStepType::StoreResult),
+        _ => None,
     }
-
-    hints.retain(|hint| !hint.is_empty());
-    hints
 }
 
 fn build_variant_policy(compiled_steps: &[CompiledStep]) -> Option<WorkflowVariantPolicy> {
@@ -1182,10 +1414,13 @@ fn extract_tags(value: &serde_json::Value) -> Vec<String> {
     tags
 }
 
-fn needs_database(hints: &[String]) -> bool {
-    hints.iter().any(|hint| {
-        let lower = hint.to_lowercase();
-        lower.contains("database")
+fn needs_database(steps: &[DraftDslStep]) -> bool {
+    steps.iter().any(|step| {
+        let lower = step_signal(step);
+        matches!(step.resource_type.as_deref(), Some("database"))
+            || matches!(step.tool.as_deref(), Some("external_db" | "sql_query" | "vector_search" | "vector_store" | "vector_delete"))
+            || matches!(step.tool_hint.as_deref(), Some("external_db" | "sql_query" | "vector_search" | "vector_store" | "vector_delete"))
+            || lower.contains("database")
             || lower.contains("db")
             || lower.contains("sql")
             || lower.contains("table")
@@ -1194,30 +1429,94 @@ fn needs_database(hints: &[String]) -> bool {
     })
 }
 
-fn needs_api(hints: &[String]) -> bool {
-    hints.iter().any(|hint| {
-        let lower = hint.to_lowercase();
-        lower.contains("api") || lower.contains("http") || lower.contains("endpoint") || lower.contains("rest")
+fn needs_api(steps: &[DraftDslStep]) -> bool {
+    steps.iter().any(|step| {
+        let lower = step_signal(step);
+        matches!(step.resource_type.as_deref(), Some("api" | "http_endpoint"))
+            || matches!(step.tool.as_deref(), Some("http_request" | "api_call" | "external_api"))
+            || matches!(step.tool_hint.as_deref(), Some("http_request" | "api_call" | "external_api"))
+            || lower.contains("api")
+            || lower.contains("http")
+            || lower.contains("endpoint")
+            || lower.contains("rest")
     })
 }
 
-fn needs_mcp(hints: &[String]) -> bool {
-    hints.iter().any(|hint| {
-        let lower = hint.to_lowercase();
-        lower.contains("mcp") || lower.contains("model context protocol") || lower.contains("json-rpc")
+fn needs_mcp(steps: &[DraftDslStep]) -> bool {
+    steps.iter().any(|step| {
+        let lower = step_signal(step);
+        matches!(step.resource_type.as_deref(), Some("mcp" | "mcp_server"))
+            || matches!(step.tool.as_deref(), Some("mcp_session" | "request_more_connectors"))
+            || matches!(step.tool_hint.as_deref(), Some("mcp_session" | "request_more_connectors"))
+            || lower.contains("mcp")
+            || lower.contains("model context protocol")
+            || lower.contains("json-rpc")
     })
+}
+
+fn needs_acp(steps: &[DraftDslStep]) -> bool {
+    steps.iter().any(|step| {
+        let lower = step_signal(step);
+        matches!(step.resource_type.as_deref(), Some("acp" | "acp_peer" | "acp_server"))
+            || matches!(step.tool.as_deref(), Some("acp_session"))
+            || matches!(step.tool_hint.as_deref(), Some("acp_session"))
+            || lower.contains("acp")
+            || lower.contains("agent-to-agent")
+            || lower.contains("internal agent")
+            || lower.contains("peer")
+    })
+}
+
+fn step_signal(step: &DraftDslStep) -> String {
+    let mut parts = vec![step.description.clone()];
+    if let Some(resource) = &step.resource_hint {
+        parts.push(resource.clone());
+    }
+    if let Some(tool) = &step.tool_hint {
+        parts.push(tool.clone());
+    }
+    if let Some(tool) = &step.tool {
+        parts.push(tool.clone());
+    }
+    if let Some(operation) = &step.tool_operation {
+        parts.push(operation.clone());
+    }
+    if let Some(resource) = &step.resource_id {
+        parts.push(resource.clone());
+    }
+    if let Some(resource_type) = &step.resource_type {
+        parts.push(resource_type.clone());
+    }
+    if let Some(args) = &step.args_hint {
+        parts.push(args.to_string());
+    }
+    parts.join(" ").to_lowercase()
 }
 
 fn collect_resources(role: &AgentRole, intent: &serde_json::Value) -> BTreeMap<String, ResourceBinding> {
     let mut resources = BTreeMap::new();
+
+    resources.insert(
+        "workspace".into(),
+        ResourceBinding {
+            id: "workspace".into(),
+            resource_type: "filesystem".into(),
+            connector: None,
+            permissions: vec!["read_only".into()],
+            schema: BTreeMap::new(),
+        },
+    );
+
     for connector in &role.connectors {
         let resource_id = connector.clone();
         let resource_type = if connector.contains("db") {
             "database".to_string()
         } else if connector.contains("api") {
-            "api".to_string()
+            "http_endpoint".to_string()
         } else if connector.contains("mcp") {
-            "mcp".to_string()
+            "mcp_server".to_string()
+        } else if connector.contains("acp") || connector.contains("agent") {
+            "acp_peer".to_string()
         } else {
             "connector".to_string()
         };
@@ -1246,7 +1545,51 @@ fn collect_resources(role: &AgentRole, intent: &serde_json::Value) -> BTreeMap<S
         });
     }
 
+    if let Some(api) =
+        intent.get("uses_external_api").and_then(|value| value.as_str()).filter(|value| !value.trim().is_empty())
+    {
+        resources.entry(api.to_string()).or_insert(ResourceBinding {
+            id: api.to_string(),
+            resource_type: "http_endpoint".into(),
+            connector: Some(api.to_string()),
+            permissions: vec!["read_only".into()],
+            schema: BTreeMap::new(),
+        });
+    }
+
+    if let Some(acp) =
+        intent.get("uses_acp_peer").and_then(|value| value.as_str()).filter(|value| !value.trim().is_empty())
+    {
+        resources.entry(acp.to_string()).or_insert(ResourceBinding {
+            id: acp.to_string(),
+            resource_type: "acp_peer".into(),
+            connector: Some(acp.to_string()),
+            permissions: vec!["read_only".into()],
+            schema: BTreeMap::new(),
+        });
+    }
+
     resources
+}
+
+fn resolve_resource_binding(hint: &str, resources: &BTreeMap<String, ResourceBinding>, resource_type: &str) -> Option<String> {
+    let normalized = hint.trim().to_lowercase();
+    if normalized.is_empty() {
+        return None;
+    }
+
+    if let Some(resource) = resources.get(hint).filter(|resource| resource.resource_type == resource_type) {
+        return Some(resource.id.clone());
+    }
+
+    resources
+        .values()
+        .find(|resource| {
+            resource.resource_type == resource_type
+                && (resource.id.eq_ignore_ascii_case(hint)
+                    || resource.connector.as_deref().map(|value| value.eq_ignore_ascii_case(hint)).unwrap_or(false))
+        })
+        .map(|resource| resource.id.clone())
 }
 
 fn infer_dsl_type(hint: &str) -> DslStepType {
@@ -1308,6 +1651,167 @@ pub(crate) fn infer_llm_role(hint: &str) -> LlmRole {
     } else {
         LlmRole::Drafter
     }
+}
+
+fn registry_step_type(dsl_type: &DslStepType) -> semantic_registry::DslStepType {
+    match dsl_type {
+        DslStepType::FetchRecords => semantic_registry::DslStepType::FetchRecords,
+        DslStepType::Filter => semantic_registry::DslStepType::Filter,
+        DslStepType::Compute => semantic_registry::DslStepType::Compute,
+        DslStepType::Aggregate => semantic_registry::DslStepType::Aggregate,
+        DslStepType::DetectAnomaly => semantic_registry::DslStepType::DetectAnomaly,
+        DslStepType::LlmWorker => semantic_registry::DslStepType::Compute,
+        DslStepType::Branch => semantic_registry::DslStepType::Branch,
+        DslStepType::Notify => semantic_registry::DslStepType::Notify,
+        DslStepType::StoreResult => semantic_registry::DslStepType::StoreResult,
+    }
+}
+
+fn registry_resource_kind(resource_type: Option<&str>) -> Option<semantic_registry::ResourceKind> {
+    match resource_type.map(|value| value.trim().to_ascii_lowercase()) {
+        Some(value) if value == "database" => Some(semantic_registry::ResourceKind::Database),
+        Some(value) if value == "api" || value == "http_endpoint" => Some(semantic_registry::ResourceKind::HttpEndpoint),
+        Some(value) if value == "connector" => Some(semantic_registry::ResourceKind::Connector),
+        Some(value) if value == "acp" || value == "acp_peer" || value == "acp_server" => {
+            Some(semantic_registry::ResourceKind::AcpPeer)
+        }
+        Some(value) if value == "filesystem" => Some(semantic_registry::ResourceKind::FileSystem),
+        Some(value) if value == "api_key" => Some(semantic_registry::ResourceKind::ApiKey),
+        Some(value) if value == "ssh_host" => Some(semantic_registry::ResourceKind::SshHost),
+        Some(value) if value == "docker_daemon" => Some(semantic_registry::ResourceKind::DockerDaemon),
+        Some(value) if value == "kube_cluster" => Some(semantic_registry::ResourceKind::KubeCluster),
+        Some(value) if value == "mcp" || value == "mcp_server" => Some(semantic_registry::ResourceKind::McpServer),
+        _ => None,
+    }
+}
+
+fn semantic_resource_context(resources: &BTreeMap<String, ResourceBinding>) -> semantic_registry::ResourceContext {
+    let bindings = resources
+        .iter()
+        .filter_map(|(id, resource)| {
+            registry_resource_kind(Some(resource.resource_type.as_str())).map(|kind| (id.clone(), kind))
+        })
+        .collect::<HashMap<_, _>>();
+    semantic_registry::ResourceContext { bindings }
+}
+
+fn default_operation_for_step(step: &DraftDslStep) -> Option<String> {
+    if let Some(operation) = step.tool_operation.as_ref() {
+        return Some(operation.clone());
+    }
+    if let Some(tool) = step.tool.as_deref().or(step.tool_hint.as_deref()) {
+        let lower = tool.to_ascii_lowercase();
+        let op = match lower.as_str() {
+            "web_search_tool" => "search",
+            "web_fetch" => "fetch",
+            "browser_open" => "open",
+            "browser_interact" => "extract",
+            "browser_network" => "monitor",
+            "http_request" => "get",
+            "screenshot" => "screenshot",
+            "external_db" => "query",
+            "sql_query" => "select",
+            "vector_search" => "search",
+            "vector_store" => "store",
+            "vector_delete" => "delete",
+            "data_engine" => "transform_records",
+            "data_extractor" => "extract",
+            "spreadsheet_read" => "read",
+            "spreadsheet_write" => "write",
+            "pdf_read" => "read",
+            "pdf_create" => "create",
+            "image_process" => "resize",
+            "email" => "send",
+            "notification" => "send",
+            "pushover" => "send",
+            "send_message" => "send",
+            "mcp_session" => "call_tool",
+            "search_mcp_registry" => "search",
+            "acp_session" => "send_message",
+            "file_read" => "read",
+            "file_write" => "write",
+            "file_edit" => "replace",
+            "glob_search" => "search",
+            "content_search" => "search",
+            "compress" => "compress",
+            "memory_store" => "store",
+            "memory_recall" => "recall",
+            "memory_forget" => "forget",
+            "memory_consolidate" => "consolidate",
+            "code_run" => "run",
+            "shell" => "exec",
+            "git_operations" => "status",
+            "diff" => "diff",
+            "patch" => "apply",
+            "docker" => "status",
+            "kubernetes" => "get",
+            "ssh_exec" => "exec",
+            "crypto_tool" => "hash",
+            _ => return None,
+        };
+        return Some(op.to_string());
+    }
+
+    Some(match step.dsl_type {
+        DslStepType::FetchRecords => "fetch",
+        DslStepType::Filter => "filter",
+        DslStepType::Compute => "compute",
+        DslStepType::Aggregate => "aggregate",
+        DslStepType::DetectAnomaly => "detect_anomaly",
+        DslStepType::LlmWorker => "reason",
+        DslStepType::Notify => "send",
+        DslStepType::StoreResult => "write",
+        DslStepType::Branch => return None,
+    }
+    .to_string())
+}
+
+fn step_constraints(step: &DraftDslStep) -> semantic_registry::StepConstraints {
+    semantic_registry::StepConstraints {
+        read_only: step.read_only.unwrap_or(false),
+        requires_approval: false,
+    }
+}
+
+fn explicit_branch_condition(step: &DraftDslStep) -> Option<String> {
+    step.branch_condition.clone().or_else(|| step.repeat_until.clone())
+}
+
+fn bind_semantic_step(
+    draft_step: &DraftDslStep,
+    resources: &BTreeMap<String, ResourceBinding>,
+) -> Result<semantic_registry::BoundTool, CompilerError> {
+    let step_type = registry_step_type(&draft_step.dsl_type);
+    let operation = default_operation_for_step(draft_step);
+    let tool = draft_step.tool.clone().or_else(|| draft_step.tool_hint.clone());
+    let resource_id = draft_step.resource_id.clone().or_else(|| {
+        draft_step.resource_hint.as_ref().and_then(|hint| {
+            match draft_step.resource_type.as_deref() {
+                Some("database") => resolve_resource_binding(hint, resources, "database"),
+                Some("api") | Some("http_endpoint") => resolve_resource_binding(hint, resources, "http_endpoint"),
+                Some("mcp") | Some("mcp_server") => resolve_resource_binding(hint, resources, "mcp_server"),
+                Some("acp") | Some("acp_peer") | Some("acp_server") => {
+                    resolve_resource_binding(hint, resources, "acp_peer")
+                }
+                Some("connector") => resolve_resource_binding(hint, resources, "connector"),
+                Some("filesystem") => resolve_resource_binding(hint, resources, "filesystem"),
+                _ => None,
+            }
+        })
+    });
+    let semantic_step = semantic_registry::DslStep {
+        id: draft_step.id.clone(),
+        step_type,
+        tool,
+        operation,
+        resource_id,
+        resource_type: registry_resource_kind(draft_step.resource_type.as_deref()),
+        constraints: step_constraints(draft_step),
+    };
+    let semantic_resources = semantic_resource_context(resources);
+
+    semantic_registry::bind_step(&semantic_step, &semantic_resources)
+        .map_err(|error| CompilerError::Message(format!("binding failed for step '{}': {error:?}", draft_step.id)))
 }
 
 pub(crate) fn infer_llm_execution_intent(role: &LlmRole, hint: &str) -> LlmExecutionIntent {
@@ -1478,94 +1982,141 @@ pub(crate) fn llm_output_mapping(role: &LlmRole, step_id: &str) -> BTreeMap<Stri
 
 fn compile_step(
     index: usize,
-    hint: &str,
-    dsl_type: &DslStepType,
+    draft_step: &DraftDslStep,
     resources: &BTreeMap<String, ResourceBinding>,
     tools: &ToolRegistry,
     role: &AgentRole,
     previous_step_id: Option<&str>,
     previous_output_key: Option<&str>,
 ) -> Result<CompiledStep, CompilerError> {
-    let step_id = format!("step_{}", index + 1);
+    let hint = draft_step.description.trim();
+    let dsl_type = &draft_step.dsl_type;
+    let step_id = if draft_step.id.trim().is_empty() { format!("step_{}", index + 1) } else { draft_step.id.clone() };
     let lower = hint.to_lowercase();
     let dependency = previous_step_id.map(str::to_string).into_iter().collect::<Vec<_>>();
 
     match dsl_type {
         DslStepType::FetchRecords => {
-            let resource = resources
-                .values()
-                .find(|resource| resource.resource_type == "database")
-                .map(|resource| resource.id.clone());
-
-            let db_name = resource.clone().ok_or_else(|| {
-                CompilerError::Message(
-                    "fetch_records requires a database resource; use ask_user to open the database card".into(),
-                )
-            })?;
-
-            let tool = if tools.get("external_db").is_some() {
-                "external_db".to_string()
-            } else if tools.get("sql_query").is_some() {
-                "sql_query".to_string()
-            } else {
-                return Err(CompilerError::Message("no database tool registered for fetch_records".into()));
-            };
-            let operation = if tool == "external_db" { "query" } else { "run_query" };
-            let query = infer_sql_query(&lower);
-            let args = if tool == "sql_query" {
-                serde_json::json!({
-                    "query": query,
-                    "connection_key": db_name.clone(),
+            let bound = bind_semantic_step(draft_step, resources)?;
+            let tool = bound.tool_name.to_string();
+            let operation = bound.operation;
+            let resource = draft_step.resource_id.clone().or_else(|| {
+                draft_step
+                    .resource_hint
+                    .as_ref()
+                    .and_then(|hint| resolve_resource_binding(hint, resources, "database"))
+            });
+            let mut args = draft_step.args_hint.clone().unwrap_or_else(|| match tool.as_str() {
+                "external_db" => serde_json::json!({
+                    "db": resource.clone().unwrap_or_else(|| "database".into()),
+                    "operation": operation,
+                    "sql": infer_sql_query(&lower),
+                    "max_rows": role.execution_limits.max_steps.min(1000),
+                }),
+                "sql_query" => serde_json::json!({
+                    "query": infer_sql_query(&lower),
+                    "connection_key": resource.clone().unwrap_or_else(|| "database".into()),
                     "max_rows": 500,
                     "timeout_secs": 30,
-                })
-            } else {
+                }),
+                "web_search_tool" => serde_json::json!({
+                    "query": hint,
+                    "limit": 10,
+                }),
+                "web_fetch" | "browser_open" => serde_json::json!({
+                    "url": resource.clone().unwrap_or_else(|| hint.to_string()),
+                }),
+                "browser_interact" => serde_json::json!({
+                    "url": resource.clone().unwrap_or_else(|| hint.to_string()),
+                    "action": operation.clone(),
+                }),
+                "data_extractor" => serde_json::json!({
+                    "source": hint,
+                }),
+                "pdf_read" => serde_json::json!({
+                    "path": resource.clone().unwrap_or_else(|| hint.to_string()),
+                }),
+                "file_read" => serde_json::json!({
+                    "path": resource.clone().unwrap_or_else(|| hint.to_string()),
+                }),
+                "glob_search" | "content_search" => serde_json::json!({
+                    "pattern": hint,
+                }),
+                "vector_search" | "memory_recall" => serde_json::json!({
+                    "query": hint,
+                }),
+                "http_request" => serde_json::json!({
+                    "method": operation.clone(),
+                    "url": hint,
+                }),
+                _ => serde_json::json!({
+                    "query": hint,
+                }),
+            });
+            if let Some(object) = args.as_object_mut() {
+                if let Some(resource_id) = resource.as_ref() {
+                    object.entry("resource").or_insert_with(|| serde_json::Value::String(resource_id.clone()));
+                }
+            }
+            let output_schema = draft_step.output_schema.clone().unwrap_or_else(|| {
                 serde_json::json!({
-                    "db": db_name,
-                    "operation": "query",
-                    "sql": query,
-                    "max_rows": role.execution_limits.max_steps.min(1000),
-                })
-            };
-
-            Ok(CompiledStep {
-                id: step_id.clone(),
-                dsl_type: dsl_type.clone(),
-                tool: Some(tool),
-                operation: Some(operation.into()),
-                llm_role: None,
-                execution_intent: None,
-                llm_generation: None,
-                args,
-                input_mapping: BTreeMap::new(),
-                output_mapping: BTreeMap::from([("records".into(), format!("{}.records", step_id))]),
-                output_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
                         "records": {"type": "array", "items": {"type": "object"}},
                         "meta": {"type": "object"},
                     }
-                }),
-                success_criteria: vec!["records returned".into()],
-                retry_policy: RetryPolicy::default(),
+                })
+            });
+
+            Ok(CompiledStep {
+                id: step_id.clone(),
+                dsl_type: dsl_type.clone(),
+                tool: Some(tool),
+                operation: Some(operation),
+                branch_condition: explicit_branch_condition(draft_step),
+                repeat_until: draft_step.repeat_until.clone(),
+                fallback_step: draft_step.fallback_step.clone(),
+                loop_back_to: draft_step.loop_back_to.clone(),
+                llm_role: None,
+                execution_intent: None,
+                llm_generation: None,
+                args,
+                input_mapping: if draft_step.input_mapping.is_empty() {
+                    BTreeMap::new()
+                } else {
+                    draft_step.input_mapping.clone()
+                },
+                output_mapping: BTreeMap::from([("records".into(), format!("{}.records", step_id))]),
+                output_schema,
+                success_criteria: if draft_step.success_criteria.is_empty() {
+                    vec!["records returned".into()]
+                } else {
+                    draft_step.success_criteria.clone()
+                },
+                retry_policy: draft_step.retry_policy.clone(),
                 execution_policy: ExecutionPolicy::default(),
                 idempotency: IdempotencyClass::SafeRepeat,
-                locks: vec![db_name.clone()],
-                depends_on: dependency,
-                next_steps: Vec::new(),
-                condition: None,
+                locks: resource.clone().into_iter().collect(),
+                depends_on: if draft_step.depends_on.is_empty() { dependency } else { draft_step.depends_on.clone() },
+                next_steps: draft_step.next_steps.clone(),
+                condition: draft_step
+                    .branch_condition
+                    .as_ref()
+                    .map(|_| expression_from_hint(hint, &step_id, "records")),
                 resource,
             })
         }
         DslStepType::Filter | DslStepType::Compute | DslStepType::Aggregate | DslStepType::DetectAnomaly => {
-            let tool = if tools.get("data_engine").is_some() {
-                "data_engine".to_string()
-            } else {
-                return Err(CompilerError::Message("data_engine tool is required for record transforms".into()));
-            };
+            let bound = bind_semantic_step(draft_step, resources)?;
+            let tool = bound.tool_name.to_string();
+            let operation = bound.operation;
             let source_ref = previous_step_id.unwrap_or("step_1").to_string();
             let source_output_key = previous_output_key.unwrap_or("records");
-            let input_mapping = BTreeMap::from([("records".into(), format!("{source_ref}.{source_output_key}"))]);
+            let input_mapping = if draft_step.input_mapping.is_empty() {
+                BTreeMap::from([("records".into(), format!("{source_ref}.{source_output_key}"))])
+            } else {
+                draft_step.input_mapping.clone()
+            };
             let condition_spec = pipeline_condition_from_hint(hint);
             let (pipeline_op, condition, output_key) = match dsl_type {
                 DslStepType::Filter => ("filter", Some(condition_spec.clone()), "records"),
@@ -1574,12 +2125,28 @@ fn compile_step(
                 DslStepType::DetectAnomaly => ("detect_anomaly", Some(condition_spec), "anomalies"),
                 _ => ("filter", None, "records"),
             };
+            let output_schema = draft_step.output_schema.clone().unwrap_or_else(|| {
+                let mut properties = serde_json::Map::new();
+                properties.insert(
+                    output_key.to_string(),
+                    serde_json::json!({"type": "array", "items": {"type": "object"}}),
+                );
+                properties.insert("meta".into(), serde_json::json!({"type": "object"}));
+                serde_json::json!({
+                    "type": "object",
+                    "properties": properties,
+                })
+            });
 
             Ok(CompiledStep {
                 id: step_id.clone(),
                 dsl_type: dsl_type.clone(),
                 tool: Some(tool),
-                operation: Some("pipeline".into()),
+                operation: Some(operation),
+                branch_condition: explicit_branch_condition(draft_step),
+                repeat_until: draft_step.repeat_until.clone(),
+                fallback_step: draft_step.fallback_step.clone(),
+                loop_back_to: draft_step.loop_back_to.clone(),
                 llm_role: None,
                 execution_intent: None,
                 llm_generation: None,
@@ -1592,25 +2159,18 @@ fn compile_step(
                 }),
                 input_mapping,
                 output_mapping: BTreeMap::from([(output_key.into(), format!("{}.{}", step_id, output_key))]),
-                output_schema: {
-                    let mut properties = serde_json::Map::new();
-                    properties.insert(
-                        output_key.to_string(),
-                        serde_json::json!({"type": "array", "items": {"type": "object"}}),
-                    );
-                    properties.insert("meta".into(), serde_json::json!({"type": "object"}));
-                    serde_json::json!({
-                        "type": "object",
-                        "properties": properties,
-                    })
+                output_schema,
+                success_criteria: if draft_step.success_criteria.is_empty() {
+                    vec!["pipeline completed".into()]
+                } else {
+                    draft_step.success_criteria.clone()
                 },
-                success_criteria: vec!["pipeline completed".into()],
-                retry_policy: RetryPolicy::default(),
+                retry_policy: draft_step.retry_policy.clone(),
                 execution_policy: ExecutionPolicy::default(),
                 idempotency: IdempotencyClass::Pure,
                 locks: Vec::new(),
-                depends_on: dependency,
-                next_steps: Vec::new(),
+                depends_on: if draft_step.depends_on.is_empty() { dependency } else { draft_step.depends_on.clone() },
+                next_steps: draft_step.next_steps.clone(),
                 condition: match dsl_type {
                     DslStepType::Filter => Some(expression_from_hint(hint, &source_ref, source_output_key)),
                     DslStepType::DetectAnomaly => Some(expression_from_hint(hint, &source_ref, source_output_key)),
@@ -1648,17 +2208,25 @@ fn compile_step(
                 dsl_type: dsl_type.clone(),
                 tool: Some(LLM_WORKER_TOOL_NAME.into()),
                 operation: Some("reason".into()),
-                args,
+                branch_condition: explicit_branch_condition(draft_step),
+                repeat_until: draft_step.repeat_until.clone(),
+                fallback_step: draft_step.fallback_step.clone(),
+                loop_back_to: draft_step.loop_back_to.clone(),
+                args: draft_step.args_hint.clone().unwrap_or(args),
                 input_mapping,
                 output_mapping: llm_output_mapping(&llm_role, &step_id),
                 output_schema: llm_output_schema(&llm_role),
-                success_criteria: vec!["llm reasoning completed".into()],
-                retry_policy: RetryPolicy::default(),
+                success_criteria: if draft_step.success_criteria.is_empty() {
+                    vec!["llm reasoning completed".into()]
+                } else {
+                    draft_step.success_criteria.clone()
+                },
+                retry_policy: draft_step.retry_policy.clone(),
                 execution_policy: ExecutionPolicy::default(),
                 idempotency: IdempotencyClass::SafeRepeat,
                 locks: Vec::new(),
-                depends_on: dependency,
-                next_steps: Vec::new(),
+                depends_on: if draft_step.depends_on.is_empty() { dependency } else { draft_step.depends_on.clone() },
+                next_steps: draft_step.next_steps.clone(),
                 condition: None,
                 resource: None,
                 llm_role: Some(llm_role),
@@ -1674,6 +2242,10 @@ fn compile_step(
                 dsl_type: dsl_type.clone(),
                 tool: None,
                 operation: None,
+                branch_condition: explicit_branch_condition(draft_step),
+                repeat_until: draft_step.repeat_until.clone(),
+                fallback_step: draft_step.fallback_step.clone(),
+                loop_back_to: draft_step.loop_back_to.clone(),
                 llm_role: None,
                 execution_intent: None,
                 llm_generation: None,
@@ -1681,88 +2253,108 @@ fn compile_step(
                 input_mapping: BTreeMap::new(),
                 output_mapping: BTreeMap::new(),
                 output_schema: serde_json::json!({"type": "object"}),
-                success_criteria: vec!["branch evaluated".into()],
-                retry_policy: RetryPolicy::default(),
+                success_criteria: if draft_step.success_criteria.is_empty() {
+                    vec!["branch evaluated".into()]
+                } else {
+                    draft_step.success_criteria.clone()
+                },
+                retry_policy: draft_step.retry_policy.clone(),
                 execution_policy: ExecutionPolicy { on_retry: ResumeBehavior::Block, on_resume: ResumeBehavior::Block },
                 idempotency: IdempotencyClass::Pure,
                 locks: Vec::new(),
-                depends_on: dependency,
-                next_steps: Vec::new(),
+                depends_on: if draft_step.depends_on.is_empty() { dependency } else { draft_step.depends_on.clone() },
+                next_steps: draft_step.next_steps.clone(),
                 condition: Some(expression_from_hint(hint, &source_ref, source_output_key)),
                 resource: None,
             })
         }
         DslStepType::Notify => {
-            let tool = if tools.get("notification").is_some() {
-                "notification".to_string()
-            } else if tools.get("send_message").is_some() {
-                "send_message".to_string()
-            } else {
-                return Err(CompilerError::Message("notification tool is not available".into()));
-            };
+            let bound = bind_semantic_step(draft_step, resources)?;
+            let tool = bound.tool_name.to_string();
+            let operation = bound.operation;
 
             Ok(CompiledStep {
                 id: step_id.clone(),
                 dsl_type: dsl_type.clone(),
                 tool: Some(tool),
-                operation: Some("send".into()),
+                operation: Some(operation),
+                branch_condition: explicit_branch_condition(draft_step),
+                repeat_until: draft_step.repeat_until.clone(),
+                fallback_step: draft_step.fallback_step.clone(),
+                loop_back_to: draft_step.loop_back_to.clone(),
                 llm_role: None,
                 execution_intent: None,
                 llm_generation: None,
-                args: serde_json::json!({
+                args: draft_step.args_hint.clone().unwrap_or_else(|| serde_json::json!({
                     "message": hint,
-                }),
-                input_mapping: BTreeMap::new(),
+                })),
+                input_mapping: if draft_step.input_mapping.is_empty() {
+                    BTreeMap::new()
+                } else {
+                    draft_step.input_mapping.clone()
+                },
                 output_mapping: BTreeMap::from([("notification".into(), format!("{}.notification", step_id))]),
-                output_schema: serde_json::json!({
+                output_schema: draft_step.output_schema.clone().unwrap_or_else(|| serde_json::json!({
                     "type": "object",
                     "properties": {"status": {"type": "string"}}
-                }),
-                success_criteria: vec!["notification sent".into()],
-                retry_policy: RetryPolicy::default(),
+                })),
+                success_criteria: if draft_step.success_criteria.is_empty() {
+                    vec!["notification sent".into()]
+                } else {
+                    draft_step.success_criteria.clone()
+                },
+                retry_policy: draft_step.retry_policy.clone(),
                 execution_policy: ExecutionPolicy { on_retry: ResumeBehavior::Block, on_resume: ResumeBehavior::Block },
                 idempotency: IdempotencyClass::SideEffect,
                 locks: Vec::new(),
-                depends_on: dependency,
-                next_steps: Vec::new(),
+                depends_on: if draft_step.depends_on.is_empty() { dependency } else { draft_step.depends_on.clone() },
+                next_steps: draft_step.next_steps.clone(),
                 condition: None,
                 resource: None,
             })
         }
         DslStepType::StoreResult => {
-            let tool = if tools.get("file_write").is_some() {
-                "file_write".to_string()
-            } else if tools.get("create_workspace_tool").is_some() {
-                "create_workspace_tool".to_string()
-            } else {
-                return Err(CompilerError::Message("no storage tool available for store_result".into()));
-            };
+            let bound = bind_semantic_step(draft_step, resources)?;
+            let tool = bound.tool_name.to_string();
+            let operation = bound.operation;
 
             Ok(CompiledStep {
                 id: step_id.clone(),
                 dsl_type: dsl_type.clone(),
                 tool: Some(tool),
-                operation: Some("write".into()),
+                operation: Some(operation),
+                branch_condition: explicit_branch_condition(draft_step),
+                repeat_until: draft_step.repeat_until.clone(),
+                fallback_step: draft_step.fallback_step.clone(),
+                loop_back_to: draft_step.loop_back_to.clone(),
                 llm_role: None,
                 execution_intent: None,
                 llm_generation: None,
-                args: serde_json::json!({
+                args: draft_step.args_hint.clone().unwrap_or_else(|| serde_json::json!({
                     "content": "$input.content",
                     "path": "workspace/results.json",
-                }),
-                input_mapping: BTreeMap::from([(
-                    "content".into(),
-                    format!("{}.{}", previous_step_id.unwrap_or("step_1"), previous_output_key.unwrap_or("records")),
-                )]),
+                })),
+                input_mapping: if draft_step.input_mapping.is_empty() {
+                    BTreeMap::from([(
+                        "content".into(),
+                        format!("{}.{}", previous_step_id.unwrap_or("step_1"), previous_output_key.unwrap_or("records")),
+                    )])
+                } else {
+                    draft_step.input_mapping.clone()
+                },
                 output_mapping: BTreeMap::from([("path".into(), format!("{}.path", step_id))]),
-                output_schema: serde_json::json!({"type": "object"}),
-                success_criteria: vec!["result stored".into()],
-                retry_policy: RetryPolicy::default(),
+                output_schema: draft_step.output_schema.clone().unwrap_or_else(|| serde_json::json!({"type": "object"})),
+                success_criteria: if draft_step.success_criteria.is_empty() {
+                    vec!["result stored".into()]
+                } else {
+                    draft_step.success_criteria.clone()
+                },
+                retry_policy: draft_step.retry_policy.clone(),
                 execution_policy: ExecutionPolicy { on_retry: ResumeBehavior::Block, on_resume: ResumeBehavior::Block },
                 idempotency: IdempotencyClass::SideEffect,
                 locks: Vec::new(),
-                depends_on: dependency,
-                next_steps: Vec::new(),
+                depends_on: if draft_step.depends_on.is_empty() { dependency } else { draft_step.depends_on.clone() },
+                next_steps: draft_step.next_steps.clone(),
                 condition: None,
                 resource: None,
             })
@@ -1973,6 +2565,22 @@ fn validate_compiled_workflow(workflow: &CompiledWorkflow) -> Result<(), Compile
                 return Err(CompilerError::Message(format!(
                     "step '{}' references unknown next step '{}'",
                     step.id, next
+                )));
+            }
+        }
+        if let Some(fallback_step) = &step.fallback_step {
+            if !step_ids.contains_key(fallback_step) {
+                return Err(CompilerError::Message(format!(
+                    "step '{}' references unknown fallback step '{}'",
+                    step.id, fallback_step
+                )));
+            }
+        }
+        if let Some(loop_back_to) = &step.loop_back_to {
+            if !step_ids.contains_key(loop_back_to) {
+                return Err(CompilerError::Message(format!(
+                    "step '{}' references unknown loop_back_to step '{}'",
+                    step.id, loop_back_to
                 )));
             }
         }

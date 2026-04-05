@@ -17,6 +17,9 @@ impl Tool for FileWriteTool {
     fn name(&self) -> &str {
         "file_write"
     }
+    fn category(&self) -> &'static str {
+        "filesystem"
+    }
     fn description(&self) -> &str {
         "Write or overwrite a file with the given content. \
          Creates parent directories as needed. Supports append mode."

@@ -254,6 +254,13 @@ export default function PlanApprovalCard({ agentId, plan, replanning, onDone, on
   const jobType        = plan?.jobType            || '';
   const runtimePolicy  = plan?.runtimePolicy      || plan?.runtime_policy || '';
   const researchSummary = plan?.researchSummary   || plan?.research_summary || '';
+  const compilerStage = plan?.compilerStage || plan?.compiler_stage || '';
+  const compilerRepairPasses = plan?.compilerRepairPasses ?? plan?.compiler_repair_passes ?? 0;
+  const compilerValidationIssues = Array.isArray(plan?.compilerValidationIssues)
+    ? plan.compilerValidationIssues
+    : Array.isArray(plan?.compiler_validation_issues)
+      ? plan.compiler_validation_issues
+      : [];
 
   const [feedback, setFeedback]           = useState('');
   const [loading, setLoading]             = useState(null);
@@ -423,6 +430,11 @@ export default function PlanApprovalCard({ agentId, plan, replanning, onDone, on
               {jobType.replace(/_/g, ' ')}
             </span>
           )}
+          {compilerStage && (
+            <span className="badge bg-vio-soft text-vio border border-vio/20 text-[10px]">
+              compiler {formatLabel(compilerStage)}
+            </span>
+          )}
           {rejectionCount > 0 && (
             <span className="badge bg-warn-soft text-warn border border-warn/20 text-[10px]">
               Revised {rejectionCount}x
@@ -454,10 +466,37 @@ export default function PlanApprovalCard({ agentId, plan, replanning, onDone, on
           </div>
         )}
 
+        {(compilerStage || compilerValidationIssues.length > 0) && (
+          <div className="space-y-2 rounded-xl border border-vio/20 bg-vio-soft/10 px-3 py-2.5">
+            <div className="flex items-center gap-2 flex-wrap">
+              <p className="text-[10px] uppercase tracking-wide text-tx-4">Compiler</p>
+              {compilerStage && (
+                <span className="badge bg-vio-soft text-vio border border-vio/20 text-[10px]">
+                  {formatLabel(compilerStage)}
+                </span>
+              )}
+              <span className="text-[10px] text-tx-4">
+                repair passes: {compilerRepairPasses}
+              </span>
+            </div>
+            {compilerValidationIssues.length > 0 ? (
+              <ul className="space-y-1 text-[11px] text-tx-2 leading-relaxed">
+                {compilerValidationIssues.map((issue, index) => (
+                  <li key={`${issue}-${index}`}>• {issue}</li>
+                ))}
+              </ul>
+            ) : (
+              <p className="text-[11px] text-tx-3 leading-relaxed">
+                Validation passed. The compiler draft is ready for review.
+              </p>
+            )}
+          </div>
+        )}
+
         <div className="rounded-lg border border-border/60 bg-bg px-3 py-2 space-y-1">
           <p className="text-[11px] font-medium text-tx-1">Governance</p>
           <p className="text-[11px] text-tx-3 leading-relaxed">
-            Approval freezes the current workflow outline, the worker checkpoints each step, and connector writes
+            Approval freezes the current compiled workflow artifact, the worker checkpoints each step, and connector writes
             carry stable idempotency keys when the runtime can derive them.
           </p>
           <p className="text-[11px] text-tx-4 leading-relaxed">

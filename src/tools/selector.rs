@@ -6,7 +6,7 @@
 //!   - inflates cost proportionally
 //!
 //! Strategy (applied in order, stops when enough tools found):
-//!   1. Always include: the tool named in the plan step (planner hint)
+//!   1. Always include: the tool named in the plan step (compiler hint)
 //!   2. Always include: a small core set every agent needs
 //!   3. Job-type preferred tools (from JobType::preferred_tools)
 //!   4. Keyword match: step description words against tool names + descriptions
@@ -154,7 +154,7 @@ pub fn select_tools_for_step_with_pool(
         }
     };
 
-    // ── 1. Planner hint — always include the tool the planner specified ──────
+    // ── 1. Compiler hint — always include the tool the compiler specified ─────
     if let Some(ref tool_name) = step.tool {
         add(tool_name, &mut selected, &mut seen);
     }
@@ -260,9 +260,9 @@ pub(crate) fn keyword_score(step_words: &[String], tool_name: &str, tool_desc: &
         + if step_words.iter().any(|w| tool_name.contains(w.as_str())) { 3 } else { 0 }
 }
 
-/// Return a grouped summary of ALL tools for the planner and preflight.
+/// Return a grouped summary of ALL tools for the compiler and preflight.
 /// Doesn't send full schemas — just names grouped by category.
-/// Keeps the planner informed without overwhelming it.
+/// Keeps the compiler informed without overwhelming it.
 pub fn tool_manifest(registry: &ToolRegistry) -> String {
     let groups: &[(&str, &[&str])] = &[
         (
