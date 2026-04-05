@@ -14,7 +14,7 @@ Narayan now follows a strict compiler/runtime split:
 - **LLM use during execution** is allowed only as an explicit compiled worker step.
 - **Setup gaps** are resolved through frontend cards triggered by `ask_user`.
 
-The goal is not a conversational agent loop. The goal is a workflow system that compiles human intent into a fully typed, validated, executable DAG.
+The goal is not a conversational agent loop. The goal is a workflow system that compiles human intent into a fully typed, validated, executable DAG. Plan mode now drafts an explicit contract first, then the compiler validates and binds it.
 
 ---
 
@@ -56,11 +56,11 @@ Plan mode extracts:
 - outputs
 - setup requirements
 
-The output of this phase is structured intent, not an executable workflow yet.
+The output of this phase is structured intent plus a candidate workflow contract, not an executable workflow yet.
 
 ### Phase 2: DSL Generation
 
-The compiler converts intent into a strict, tool-agnostic DSL.
+Plan mode emits a strict, typed `workflow_dsl`. The compiler then validates and binds it into the executable workflow artifact.
 
 Allowed DSL step types:
 
@@ -104,6 +104,34 @@ Rules:
 - same tool may appear multiple times in a workflow
 - workflows may loop back to earlier steps when `loop_back_to` or `repeat_until` makes that explicit
 - if a workflow still cannot be expressed, the result must preserve `missing_capabilities`
+
+Example registry candidate set:
+
+```json
+{
+  "version": 1,
+  "slices": [
+    {
+      "name": "primary",
+      "tools": ["web_search_tool", "data_engine"],
+      "connectors": [],
+      "integrations": ["mcp_session", "acp_session"]
+    },
+    {
+      "name": "secondary",
+      "tools": ["web_fetch", "data_extractor"],
+      "connectors": ["slack"],
+      "integrations": ["search_mcp_registry", "api_call"]
+    },
+    {
+      "name": "fallback",
+      "tools": ["ask_user", "request_more_tools"],
+      "connectors": [],
+      "integrations": []
+    }
+  ]
+}
+```
 
 ### Phase 3: Deterministic Tool Binding
 
@@ -252,9 +280,9 @@ Example:
   "type": "array",
   "items": {
     "type": "object",
-    "fields": {
-      "id": "number",
-      "email": "string"
+    "properties": {
+      "id": { "type": "number" },
+      "email": { "type": "string" }
     }
   }
 }
@@ -281,8 +309,8 @@ Example:
   "op": "gt",
   "left": {
     "type": "number",
-    "fn": "len",
-    "args": ["step_2.anomalies"]
+    "fn": "count",
+    "args": ["step_2.records"]
   },
   "right": {
     "type": "number",
@@ -416,6 +444,145 @@ So the plan-mode LLM can now choose:
 
 This is the same contract-first pattern we use for ordinary tools, just extended to protocol-backed integration lanes.
 
+### Enterprise Examples
+
+These examples are intentionally closer to Fortune 500 workflows than toy demos.
+
+#### 1. MCP Knowledge Server For Risk Monitoring
+
+Use case:
+
+- a global procurement team wants to watch supplier news, product pages, and internal policy notes
+- the organization exposes an MCP server with curated tools like `search_policy`, `fetch_risk_notes`, and `summarize_changes`
+
+Plan-mode contract shape:
+
+```json
+{
+  "workflow_dsl": [
+    {
+      "id": "step_1",
+      "type": "fetch_records",
+      "tool": "mcp_session",
+      "tool_operation": "list_tools",
+      "integration_protocol": "mcp",
+      "integration_action": "list_tools",
+      "server_url": "https://mcp.risk-intel.example.com",
+      "resource_type": "mcp_server",
+      "output_schema": { "type": "object" },
+      "read_only": true,
+      "next_steps": ["step_2"]
+    },
+    {
+      "id": "step_2",
+      "type": "compute",
+      "tool": "mcp_session",
+      "tool_operation": "call_tool",
+      "integration_protocol": "mcp",
+      "integration_action": "call_tool",
+      "integration_sub_operation": "search_policy",
+      "server_url": "https://mcp.risk-intel.example.com",
+      "resource_type": "mcp_server",
+      "read_only": true,
+      "success_criteria": ["policy drift identified"]
+    }
+  ]
+}
+```
+
+Why this matters:
+
+- MCP is a remote capability surface
+- the workflow can discover tools first, then call them
+- plan mode does not invent the server contract; it binds to the MCP lane explicitly
+
+#### 2. ACP Internal Escalation For Compliance Review
+
+Use case:
+
+- a payment-fraud agent detects a suspicious batch
+- it needs to send a summary to an internal compliance agent
+- it should then receive an acknowledgement or follow-up instructions
+
+Plan-mode contract shape:
+
+```json
+{
+  "workflow_dsl": [
+    {
+      "id": "step_1",
+      "type": "compute",
+      "tool": "data_engine",
+      "tool_operation": "detect_anomaly",
+      "output_schema": { "type": "array", "items": { "type": "object" } },
+      "next_steps": ["step_2"]
+    },
+    {
+      "id": "step_2",
+      "type": "notify",
+      "tool": "acp_session",
+      "tool_operation": "send_message",
+      "integration_protocol": "acp",
+      "integration_action": "send_message",
+      "integration_sub_operation": "send_message",
+      "server_url": "https://acp.internal.example.com",
+      "target_agent": "compliance-review-agent",
+      "resource_type": "acp_peer",
+      "read_only": false,
+      "next_steps": ["step_3"]
+    },
+    {
+      "id": "step_3",
+      "type": "fetch_records",
+      "tool": "acp_session",
+      "tool_operation": "receive_messages",
+      "integration_protocol": "acp",
+      "integration_action": "receive_messages",
+      "integration_sub_operation": "receive_messages",
+      "server_url": "https://acp.internal.example.com",
+      "target_agent": "compliance-review-agent",
+      "resource_type": "acp_peer",
+      "read_only": true,
+      "success_criteria": ["review instructions received"]
+    }
+  ]
+}
+```
+
+Why this matters:
+
+- ACP is not just a send-only endpoint
+- it can model internal inbox, review, and coordination loops between agents
+- this is the right lane when the user wants one internal agent to ask another internal agent for help
+
+#### 3. Mixed Workflow: Launch Monitoring Across Web, API, DB, and ACP
+
+Use case:
+
+- a consumer-tech company wants to track launch chatter on the public web
+- it wants to compare that against internal support tickets and a product database
+- if the trend looks risky, it notifies an internal comms agent and a Slack connector
+
+Contract shape:
+
+- `web_search_tool` for public signal collection
+- `data_extractor` and `data_engine` for normalization and scoring
+- `external_db` for product or ticket data
+- `acp_session` for internal agent escalation
+- `slack` connector for outbound team notification
+
+This is the kind of workflow where the registry slices matter:
+
+- primary slice: web and data tools
+- secondary slice: connector and integration tools
+- fallback slice: setup cards, missing capabilities, or ask-user prompts
+
+The key design rule is unchanged:
+
+- plan mode chooses from the narrowed candidate set
+- the compiler binds the exact contract
+- runtime executes the compiled artifact
+
 ---
 
 ## Workflow Artifact
@@ -512,6 +679,11 @@ Example:
       "type": "database",
       "connector": "postgres",
       "permissions": ["read_only"]
+    },
+    "acp_ops": {
+      "type": "acp_peer",
+      "connector": "ops_acp",
+      "permissions": ["read_only"]
     }
   }
 }
@@ -522,6 +694,60 @@ Rules:
 - steps reference resources by id
 - permissions are enforced at runtime
 - no hidden connection state
+
+### Canonical Contract Example
+
+A contract-first plan-mode pass now looks more like this:
+
+```json
+{
+  "preferred_tool_categories": ["web", "data"],
+  "candidate_connectors": [],
+  "missing_capabilities": [],
+  "workflow_dsl": [
+    {
+      "id": "step_1",
+      "type": "search_web",
+      "tool": "web_search_tool",
+      "tool_operation": "search",
+      "resource_id": null,
+      "resource_type": null,
+      "input_mapping": { "query": "company_name" },
+      "output_schema": { "type": "object" },
+      "read_only": true,
+      "depends_on": [],
+      "next_steps": ["step_2"],
+      "branch_condition": null,
+      "repeat_until": null,
+      "fallback_step": null,
+      "loop_back_to": null,
+      "retry_policy": { "max_attempts": 1, "backoff_secs": 2, "retry_on": [] },
+      "success_criteria": ["recent relevant web results found"]
+    },
+    {
+      "id": "step_2",
+      "type": "compute",
+      "tool": "data_engine",
+      "tool_operation": "aggregate",
+      "resource_id": null,
+      "resource_type": null,
+      "input_mapping": { "records": "step_1.results" },
+      "output_schema": { "type": "array", "items": { "type": "object" } },
+      "read_only": true,
+      "depends_on": ["step_1"],
+      "next_steps": [],
+      "branch_condition": null,
+      "repeat_until": null,
+      "fallback_step": null,
+      "loop_back_to": null,
+      "retry_policy": { "max_attempts": 1, "backoff_secs": 2, "retry_on": [] },
+      "success_criteria": ["results normalized"]
+    }
+  ]
+}
+```
+
+The compiler still validates and normalizes this contract before runtime executes it.
 
 ---
 
@@ -743,36 +969,29 @@ Frontend behavior:
 
 ### End-to-End Example
 
-1. The user logs in and opens the agent composer.
-2. The user types: `Watch my users table and alert me when failed_logins > 5.`
-3. Plan mode starts compiling the goal.
-4. The compiler extracts structured intent:
-   - database monitoring
-   - users table
-   - anomaly detection
-   - notification output
-5. The compiler detects that the database is not connected yet.
-6. Instead of guessing, plan mode emits `ask_user` with `question_type: card_open`.
-7. The frontend opens the database setup card.
-8. The user enters the database host, port, database name, and credentials.
-9. The saved connection updates the resource context.
-10. Plan mode resumes compilation with the new resource binding.
-11. The compiler produces a typed workflow:
-   - fetch records from `db_main`
-   - run anomaly detection
-   - branch on whether anomalies exist
-   - notify or store the result
-12. If a reasoning step is required, the compiler emits an explicit `llm_worker` node with:
-   - `llm_role`
-   - `execution_intent`
-   - budget settings
-   - input mapping
-   - output schema
-13. The user reviews the compiled workflow in the plan UI.
-14. The user runs test and save.
-15. Runtime loads the compiled artifact, resolves inputs, enforces locks and policies, and executes the DAG.
-16. If runtime hits a structural or policy failure, it marks the workflow for recompile and forks a new version using the preserved lineage.
-17. The frontend shows the run timeline, step cards, cost, failures, and any clarification/setup prompts.
+1. The user opens plan mode and says: `Monitor our product site, search the web for mentions, and alert the internal ops agent if a launch looks risky.`
+2. Plan mode extracts intent and classifies the workflow as web + data + ACP internal-agent communication.
+3. `plan_mode_registry.rs` builds a three-slice registry candidate set with:
+   - primary web/data candidates
+   - secondary connector and integration candidates
+   - fallback safety candidates
+4. The registry slice includes `web_search_tool`, `data_engine`, and `acp_session` with `list_agents`, `receive_messages`, and `send_message`.
+5. The LLM fills an explicit contract from those candidates instead of inventing tools.
+6. If a database or ACP peer is missing, plan mode emits `ask_user` with `question_type: card_open`.
+7. The frontend opens the relevant setup card.
+8. The user adds the missing database, connector, MCP server, or ACP peer.
+9. Plan mode resumes with the saved resource binding.
+10. The compiler validates the draft and canonicalizes it into the compiled workflow artifact.
+11. A final workflow might include:
+   - `search_web` with `web_search_tool`
+   - `compute` with `data_engine`
+   - `acp_session` with `send_message` or `receive_messages`
+   - `llm_worker` if reasoning is needed as an explicit node
+12. The user reviews the compiled workflow in the plan UI.
+13. The user runs test and save.
+14. Runtime loads the compiled artifact, resolves inputs, enforces locks and policies, and executes the DAG.
+15. If runtime hits a structural or policy failure, it marks the workflow for recompile and forks a new version using the preserved lineage.
+16. The frontend shows the run timeline, step cards, cost, failures, and any clarification/setup prompts.
 
 ### Frontend Flow Summary
 

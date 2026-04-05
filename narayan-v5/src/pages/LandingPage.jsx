@@ -300,205 +300,172 @@ function ExampleCard({ example }) {
   );
 }
 
-/* ─── ACP 3-D Orbital Diagram ────────────────────────────────────────────── */
+/* ─── ACP Flow Diagram ────────────────────────────────────────────────────── */
 function ACPDiagram() {
-  const specialists = [
-    { label: 'Invoice\nAgent',    color: '#c96a2e', bg: 'rgba(201,106,46,0.15)', border: 'rgba(201,106,46,0.45)', angle: 270 },
-    { label: 'Search\nAgent',    color: '#3b82f6', bg: 'rgba(59,130,246,0.15)',  border: 'rgba(59,130,246,0.45)',  angle: 0   },
-    { label: 'Notify\nAgent',    color: '#8b5cf6', bg: 'rgba(139,92,246,0.15)', border: 'rgba(139,92,246,0.45)', angle: 90  },
-    { label: 'Audit\nAgent',     color: '#10b981', bg: 'rgba(16,185,129,0.15)', border: 'rgba(16,185,129,0.45)', angle: 180 },
+  const W = 520, H = 410, CX = 260;
+  const TRIG_CY = 46, ORCH_CY = 155, AGENT_CY = 292, OUT_CY = 380;
+  const TRIG = { w: 130, h: 36 };
+  const ORCH = { w: 160, h: 54 };
+  const AGT  = { w: 82,  h: 42 };
+  const OUT  = { w: 150, h: 30 };
+  const agents = [
+    { label: ['Invoice', 'Agent'], color: '#e07540', x: 66  },
+    { label: ['Search',  'Agent'], color: '#5b9cf6', x: 188 },
+    { label: ['Notify',  'Agent'], color: '#9b72f5', x: 332 },
+    { label: ['Audit',   'Agent'], color: '#34d399', x: 454 },
   ];
-
-  const R = 110; // orbit radius (px)
+  const trigBot = TRIG_CY + TRIG.h / 2;
+  const orchTop = ORCH_CY - ORCH.h / 2;
+  const orchBot = ORCH_CY + ORCH.h / 2;
+  const agtTop  = AGENT_CY - AGT.h / 2;
+  const agtBot  = AGENT_CY + AGT.h / 2;
+  const outTop  = OUT_CY - OUT.h / 2;
 
   return (
     <motion.div
-      initial={{ opacity: 0, y: 24 }}
+      initial={{ opacity: 0, y: 20 }}
       whileInView={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.7 }}
+      transition={{ duration: 0.6 }}
       viewport={{ once: true }}
-      className="relative overflow-hidden rounded-[2rem] border border-white/10 bg-[#0f0d0b] shadow-[0_24px_72px_rgba(0,0,0,0.45)]"
-      style={{ minHeight: 420 }}
+      className="relative flex h-full flex-col overflow-hidden rounded-[2rem] border border-white/10 bg-[#0d0b09]"
+      style={{ minHeight: 0 }}
     >
-      {/* Ambient glows */}
-      <div className="pointer-events-none absolute inset-0" style={{
-        background: 'radial-gradient(circle at 50% 54%, rgba(201,106,46,0.18) 0%, transparent 55%), radial-gradient(circle at 80% 20%, rgba(59,130,246,0.12) 0%, transparent 40%)'
-      }} />
-
-      {/* Header bar */}
-      <div className="relative flex items-center justify-between border-b border-white/8 px-6 py-4">
+      {/* Header */}
+      <div className="relative flex items-center justify-between border-b border-white/[0.07] px-5 py-3.5">
         <div>
-          <p className="text-[0.6rem] font-bold uppercase tracking-[0.3em] text-white/35">Live ACP Network</p>
-          <p className="mt-0.5 text-sm font-medium text-white/80">Narayan orchestrator</p>
+          <p className="text-[0.58rem] font-bold uppercase tracking-[0.3em] text-white/30">ACP Execution Flow</p>
+          <p className="mt-0.5 text-sm font-semibold text-white/75">How a job runs through Narayan</p>
         </div>
         <div className="flex items-center gap-2">
           <motion.span
-            animate={{ opacity: [1, 0.3, 1] }}
-            transition={{ duration: 1.6, repeat: Infinity }}
+            animate={{ opacity: [1, 0.25, 1] }}
+            transition={{ duration: 1.8, repeat: Infinity }}
             className="size-2 rounded-full bg-emerald-400"
           />
-          <span className="text-xs text-white/40">4 agents active</span>
+          <span className="text-[0.68rem] text-white/35">4 agents active</span>
         </div>
       </div>
 
-      {/* 3-D scene */}
-      <div className="relative flex items-center justify-center" style={{ height: 300, perspective: '900px' }}>
-        <motion.div
-          animate={{ rotateY: [0, 8, 0, -8, 0] }}
-          transition={{ duration: 14, repeat: Infinity, ease: 'easeInOut' }}
-          style={{ transformStyle: 'preserve-3d', width: '100%', height: '100%', position: 'relative' }}
-        >
-          {/* Orbit ellipse (CSS 3-D rotated ring) */}
-          <div style={{
-            position: 'absolute', top: '50%', left: '50%',
-            width: R * 2 + 80, height: R * 2 + 80,
-            marginLeft: -(R + 40), marginTop: -(R + 40),
-            borderRadius: '50%',
-            border: '1px solid rgba(255,255,255,0.06)',
-            transform: 'rotateX(62deg)',
-            boxShadow: 'inset 0 0 40px rgba(201,106,46,0.04)',
-          }} />
-          <div style={{
-            position: 'absolute', top: '50%', left: '50%',
-            width: R * 2 + 20, height: R * 2 + 20,
-            marginLeft: -(R + 10), marginTop: -(R + 10),
-            borderRadius: '50%',
-            border: '1px dashed rgba(255,255,255,0.04)',
-            transform: 'rotateX(62deg)',
-          }} />
+      {/* SVG diagram */}
+      <div className="relative flex-1 px-2 pb-3 pt-2">
+        <svg viewBox={`0 0 ${W} ${H}`} className="h-full w-full" style={{ display: 'block' }}>
+          <defs>
+            <marker id="aAmber" markerWidth="7" markerHeight="7" refX="5" refY="3.5" orient="auto">
+              <path d="M0,0.5 L6,3.5 L0,6.5 Z" fill="rgba(224,117,64,0.85)" />
+            </marker>
+            <marker id="aWhite" markerWidth="7" markerHeight="7" refX="5" refY="3.5" orient="auto">
+              <path d="M0,0.5 L6,3.5 L0,6.5 Z" fill="rgba(255,255,255,0.3)" />
+            </marker>
+            {agents.map(({ color }, i) => (
+              <marker key={i} id={`aa${i}`} markerWidth="7" markerHeight="7" refX="5" refY="3.5" orient="auto">
+                <path d="M0,0.5 L6,3.5 L0,6.5 Z" fill={color + 'cc'} />
+              </marker>
+            ))}
+            <radialGradient id="og" cx="50%" cy="50%" r="50%">
+              <stop offset="0%"   stopColor="rgba(201,106,46,0.35)" />
+              <stop offset="100%" stopColor="rgba(201,106,46,0)"    />
+            </radialGradient>
+          </defs>
 
-          {/* Specialist agent nodes around the orbit */}
-          {specialists.map(({ label, color, bg, border, angle }) => {
-            const rad = (angle * Math.PI) / 180;
-            const x = Math.cos(rad) * R;
-            const y = Math.sin(rad) * R * 0.42; // flattened for 3-D feel
-            const zOff = Math.sin(rad) * 20;
-            return (
-              <motion.div
-                key={label}
-                animate={{ y: [y, y - 4, y] }}
-                transition={{ duration: 3.5 + angle * 0.01, repeat: Infinity, ease: 'easeInOut' }}
-                style={{
-                  position: 'absolute',
-                  top: '50%', left: '50%',
-                  width: 64, height: 64,
-                  marginLeft: x - 32,
-                  marginTop: -32,
-                  background: bg,
-                  border: `1.5px solid ${border}`,
-                  borderRadius: 16,
-                  display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  flexDirection: 'column',
-                  transform: `translateZ(${zOff}px)`,
-                  boxShadow: `0 0 24px ${color}33`,
-                  backdropFilter: 'blur(6px)',
-                  cursor: 'default',
-                }}
-              >
-                {label.split('\n').map((ln, i) => (
-                  <span key={i} style={{ fontSize: 9, fontWeight: 700, color, lineHeight: 1.35, textAlign: 'center', letterSpacing: '0.06em' }}>{ln}</span>
-                ))}
-              </motion.div>
-            );
-          })}
-
-          {/* Centre orchestrator node */}
-          <div style={{
-            position: 'absolute', top: '50%', left: '50%',
-            width: 72, height: 72,
-            marginLeft: -36, marginTop: -36,
-            borderRadius: 20,
-            background: 'linear-gradient(135deg, rgba(201,106,46,0.3), rgba(201,106,46,0.08))',
-            border: '2px solid rgba(201,106,46,0.6)',
-            display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column',
-            boxShadow: '0 0 36px rgba(201,106,46,0.25), inset 0 1px 0 rgba(255,255,255,0.08)',
-            zIndex: 10,
-          }}>
-            <motion.div
-              animate={{ scale: [1, 1.08, 1] }}
-              transition={{ duration: 2.2, repeat: Infinity }}
-              style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}
-            >
-              <span style={{ fontSize: 10, fontWeight: 800, color: '#c96a2e', letterSpacing: '0.1em' }}>NARAYAN</span>
-              <span style={{ fontSize: 8, color: 'rgba(201,106,46,0.6)', letterSpacing: '0.06em', marginTop: 2 }}>ORCHESTRATOR</span>
-            </motion.div>
-          </div>
-
-          {/* Animated SVG message packets (lines from centre → each agent) */}
-          <svg
-            style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', pointerEvents: 'none', overflow: 'visible' }}
-          >
-            <defs>
-              {specialists.map(({ color, angle }) => (
-                <radialGradient key={`rg-${angle}`} id={`rg${angle}`}>
-                  <stop offset="0%" stopColor={color} stopOpacity="0.8" />
-                  <stop offset="100%" stopColor={color} stopOpacity="0" />
-                </radialGradient>
-              ))}
-            </defs>
-            {specialists.map(({ color, angle }, si) => {
-              const rad = (angle * Math.PI) / 180;
-              const cx = 0, cy = 0;
-              const tx = Math.cos(rad) * R;
-              const ty = Math.sin(rad) * R * 0.42;
-              return (
-                <motion.circle
-                  key={`pkt-${angle}`}
-                  r="4"
-                  fill={color}
-                  initial={{ cx: '50%', cy: '50%', opacity: 0.9, scale: 1 }}
-                  animate={{
-                    cx: ['50%', `calc(50% + ${tx}px)`, '50%'],
-                    cy: ['50%', `calc(50% + ${ty}px)`, '50%'],
-                    opacity: [0, 1, 0.8, 0],
-                    scale: [0.5, 1, 0.8, 0],
-                  }}
-                  transition={{
-                    duration: 2.2,
-                    repeat: Infinity,
-                    delay: si * 0.6,
-                    ease: 'easeInOut',
-                  }}
-                />
-              );
-            })}
-          </svg>
-
-          {/* Pulse ring on orchestrator */}
-          {[0, 1].map(i => (
-            <motion.div
-              key={`ring-${i}`}
-              animate={{ scale: [1, 2.2], opacity: [0.4, 0] }}
-              transition={{ duration: 2.4, repeat: Infinity, delay: i * 1.2, ease: 'easeOut' }}
-              style={{
-                position: 'absolute', top: '50%', left: '50%',
-                width: 72, height: 72,
-                marginLeft: -36, marginTop: -36,
-                borderRadius: 20,
-                border: '1.5px solid rgba(201,106,46,0.5)',
-                pointerEvents: 'none',
-              }}
-            />
+          {/* Step labels (left margin) */}
+          {[{ y: 95, t: '① RECEIVE' }, { y: 225, t: '② DELEGATE' }, { y: 340, t: '③ STREAM BACK' }].map(({ y, t }) => (
+            <text key={t} x={14} y={y} fill="rgba(255,255,255,0.15)" fontSize="7" fontWeight="800" letterSpacing="1">{t}</text>
           ))}
-        </motion.div>
-      </div>
 
-      {/* Legend */}
-      <div className="relative flex flex-wrap items-center justify-center gap-3 border-t border-white/8 px-6 py-3">
-        {specialists.map(({ label, color }) => (
-          <div key={label} className="flex items-center gap-1.5">
-            <span className="size-2 rounded-full" style={{ background: color }} />
-            <span className="text-[0.6rem] uppercase tracking-[0.1em]" style={{ color: 'rgba(255,255,255,0.45)' }}>{label.replace('\n', ' ')}</span>
-          </div>
-        ))}
-        <div className="flex items-center gap-1.5">
-          <span className="inline-block h-px w-4 bg-gradient-to-r from-amber-500 to-transparent" />
-          <span className="text-[0.6rem] uppercase tracking-[0.1em] text-white/30">ACP message</span>
-        </div>
+          {/* ── JOB TRIGGER ──────────────────────────────────────────── */}
+          <rect x={CX - TRIG.w / 2} y={TRIG_CY - TRIG.h / 2} width={TRIG.w} height={TRIG.h} rx={10}
+            fill="rgba(255,255,255,0.05)" stroke="rgba(255,255,255,0.2)" strokeWidth="1.5" />
+          <text x={CX} y={TRIG_CY - 5} textAnchor="middle" fill="rgba(255,255,255,0.75)" fontSize="9.5" fontWeight="700" letterSpacing="1.2">JOB TRIGGER</text>
+          <text x={CX} y={TRIG_CY + 8} textAnchor="middle" fill="rgba(255,255,255,0.28)" fontSize="7.5">webhook · schedule · user</text>
+
+          {/* Trigger → Orch line */}
+          <line x1={CX} y1={trigBot + 2} x2={CX} y2={orchTop - 5}
+            stroke="rgba(201,106,46,0.55)" strokeWidth="1.5" markerEnd="url(#aAmber)" />
+          <text x={CX + 9} y={(trigBot + orchTop) / 2 + 4} fill="rgba(201,106,46,0.45)" fontSize="7.5" fontWeight="700" letterSpacing="0.8">ACP received</text>
+
+          {/* Dot: trigger → orch */}
+          <motion.circle r="4.5" fill="#e07540"
+            style={{ filter: 'drop-shadow(0 0 6px #e07540)' }}
+            animate={{ cx: [CX, CX], cy: [trigBot + 4, orchTop - 7], opacity: [0, 1, 1, 0] }}
+            transition={{ duration: 1.4, repeat: Infinity, ease: 'easeInOut', repeatDelay: 1 }}
+          />
+
+          {/* ── ORCHESTRATOR ─────────────────────────────────────────── */}
+          <motion.rect
+            x={CX - ORCH.w / 2 - 12} y={orchTop - 12}
+            width={ORCH.w + 24} height={ORCH.h + 24} rx={24}
+            fill="url(#og)"
+            animate={{ opacity: [0.35, 0.85, 0.35] }}
+            transition={{ duration: 2.6, repeat: Infinity }}
+          />
+          <rect x={CX - ORCH.w / 2} y={orchTop} width={ORCH.w} height={ORCH.h} rx={16}
+            fill="rgba(201,106,46,0.18)" stroke="rgba(201,106,46,0.7)" strokeWidth="2" />
+          <text x={CX} y={ORCH_CY - 7} textAnchor="middle" fill="#e07540" fontSize="12" fontWeight="800" letterSpacing="1.6">NARAYAN</text>
+          <text x={CX} y={ORCH_CY + 10} textAnchor="middle" fill="rgba(201,106,46,0.55)" fontSize="8.5" letterSpacing="1.2">ORCHESTRATOR</text>
+
+          {/* ── DELEGATE SPOKES ──────────────────────────────────────── */}
+          <text x={14} y={235} fill="rgba(224,117,64,0.4)" fontSize="7.5" fontWeight="700">ACP delegate →</text>
+
+          {agents.map(({ x, color }, i) => (
+            <g key={`dn-${i}`}>
+              <line x1={CX} y1={orchBot + 2} x2={x} y2={agtTop - 4}
+                stroke={color} strokeWidth="1.5" strokeOpacity="0.5" markerEnd={`url(#aa${i})`} />
+              <motion.circle r="4" fill={color}
+                style={{ filter: `drop-shadow(0 0 6px ${color})` }}
+                animate={{ cx: [CX, x], cy: [orchBot + 4, agtTop - 6], opacity: [0, 1, 1, 0] }}
+                transition={{ duration: 1.7, repeat: Infinity, delay: i * 0.48, ease: 'easeInOut', repeatDelay: 1.3 }}
+              />
+            </g>
+          ))}
+
+          {/* ── AGENT NODES ──────────────────────────────────────────── */}
+          {agents.map(({ label, color, x }) => (
+            <g key={`ag-${x}`}>
+              <rect x={x - AGT.w / 2} y={agtTop} width={AGT.w} height={AGT.h} rx={12}
+                fill={color + '1c'} stroke={color + '72'} strokeWidth="1.5"
+                style={{ filter: `drop-shadow(0 0 12px ${color}2a)` }}
+              />
+              <text x={x} y={AGENT_CY - 6} textAnchor="middle" fill={color} fontSize="9" fontWeight="700" letterSpacing="0.5">{label[0]}</text>
+              <text x={x} y={AGENT_CY + 9} textAnchor="middle" fill={color + '99'} fontSize="8">{label[1]}</text>
+            </g>
+          ))}
+
+          {/* ── STREAM BACK ──────────────────────────────────────────── */}
+          <text x={378} y={248} fill="rgba(100,200,140,0.38)" fontSize="7.5" fontWeight="700">← ACP stream</text>
+
+          {agents.map(({ x, color }, i) => (
+            <g key={`up-${i}`}>
+              <line x1={x} y1={agtBot + 2} x2={CX} y2={orchBot + 5}
+                stroke={color} strokeWidth="1" strokeOpacity="0.18" />
+              <motion.circle r="3" fill={color}
+                style={{ opacity: 0.75, filter: `drop-shadow(0 0 4px ${color})` }}
+                animate={{ cx: [x, CX], cy: [agtBot + 4, orchBot + 7], opacity: [0, 0.85, 0.85, 0] }}
+                transition={{ duration: 1.7, repeat: Infinity, delay: 0.85 + i * 0.48, ease: 'easeInOut', repeatDelay: 1.3 }}
+              />
+            </g>
+          ))}
+
+          {/* ── OUTPUT ───────────────────────────────────────────────── */}
+          <line x1={CX} y1={orchBot + 14} x2={CX} y2={outTop - 4}
+            stroke="rgba(255,255,255,0.2)" strokeWidth="1.5" markerEnd="url(#aWhite)" />
+          <text x={CX + 9} y={(orchBot + 26 + outTop) / 2} fill="rgba(255,255,255,0.22)" fontSize="7.5" fontWeight="600">merged &amp; dispatched</text>
+
+          <rect x={CX - OUT.w / 2} y={outTop} width={OUT.w} height={OUT.h} rx={9}
+            fill="rgba(52,211,153,0.09)" stroke="rgba(52,211,153,0.38)" strokeWidth="1.5" />
+          <text x={CX} y={OUT_CY + 6} textAnchor="middle" fill="rgba(52,211,153,0.8)" fontSize="9.5" fontWeight="700" letterSpacing="1">✓ WORKFLOW COMPLETE</text>
+
+          <motion.circle r="3.5" fill="rgba(52,211,153,0.9)"
+            style={{ filter: 'drop-shadow(0 0 5px #34d399)' }}
+            animate={{ cx: [CX, CX], cy: [orchBot + 16, outTop - 6], opacity: [0, 1, 1, 0] }}
+            transition={{ duration: 1.2, repeat: Infinity, delay: 4, ease: 'easeInOut', repeatDelay: 5.5 }}
+          />
+        </svg>
       </div>
     </motion.div>
   );
 }
+
+
 
 export default function LandingPage({ onEnterApp, onSignIn }) {
   return (
@@ -714,7 +681,7 @@ export default function LandingPage({ onEnterApp, onSignIn }) {
             text="Narayan is built natively on the Agent Communication Protocol (ACP) — an open IBM/BeeAI standard that lets autonomous agents delegate, stream results, and coordinate across trust boundaries without any centralised controller."
           />
 
-          <div className="mt-12 grid gap-8 lg:grid-cols-2">
+          <div className="mt-12 grid items-stretch gap-8 lg:grid-cols-2">
             {/* Left: how Narayan uses ACP */}
             <div className="space-y-4">
               {[
