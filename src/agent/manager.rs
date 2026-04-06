@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use crate::{
     agent::definition::AgentRole,
-    agent::plan_mode_steps::generate_steps,
+    agent::plan_mode::steps::generate_steps,
     agent::prompts::JobType,
     compliance::sla::SlaPriority,
     gateway::LlmGateway,

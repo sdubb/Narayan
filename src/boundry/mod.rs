@@ -1052,8 +1052,8 @@ CREATE TABLE IF NOT EXISTS boundary_pending_envelopes (
 //
 // src/tools/registry.rs       — add acp_boundary as a new tool family entry
 // src/agent/workflow_compiler.rs — add boundary step validation in the compilation pipeline
-// src/agent/plan_mode_steps.rs   — add boundary step shape to the shared contract schema
-// src/agent/plan_mode_registry.rs — expose boundary lane in the three-slice candidate set
+// src/agent/plan_mode/steps.rs    — add boundary step shape to the shared contract schema
+// src/agent/plan_mode/registry.rs — expose boundary lane in the three-slice candidate set
 // src/agent/plan_mode.rs         — handle ask_user boundary_handshake question type
 //
 // New frontend components:

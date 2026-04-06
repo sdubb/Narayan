@@ -49,7 +49,7 @@ use crate::{
     state::{SessionTask, SessionTaskOutput, SessionTaskResultStatus, SessionTaskStatus},
     storage::PostgresStore,
     tools::{toolregistry::dsl_generation_prompt_fragment, ToolRegistry},
-    agent::plan_mode_registry::{
+    agent::plan_mode::registry::{
         build_capability_directory, build_detailed_capability_context, inferred_preferred_tools,
         missing_tool_categories,
     },
@@ -85,7 +85,7 @@ impl IntentExtractor {
         capability_directory: &str,
     ) -> Result<serde_json::Value> {
         let system =
-            crate::agent::plan_mode_steps::intent_extractor_system_prompt(capability_directory, dsl_generation_prompt_fragment());
+            super::steps::intent_extractor_system_prompt(capability_directory, dsl_generation_prompt_fragment());
         let user = format!("Configure an agent to do:\n\n{}", description);
 
         let first_pass = GatewayRequest::new(
@@ -875,7 +875,7 @@ impl PlanModeManager {
             .map(|r| r.name)
             .collect();
 
-        let steps = crate::agent::plan_mode_steps::generate_steps(
+        let steps = super::steps::generate_steps(
             intent,
             intent["category"].as_str().unwrap_or("general"),
             &installed,
@@ -922,7 +922,7 @@ impl PlanModeManager {
                 .pending_steps
                 .iter()
                 .filter_map(|value| {
-                    serde_json::from_value::<crate::agent::plan_mode_steps::ClarificationStep>(value.clone()).ok()
+                    serde_json::from_value::<super::steps::ClarificationStep>(value.clone()).ok()
                 })
                 .map(|step| format!("{} -> {}", step.id, step.question))
                 .collect();
@@ -2087,7 +2087,7 @@ Rules:\n\
     }
 
     async fn handle_clarifications(&self, session: &mut PlanModeSession, answer: &str) -> Result<String> {
-        use crate::agent::plan_mode_steps::{parse_and_apply, ClarificationStep};
+        use super::steps::{parse_and_apply, ClarificationStep};
 
         // Pop the front step — that's the one we're answering now
         let current_step: Option<ClarificationStep> = if !session.pending_steps.is_empty() {
@@ -2154,7 +2154,7 @@ Rules:\n\
                 // Also auto-generate default completion criteria if none yet
                 if let Some(role) = session.draft_role.as_mut() {
                     if role.execution_guidelines.completion_criteria.is_empty() {
-                        let defaults = crate::agent::plan_mode_steps::default_completion_criteria(role);
+                        let defaults = super::steps::default_completion_criteria(role);
                         for c in defaults {
                             role.execution_guidelines.add_completion(c);
                         }
@@ -5053,7 +5053,7 @@ mod tests {
 
     #[test]
     fn test_build_custom_context_empty() {
-        let ctx = crate::agent::plan_mode_registry::build_custom_context(&[], &[]);
+        let ctx = super::registry::build_custom_context(&[], &[]);
         assert!(ctx.is_empty());
     }
 

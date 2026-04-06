@@ -42,7 +42,7 @@ pub struct RoleTemplate {
     /// Pre-built role skeleton â€” guidelines, failure rules, completion criteria.
     #[serde(skip)]
     pub build_role: fn(agent_id: &str, tenant_id: &str) -> AgentRole,
-    /// IDs of clarification steps to still ask (from `plan_mode_steps::StepField` names).
+    /// IDs of clarification steps to still ask (from `plan_mode::steps::StepField` names).
     /// Only genuinely unknown per-user values: channel names, DB names, thresholds.
     #[serde(serialize_with = "serialize_static_strs")]
     pub ask_steps: &'static [&'static str],

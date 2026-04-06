@@ -15,7 +15,7 @@ use crate::{
         definition::RoleCategory,
         executor::StepResult,
         planner::{Plan, PlannedStep},
-        plan_mode_steps::workflow_contract_prompt_fragment,
+        plan_mode::steps::workflow_contract_prompt_fragment,
     },
     gateway::LlmGenerationConfig,
     state::AgentState,

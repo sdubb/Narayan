@@ -3892,7 +3892,7 @@ pub async fn start_plan_mode_session(
                     .collect();
 
                 // Generate full step queue from the intent
-                let all_steps = crate::agent::plan_mode_steps::generate_steps(
+                let all_steps = crate::agent::plan_mode::steps::generate_steps(
                     &intent,
                     role.role_category.as_str(),
                     &installed,

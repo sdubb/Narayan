@@ -9,8 +9,6 @@ pub mod r#loop;
 pub mod manager;
 pub mod orchestrator;
 pub mod plan_mode;
-pub mod plan_mode_registry;
-pub mod plan_mode_steps;
 pub mod planner;
 pub mod preflight;
 pub mod prompts;
@@ -46,12 +44,12 @@ pub use manager::AgentManager;
 #[allow(unused_imports)]
 pub use plan_mode::PlanModeManager;
 #[allow(unused_imports)]
-pub use plan_mode_steps::{
+pub use plan_mode::steps::{
     PlanModeRetryPolicy, PlanModeWorkflowDraft, PlanModeWorkflowResponsibility, PlanModeWorkflowStep,
     workflow_contract_prompt_fragment,
 };
 #[allow(unused_imports)]
-pub use plan_mode_registry::{build_registry_candidate_context, build_registry_candidate_set};
+pub use plan_mode::registry::{build_registry_candidate_context, build_registry_candidate_set};
 #[allow(unused_imports)]
 #[allow(unused_imports)]
 pub use preflight::LlmPreflight;

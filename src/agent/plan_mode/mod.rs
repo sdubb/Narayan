@@ -15,10 +15,12 @@ mod orchestrator;
 
 pub mod boundary;
 pub mod clarify;
+pub mod discovery;
 pub mod intent;
 pub mod registry;
 pub mod repair;
 pub mod review;
+pub mod steps;
 pub mod subsystems;
 
 // Re-export the public API from orchestrator (PlanModeManager, IntentExtractor, etc.)
@@ -28,4 +30,10 @@ pub use orchestrator::*;
 pub use boundary::{BoundaryNeed, BoundaryScope, BoundarySetupResult};
 pub use registry::CapabilityPacket;
 pub use review::{WorkflowContract, CompilerValidationState, ApprovalStatus, GovernanceCheck, ReviewChecklistItem};
+pub use steps::{
+    ClarificationStep, StepField, PlanModeRetryPolicy, PlanModeWorkflowDraft,
+    PlanModeWorkflowResponsibility, PlanModeWorkflowStep,
+    generate_steps, parse_and_apply, default_completion_criteria,
+    workflow_contract_prompt_fragment, intent_extractor_system_prompt,
+};
 pub use subsystems::SubsystemPolicy;

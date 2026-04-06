@@ -15,7 +15,7 @@ use crate::{
         AgentRole, ExecutionGuidelines, PlanModeMessage, PlanModePhase,
         PlanModeSession, TenantConnector, TriggerType,
     },
-    agent::plan_mode_steps::{
+    agent::plan_mode::steps::{
         generate_steps, parse_and_apply, ClarificationStep, StepField,
         default_completion_criteria,
     },
