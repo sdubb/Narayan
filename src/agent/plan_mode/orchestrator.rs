@@ -55,11 +55,14 @@ use crate::{
     },
 };
 
-// ── Built-in connector catalogue ─────────────────────────────────────────────
-// Delegate to connector_tool::ALL_CONNECTORS — single source of truth.
-// The ConnectorDef type has .name, .category, .keywords, .summary fields
-// that the ConnectorResolver uses — same field names, no other changes needed.
+// ── Delegate to submodules ─────────────────────────────────────────────────
 use crate::tools::connector_tool::ALL_CONNECTORS as BUILTIN_CONNECTORS;
+
+// Import from decomposed modules
+use super::intent::{compact_intent_snapshot, intent_named_external_db, intent_named_acp_peer,
+    intent_needs_database_connection, intent_needs_api_connection,
+    intent_needs_mcp_connection, intent_needs_acp_connection, AGENT_SUBSYSTEMS};
+use super::registry::ConnectorResolver;
 
 // ── IntentExtractor ────────────────────────────────────────────────────────
 
@@ -132,9 +135,9 @@ Rules:
         );
 
         let refine_user = format!(
-            "Original request:\n{}\n\nPreliminary inference JSON:\n{}",
+            "Original request:\n{}\n\nPreliminary inference summary:\n{}",
             description,
-            serde_json::to_string_pretty(&initial).unwrap_or_else(|_| initial.to_string())
+            serde_json::to_string(&compact_intent_snapshot(initial)).unwrap_or_else(|_| initial.to_string())
         );
 
         let second_pass = GatewayRequest::new(
@@ -156,12 +159,40 @@ Rules:
     }
 }
 
-// ── ConnectorResolver ──────────────────────────────────────────────────────
+// ConnectorResolver is now in super::registry
+// Intent helpers (intent_needs_*, intent_named_*, etc.) are now in super::intent
+// ConnectorResolver::resolve, answer helpers, and intent helpers have been
+// moved to super::registry and super::intent respectively.
+// The orchestrator now imports them via `use super::registry::ConnectorResolver`.
 
-/// Maps extracted intent to specific connector names + tool overrides.
-/// Returns (resolved_connectors, tool_overrides, clarifying_question)
-/// tool_overrides are non-connector tools like external_db, external_api, or acp_session bindings
-pub struct ConnectorResolver;
+// Re-export helpers that PlanModeManager methods still call directly.
+use super::registry::{
+    answer_declines_external_connector, answer_mentions_tenant_database,
+    answer_mentions_tenant_api, answer_mentions_tenant_mcp, answer_mentions_tenant_acp,
+    contains_connector_name, intent_prefers_local_document_workflow,
+};
+
+fn persist_selected_external_db(intent: &mut serde_json::Value, db_name: &str) {
+    if let Some(intent_object) = intent.as_object_mut() {
+        intent_object.insert("uses_external_db".into(), serde_json::json!(db_name));
+    }
+}
+
+fn persist_selected_acp_peer(intent: &mut serde_json::Value, peer_name: &str) {
+    if let Some(intent_object) = intent.as_object_mut() {
+        intent_object.insert("uses_acp_peer".into(), serde_json::json!(peer_name));
+    }
+}
+
+// Remaining intent helpers needed by handle_connector_clarification that weren't
+// moved to intent.rs (they reference orchestrator-local state).
+fn intent_text_for_keys(intent: &serde_json::Value, keys: &[&str]) -> String {
+    super::intent::intent_text_for_keys_internal(intent, keys)
+}
+
+// ── PlanModeManager ────────────────────────────────────────────────────────
+#[allow(dead_code)]
+fn _removed_connector_resolver_impl() {}  // placeholder so git diff shows the removal
 
 impl ConnectorResolver {
     /// Resolve which connectors and special tools are needed for the extracted intent.
@@ -1040,7 +1071,7 @@ Rules:\n\
         if previous_limits == previous_category.default_execution_limits() {
             role.execution_limits = role.role_category.default_execution_limits();
         }
-        apply_role_policy_defaults(&mut session.draft_agent, role);
+        crate::agent::plan_mode::review::apply_role_policy_defaults(&mut session.draft_agent, role);
 
         let (resolved_connectors, tool_overrides, clarifying_q) =
             ConnectorResolver::resolve(&refined, &installed, &tenant_connectors).await;
@@ -1578,13 +1609,18 @@ Rules:\n\
 
         let tenant_connectors: Vec<TenantConnector> =
             self.store.list_tenant_connectors(&session.tenant_id).await.unwrap_or_default();
-        let capability_directory = build_capability_directory(&self.tools, &installed, &tenant_connectors);
+        let capability_directory =
+            crate::agent::plan_mode::registry::build_capability_directory(&self.tools, &installed, &tenant_connectors);
         let initial_intent = self
             .extractor
             .extract_initial(&session.id, &session.tenant_id, &description, &capability_directory)
             .await?;
-        let detail_context =
-            build_detailed_capability_context(&self.tools, &initial_intent, &installed, &tenant_connectors);
+        let detail_context = crate::agent::plan_mode::registry::build_detailed_capability_context(
+            &self.tools,
+            &initial_intent,
+            &installed,
+            &tenant_connectors,
+        );
         let intent = if detail_context.trim().is_empty() {
             initial_intent
         } else {
@@ -1599,7 +1635,7 @@ Rules:\n\
             AgentRole::new(role_id, session.draft_agent.id.clone(), session.tenant_id.clone(), "Primary Role".into());
         role.purpose = user_description.clone();
         role.role_category = RoleCategory::from_slug(intent["category"].as_str().unwrap_or("general"));
-        apply_role_policy_defaults(&mut session.draft_agent, &mut role);
+        crate::agent::plan_mode::review::apply_role_policy_defaults(&mut session.draft_agent, &mut role);
 
         // Resolve connectors and tool overrides
         let (resolved_connectors, tool_overrides, clarifying_q) =
@@ -1825,9 +1861,9 @@ Rules:\n\
                     session.compiler_repair_passes = repair_passes;
 
                     let detail_context = format!(
-                        "VALIDATION ISSUES:\n{}\n\n{}",
-                        last_issues.join("\n"),
-                        crate::agent::plan_mode_registry::build_registry_candidate_context(
+                        "{}\n\n{}",
+                        crate::agent::plan_mode::repair::compact_repair_context(&last_issues, &current_intent),
+                        crate::agent::plan_mode::registry::build_registry_candidate_context(
                             &self.tools,
                             &current_intent,
                             installed,
@@ -2177,7 +2213,7 @@ Rules:\n\
     }
 
     async fn sync_review_scaffold_tasks(&self, session: &PlanModeSession) -> Vec<SessionTask> {
-        let specs = plan_mode_scaffold_specs(session);
+        let specs = crate::agent::plan_mode::review::plan_mode_scaffold_specs(session);
         let mut tasks = Vec::new();
 
         for (task_id, subject, description, status, metadata, output) in specs {
@@ -2300,9 +2336,25 @@ Rules:\n\
             }
         };
 
+        let subsystem_line = format!(
+            "\n**Agent subsystems:** {}",
+            crate::agent::plan_mode::subsystems::subsystem_names().join(", ")
+        );
+
+        let boundary_line =
+            if role.tools.iter().any(|tool| tool.starts_with("acp_session:")) || role.connectors.iter().any(|connector| {
+                connector.contains("acp") || connector.contains("agent")
+            }) {
+                format!("\n**Boundary:** {}", crate::agent::plan_mode::boundary::planning_hint())
+            } else {
+                String::new()
+            };
+
         let review_focus = if self.superpowers_guidance_text(&PlanModePhase::Reviewing).await.is_some() {
-            "\n**Review checklist:** validate the compiler draft, run the sandbox test, then save only if the result is clear."
-                .to_string()
+            format!(
+                "\n**Review checklist:** validate the compiler draft, run the sandbox test, then save only if the result is clear. {}",
+                crate::agent::plan_mode::subsystems::subsystem_setup_prompt()
+            )
         } else {
             String::new()
         };
@@ -2310,7 +2362,7 @@ Rules:\n\
         let save_guardrail = if session
             .intent_cache
             .as_ref()
-            .map_or(true, |intent| workflow_hints_for_compilation(intent).is_empty())
+            .map_or(true, |intent| crate::agent::plan_mode::review::workflow_hints_for_compilation(intent).is_empty())
         {
             "\n\n⚠️ **Save guardrail:** this role still does not have a runnable compiler draft. Please add or clarify the missing workflow steps before saving.".to_string()
         } else {
@@ -2413,7 +2465,7 @@ Rules:\n\
             **Connectors:** {connectors}{tools}\n\
             **Output:** {output}\n\
             **Uploaded docs:** {attachments}\n\
-            **Constraints:** {constraints}{services}{compiler_state}{runtime_policy}{tooling_notes}{research_summary}{scaffold}{review_focus}{save_guardrail}\n\n\
+            **Constraints:** {constraints}{services}{subsystems}{boundary}{compiler_state}{runtime_policy}{tooling_notes}{research_summary}{scaffold}{review_focus}{save_guardrail}\n\n\
             Does this look right? Say **yes** to save, or tell me what to change.",
             name = agent.name,
             purpose = role.purpose,
@@ -2424,6 +2476,8 @@ Rules:\n\
             attachments = attachments,
             constraints = constraints,
             services = services_line,
+            subsystems = subsystem_line,
+            boundary = boundary_line,
             compiler_state = compiler_state,
             runtime_policy = runtime_policy,
             tooling_notes = tooling_notes,
@@ -2512,7 +2566,7 @@ Rules:\n\
                 if r.execution_guidelines.compiled_workflow.is_none() {
                     anyhow::bail!("workflow compiler did not produce a runnable artifact before save");
                 }
-                finalize_saved_role_execution_strategy(&mut r);
+                crate::agent::plan_mode::review::finalize_saved_role_execution_strategy(&mut r);
 
                 // Resolve "name:Role Name" hints in depends_on_role_id to actual IDs
                 if let Some(hint) = r.trigger.depends_on_role_id.clone() {
@@ -2949,8 +3003,10 @@ fn plan_mode_scaffold_specs(
     specs.push((
         format!("planmode:{}:review", session.id),
         "Review, preflight, and sandbox the draft".into(),
-        "Use the checklist to validate workflow steps, required arguments, and sandbox behavior before approval."
-            .into(),
+        format!(
+            "Use the checklist to validate workflow steps, required arguments, sandbox behavior, and agent subsystems ({}) before approval.",
+            crate::agent::plan_mode::subsystems::AGENT_SUBSYSTEMS.join(", ")
+        ),
         review_status,
         serde_json::json!({
             "phase": "reviewing",
@@ -3580,7 +3636,7 @@ fn apply_execution_hints(role: &mut AgentRole, intent: &serde_json::Value) {
     role.execution_guidelines.remove_rules_with_prefix(CONNECTOR_CATEGORY_RULE_PREFIX);
     role.execution_guidelines.remove_priority_prefix("step: ");
 
-    let workflow_hints = workflow_hints_for_compilation(intent);
+    let workflow_hints = crate::agent::plan_mode::review::workflow_hints_for_compilation(intent);
     for item in workflow_hints.into_iter().take(5) {
         role.execution_guidelines.add_priority(format!("step: {}", item.trim()));
     }
@@ -3700,12 +3756,12 @@ fn clean_json_markdown_response(raw: &str) -> String {
 fn fallback_plan_mode_research_memo(role: &AgentRole, intent: &serde_json::Value) -> AdaptiveResearchMemo {
     AdaptiveResearchMemo {
         summary: format!("Plan-mode research fallback for {}", role.purpose),
-        findings: workflow_hints_for_compilation(intent).into_iter().take(4).collect(),
+        findings: crate::agent::plan_mode::review::workflow_hints_for_compilation(intent).into_iter().take(4).collect(),
         assumptions: Vec::new(),
         risks: vec![
             "Research synthesis fell back to intent-derived hints because the memo response was not valid JSON.".into(),
         ],
-        workflow_hints: workflow_hints_for_compilation(intent).into_iter().take(6).collect(),
+        workflow_hints: crate::agent::plan_mode::review::workflow_hints_for_compilation(intent).into_iter().take(6).collect(),
     }
 }
 
@@ -5087,7 +5143,7 @@ mod tests {
             }
         });
 
-        let hints = workflow_hints_for_compilation(&intent);
+        let hints = crate::agent::plan_mode::review::workflow_hints_for_compilation(&intent);
         assert_eq!(
             hints,
             vec![
@@ -5103,11 +5159,11 @@ mod tests {
         let mut role = AgentRole::new("role-1".into(), "agent-1".into(), "tenant-1".into(), "Primary Role".into());
         role.execution_guidelines.execution_strategy = ExecutionStrategy::DeterministicWorkflow;
 
-        finalize_saved_role_execution_strategy(&mut role);
+        crate::agent::plan_mode::review::finalize_saved_role_execution_strategy(&mut role);
         assert_eq!(role.execution_guidelines.execution_strategy, ExecutionStrategy::DeterministicWorkflow);
 
         role.execution_guidelines.execution_strategy = ExecutionStrategy::AdaptivePlanning;
-        finalize_saved_role_execution_strategy(&mut role);
+        crate::agent::plan_mode::review::finalize_saved_role_execution_strategy(&mut role);
         assert_eq!(role.execution_guidelines.execution_strategy, ExecutionStrategy::DeterministicWorkflow);
     }
 
@@ -5155,7 +5211,7 @@ mod tests {
             updated_at: Utc::now(),
         };
 
-        let specs = plan_mode_scaffold_specs(&session);
+        let specs = crate::agent::plan_mode::review::plan_mode_scaffold_specs(&session);
         let research = specs
             .into_iter()
             .find(|(task_id, _, _, _, _, _)| task_id.ends_with(":research"))

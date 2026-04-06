@@ -178,7 +178,34 @@ pub fn build_router(
         .route("/billing/invoices", get(billing_routes::list_invoices))
         .route("/billing/credits", get(billing_routes::get_credits))
         .route("/billing/credits/purchase", post(billing_routes::purchase_credits))
+        // ── Teams (sub-entities of a tenant) ─────────────────────────────
+        .route("/teams", post(create_team))
+        .route("/teams", get(list_teams))
+        .route("/teams/{team_id}", get(get_team))
+        .route("/teams/{team_id}/members", post(add_team_member))
+        .route("/teams/{team_id}/members/{member_id}", delete(remove_team_member))
+        .route("/teams/{team_id}/members", get(list_team_members))
+        // ── Boundary governance ───────────────────────────────────────────
+        .route("/boundary/handshake/propose", post(propose_boundary_handshake))
+        .route("/boundary/handshake/{id}/accept", post(accept_boundary_handshake))
+        .route("/boundary/handshake/{id}/revoke", post(revoke_boundary_handshake))
+        .route("/boundary/handshake/{id}/freeze", post(freeze_boundary_handshake))
+        .route("/boundary/handshake/{id}/unfreeze", post(unfreeze_boundary_handshake))
+        .route("/boundary/handshake/{id}/breach", post(report_boundary_breach))
+        .route("/boundary/handshakes", get(list_boundary_handshakes))
+        .route("/boundary/audit/{handshake_id}", get(query_boundary_audit))
+        .route("/boundary/audit/{handshake_id}/verify", get(verify_boundary_audit_chain))
+        // ── Boundary broker (external agent registry) ─────────────────────
+        .route("/boundary/broker/agents", post(register_external_agent))
+        .route("/boundary/broker/agents", get(list_external_agents))
+        .route("/boundary/broker/agents/{agent_id}", get(get_external_agent))
+        .route("/boundary/broker/agents/{agent_id}/suspend", post(suspend_external_agent))
+        .route("/boundary/broker/agents/{agent_id}/revoke", post(revoke_external_agent))
+        .route("/boundary/broker/agents/{agent_id}/responses", get(poll_broker_responses))
         .route_layer(middleware::from_fn_with_state(auth_state.clone(), auth_middleware));
+
+
+
 
     // SSE stream — auth extracted inside handler
     let stream_routes = Router::new()

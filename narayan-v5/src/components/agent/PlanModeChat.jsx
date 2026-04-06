@@ -825,11 +825,17 @@ function TemplatePicker({ templates, onSelect, onSkip, loading }) {
     <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
       {/* Search */}
       <div className="px-5 py-4 border-b border-border bg-bg-card shrink-0">
+        <div className="mb-3">
+          <p className="text-[10px] font-semibold uppercase tracking-[0.24em] text-accent">Start here</p>
+          <p className="mt-1 text-sm leading-6 text-tx-3">
+            Pick a pattern, then we'll turn it into a structured plan you can test and save.
+          </p>
+        </div>
         <div className="relative">
           <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-tx-4" />
           <input
             type="text"
-            placeholder="Search templates..."
+            placeholder="Search by job, team, or system..."
             value={search}
             onChange={e => setSearch(e.target.value)}
             className="w-full bg-bg border border-border rounded-lg pl-9 pr-3 py-2 text-sm text-tx-1 placeholder-tx-4 outline-none focus:border-accent focus:ring-1 focus:ring-accent/20"
@@ -875,7 +881,7 @@ function TemplatePicker({ templates, onSelect, onSkip, loading }) {
         ) : displayTemplates.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-32 text-center">
             <p className="text-sm text-tx-3">No templates found</p>
-            <p className="text-xs text-tx-4 mt-1">Try a different search term</p>
+            <p className="text-xs text-tx-4 mt-1">Try a broader search or start from scratch.</p>
           </div>
         ) : (
           <div className="grid grid-cols-2 gap-3">
@@ -893,6 +899,9 @@ function TemplatePicker({ templates, onSelect, onSkip, loading }) {
                     </p>
                     <p className="text-[11px] text-tx-3 mt-1 line-clamp-2 leading-relaxed">
                       {t.description}
+                    </p>
+                    <p className="mt-2 text-[10px] uppercase tracking-[0.18em] text-tx-4">
+                      {t.category || 'Workflow template'}
                     </p>
                     {t.required_connectors?.length > 0 && (
                       <div className="flex items-center gap-1 mt-2 flex-wrap">
@@ -921,7 +930,7 @@ function TemplatePicker({ templates, onSelect, onSkip, loading }) {
           className="w-full flex items-center justify-center gap-2 text-sm text-tx-3 hover:text-tx-1 transition-colors"
         >
           <Zap size={14} />
-          Start from scratch instead
+          Start from scratch
         </button>
       </div>
     </div>
@@ -1460,10 +1469,10 @@ export default function PlanModeChat({
               </p>
               <p className="text-[11px] text-tx-4">
                 {step === 'picker'
-                  ? 'Select a template to get started quickly'
+                  ? 'Select a starting pattern, or skip to build from a blank slate'
                   : (isAddingRole
-                      ? 'Describe what this role should do'
-                      : 'Describe what this agent does — we\'ll set everything up')}
+                      ? 'Describe what this role should do in plain language'
+                      : 'Describe what this agent does and we’ll structure the workflow')}
               </p>
             </div>
           </div>

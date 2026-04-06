@@ -316,6 +316,13 @@ export default function AgentPage({ agentId, onBack, onNavigateSettings = null }
     goal: activeRun?.input_data?.description || agent.goal || agent.name,
     status: runtimeStatus,
   } : null;
+  const liveRoleCount = activeRoles.length;
+  const totalRuns = goalInstances.length;
+  const nextActionLabel = runtimeAgentId
+    ? 'Review the live timeline'
+    : liveRoleCount > 0
+      ? 'Run an active role to create a live trace'
+      : 'Add the first role to define behavior';
 
   return (
     <>
@@ -356,6 +363,20 @@ export default function AgentPage({ agentId, onBack, onNavigateSettings = null }
                   ))}
                 </div>
               )}
+              <div className="mt-4 grid gap-2 sm:grid-cols-4">
+                {[
+                  { label: 'State', value: agent.status || 'draft', hint: runtimeAgentId ? 'Live run attached' : 'Waiting to run' },
+                  { label: 'Roles', value: String(roles.length), hint: liveRoleCount > 0 ? `${liveRoleCount} active` : 'Add the first role' },
+                  { label: 'Runs', value: String(totalRuns), hint: totalRuns > 0 ? 'Recent history' : 'No runs yet' },
+                  { label: 'Next', value: runtimeAgentId ? 'Timeline' : 'Setup', hint: nextActionLabel },
+                ].map(card => (
+                  <div key={card.label} className="rounded-2xl border border-border bg-bg-card px-3 py-2.5">
+                    <p className="text-[10px] uppercase tracking-[0.22em] text-tx-4">{card.label}</p>
+                    <p className="mt-1 text-sm font-semibold text-tx-1 capitalize">{card.value}</p>
+                    <p className="mt-1 text-[11px] leading-5 text-tx-3">{card.hint}</p>
+                  </div>
+                ))}
+              </div>
             </div>
 
             {/* Add Role button */}
@@ -371,7 +392,7 @@ export default function AgentPage({ agentId, onBack, onNavigateSettings = null }
               className="btn-secondary shrink-0 flex items-center gap-2"
             >
               <MessageSquare size={14} />
-              Agent chat
+              Open chat
             </button>
           </div>
 
@@ -445,7 +466,7 @@ export default function AgentPage({ agentId, onBack, onNavigateSettings = null }
                   </div>
                   <p className="text-sm font-medium text-tx-1 mb-1">No live run yet</p>
                   <p className="text-xs text-tx-3 max-w-xs leading-relaxed">
-                    Trigger a role to start a runtime agent. The timeline will attach to that live run automatically.
+                    Run an active role to create a live runtime trace. The timeline will attach to it automatically.
                   </p>
                 </div>
               )}
@@ -460,7 +481,7 @@ export default function AgentPage({ agentId, onBack, onNavigateSettings = null }
                   <div>
                     <p className="text-sm font-medium text-tx-1 mb-1">No live swarm to inspect</p>
                     <p className="text-xs text-tx-3 max-w-sm leading-relaxed">
-                      Once a role is running, this view will show the current runtime agent and its children.
+                      Once a role is running, this view will show the runtime agent and any children it creates.
                     </p>
                   </div>
                 </div>
@@ -490,11 +511,14 @@ export default function AgentPage({ agentId, onBack, onNavigateSettings = null }
               <SavingsCard className="mb-2" />
               {pendingRoles.length > 0 && (
                 <section>
-                  <p className="section-label mb-3 text-info">Pending review ({pendingRoles.length})</p>
-                  <div className="space-y-3">
-                    {pendingRoles.map(role => (
-                      <RoleCard
-                        key={role.id}
+              <p className="section-label mb-3 text-info">Pending review ({pendingRoles.length})</p>
+              <p className="mb-3 text-xs leading-6 text-tx-3">
+                These roles are drafted but not live yet. Review them before the agent can run.
+              </p>
+              <div className="space-y-3">
+                {pendingRoles.map(role => (
+                  <RoleCard
+                    key={role.id}
                         role={role}
                         agentId={agentId}
                         onRefresh={load}
@@ -508,6 +532,9 @@ export default function AgentPage({ agentId, onBack, onNavigateSettings = null }
               {activeRoles.length > 0 && (
                 <section>
                   <p className="section-label mb-3">Active roles</p>
+                  <p className="mb-3 text-xs leading-6 text-tx-3">
+                    Active roles can run now and contribute to the live timeline.
+                  </p>
                   <div className="space-y-3">
                     {activeRoles.map(role => (
                       <RoleCard
@@ -526,6 +553,9 @@ export default function AgentPage({ agentId, onBack, onNavigateSettings = null }
               {inactiveRoles.filter(r => !['draft', 'testing'].includes(r.status)).length > 0 && (
                 <section>
                   <p className="section-label mb-3">Draft / paused roles</p>
+                  <p className="mb-3 text-xs leading-6 text-tx-3">
+                    These roles exist in the agent, but they need attention before they can run.
+                  </p>
                   <div className="space-y-3">
                     {inactiveRoles.filter(r => !['draft', 'testing'].includes(r.status)).map(role => (
                       <RoleCard

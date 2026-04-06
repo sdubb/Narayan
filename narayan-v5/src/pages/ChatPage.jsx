@@ -8,9 +8,9 @@ import AgentPage from './AgentPage';
 import SavingsCard from '../components/cards/SavingsCard';
 
 function EmptyState({ onNew, canCreateAgents }) {
-  const title = canCreateAgents ? 'Build your first agent' : 'Add an AI provider first';
+  const title = canCreateAgents ? 'Create your first agent' : 'Add an AI provider first';
   const body = canCreateAgents
-    ? 'Agents automate your workflows. Each agent can have multiple roles, scheduled, triggered, or on-demand.'
+    ? 'Describe the work, connect the tools, and ship with review built in. The workspace keeps the plan, trace, and follow-up attached.'
     : 'Connect one AI provider to unlock agent creation. We will keep you in the workspace and guide you back here once setup is complete.';
   const cta = canCreateAgents ? 'Create an agent' : 'Go to settings';
 
@@ -20,13 +20,13 @@ function EmptyState({ onNew, canCreateAgents }) {
         initial={{ opacity: 0, y: 12 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.3 }}
-        className="flex flex-col items-center"
+        className="flex w-full max-w-2xl flex-col items-center rounded-[2rem] border border-border bg-bg-card/90 px-8 py-10 shadow-[0_24px_70px_rgba(26,23,20,0.08)] backdrop-blur"
       >
         <div className="mb-5 flex size-16 items-center justify-center rounded-[1.5rem] border border-accent/20 bg-accent-soft shadow-card">
           <Zap size={24} className="text-accent" />
         </div>
         <p className="mb-2 font-serif text-3xl text-tx-1">{title}</p>
-        <p className="mb-6 max-w-sm text-sm leading-7 text-tx-3">{body}</p>
+        <p className="mb-6 max-w-xl text-sm leading-7 text-tx-3">{body}</p>
         <button onClick={onNew} className="btn-primary flex items-center gap-2 px-4 py-2.5">
           <Zap size={14} />
           {cta}
@@ -38,9 +38,9 @@ function EmptyState({ onNew, canCreateAgents }) {
         )}
         <div className="mt-8 grid w-full max-w-md grid-cols-3 gap-3 text-left">
           {[
+            ['Plan', 'Describe the workflow and the outcome'],
             ['Connect', 'Bring in the tools you already use'],
-            ['Approve', 'Set the guardrails before launch'],
-            ['Run', 'Let the agent execute and log everything'],
+            ['Launch', 'Let the agent execute and log everything'],
           ].map(([title, text]) => (
             <div key={title} className="border-t border-border pt-3">
               <p className="text-sm font-medium text-tx-1">{title}</p>

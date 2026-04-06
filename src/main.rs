@@ -9,6 +9,7 @@ mod api;
 mod audit;
 mod auth;
 mod billing;
+mod boundry;
 mod browser;
 mod cognition;
 mod compliance;
@@ -57,6 +58,7 @@ use skills::registry::SkillRegistry;
 use storage::PostgresStore;
 use swarm::Swarm;
 use tenant::TenantStore;
+use tenant::team_store::TeamStore as TeamStoreImpl;
 use tools::DelegateTool;
 use worker::WorkerPool;
 use workspace::manager::WorkspaceManager;
@@ -125,6 +127,26 @@ async fn main() -> Result<()> {
 
     let tenant_store = Arc::new(TenantStore::new(store.pool()));
     tenant_store.migrate().await?;
+
+    let team_store = Arc::new(TeamStoreImpl::new(store.pool()));
+    team_store.migrate().await?;
+    tracing::info!("team store ready (tenant_teams, tenant_team_members)");
+
+    // ── Boundary stores ────────────────────────────────────────────────────
+    let boundary_handshake_store = Arc::new(boundry::handshake::HandshakeStore::new(store.pool()));
+    boundary_handshake_store.migrate().await?;
+
+    let boundary_audit_store = Arc::new(boundry::audit::BoundaryAuditStore::new(store.pool()));
+    boundary_audit_store.migrate().await?;
+
+    let boundary_governance_store = Arc::new(boundry::governance::GovernanceStore::new(store.pool()));
+    boundary_governance_store.migrate().await?;
+
+    tracing::info!("boundary stores ready (handshakes, audit ledger, governance)");
+
+    let boundary_broker_store = Arc::new(boundry::broker::BrokerStore::new(store.pool()));
+    boundary_broker_store.migrate().await?;
+    tracing::info!("boundary broker store ready (external_agents, broker_queue, broker_responses)");
 
     let audit_log = Arc::new(AuditLog::new(store.pool()));
     audit_log.migrate().await?;
@@ -523,6 +545,11 @@ async fn main() -> Result<()> {
     let app_state = AppState {
         store: store.clone(),
         tenant_store: tenant_store.clone(),
+        team_store: team_store.clone(),
+        boundary_handshakes: boundary_handshake_store.clone(),
+        boundary_audit: boundary_audit_store.clone(),
+        boundary_governance: boundary_governance_store.clone(),
+        boundary_broker: boundary_broker_store.clone(),
         manager,
         cost_tracker: cost_tracker.clone(),
         metrics: metrics.clone(),

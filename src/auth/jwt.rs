@@ -10,6 +10,10 @@ pub struct Claims {
     pub sub: String,
     /// Tenant plan.
     pub plan: String,
+    /// Optional team context. When present, the request is scoped to this team.
+    /// Absent in existing tokens — defaults to None (fully backward compatible).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub team_id: Option<String>,
     /// Issued-at (Unix timestamp).
     pub iat: u64,
     /// Expiry (Unix timestamp).
@@ -19,7 +23,12 @@ pub struct Claims {
 impl Claims {
     pub fn new(tenant_id: String, plan: String) -> Self {
         let now = unix_now();
-        Self { sub: tenant_id, plan, iat: now, exp: now + JWT_EXPIRY_SECS }
+        Self { sub: tenant_id, plan, team_id: None, iat: now, exp: now + JWT_EXPIRY_SECS }
+    }
+
+    pub fn with_team(mut self, team_id: String) -> Self {
+        self.team_id = Some(team_id);
+        self
     }
 
     pub fn is_expired(&self) -> bool {

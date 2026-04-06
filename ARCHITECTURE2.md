@@ -83,45 +83,50 @@ DSL rules:
 
 Plan mode stores this draft as typed `workflow_dsl`, and the compiler consumes that draft directly.
 
-### Phase 2.5: Registry Candidate Repair Loop
+### Phase 2.5: Tool Selection Loop
 
-Plan mode now has a dedicated registry-candidate repair path for explicit tool and connector selection.
+Plan mode now has a dedicated tool-selection loop between the LLM and backend for explicit tool, connector, MCP, ACP, DB, and API selection.
 
-The loop is:
+This is not an open-ended chat. It is a bounded protocol:
 
-1. Plan mode extracts intent and drafts the workflow contract.
-2. The plan-mode registry helper builds a filtered candidate set from the tool registry and tenant connectors.
-3. The LLM receives three ordered slices:
+1. Plan mode extracts intent and drafts the workflow contract skeleton.
+2. The backend builds a capability packet for the current step from the tool registry, connector registry, MCP/ACP lanes, and any bound resources.
+3. The backend sends the LLM a small ordered choice set:
    - primary
    - secondary
    - fallback
-4. The LLM chooses exact tools, operations, resources, mappings, and control-flow fields from those slices.
-5. The compiler validates the result and either accepts it or returns a structured repair reason.
+4. The LLM completes the contract by choosing exact tools, operations, resources, mappings, and control-flow fields from that choice set.
+5. The backend validates the contract against the registry and resource bindings.
+6. If validation fails, the backend returns a typed repair reason or setup card and the LLM revises the contract from the same bounded choices or a narrower replacement set.
+7. If the workflow still cannot be expressed, the result preserves `missing_capabilities` and asks the user for the missing binding.
 
 Rules:
 
-- the LLM should choose from the candidate slices instead of inventing tools or connectors
+- the LLM should choose from the backend-provided candidate choices instead of inventing tools or connectors
 - same tool may appear multiple times in a workflow
 - workflows may loop back to earlier steps when `loop_back_to` or `repeat_until` makes that explicit
+- connector, MCP, ACP, DB, and API selection all use the same bounded contract-completion pattern
 - if a workflow still cannot be expressed, the result must preserve `missing_capabilities`
 
-Example registry candidate set:
+Example capability packet:
 
 ```json
 {
   "version": 1,
-  "slices": [
+  "choices": [
     {
       "name": "primary",
       "tools": ["web_search_tool", "data_engine"],
       "connectors": [],
-      "integrations": ["mcp_session", "acp_session"]
+      "integrations": ["mcp_session", "acp_session"],
+      "resources": ["database", "acp_peer"]
     },
     {
       "name": "secondary",
       "tools": ["web_fetch", "data_extractor"],
       "connectors": ["slack"],
-      "integrations": ["search_mcp_registry", "api_call"]
+      "integrations": ["search_mcp_registry", "api_call"],
+      "resources": ["mcp_server", "api_binding"]
     },
     {
       "name": "fallback",
@@ -132,6 +137,16 @@ Example registry candidate set:
   ]
 }
 ```
+
+The backend may also attach typed setup cards when the missing piece is not a tool choice but a binding problem, such as:
+
+- missing database connection
+- missing connector installation
+- missing MCP server
+- missing ACP peer
+- missing API binding
+
+In those cases, the LLM should repair the contract only after the backend makes the gap explicit.
 
 ### Phase 3: Deterministic Tool Binding
 
@@ -249,8 +264,8 @@ What changed:
 
 Why this matters:
 
-- the LLM still classifies intent, but it must now choose from a narrowed registry slice when selecting tools and connectors
-- the LLM must also choose from a narrowed integration slice when selecting MCP or ACP lanes
+- the LLM still classifies intent, but it must now choose from a narrowed capability set when selecting tools and connectors
+- the LLM must also choose from a narrowed integration choice set when selecting MCP or ACP lanes
 - ACP can be used for internal agent-to-agent communication when the workflow needs a peer channel rather than a database, API, or external MCP server
 - the compiler is reduced to validation, binding, versioning, and repair reasoning
 - plan mode is now the place where the draft becomes nearly executable before compilation
@@ -571,7 +586,7 @@ Contract shape:
 - `acp_session` for internal agent escalation
 - `slack` connector for outbound team notification
 
-This is the kind of workflow where the registry slices matter:
+This is the kind of workflow where bounded capability sets matter:
 
 - primary slice: web and data tools
 - secondary slice: connector and integration tools
@@ -579,7 +594,7 @@ This is the kind of workflow where the registry slices matter:
 
 The key design rule is unchanged:
 
-- plan mode chooses from the narrowed candidate set
+- plan mode chooses from the narrowed capability set
 - the compiler binds the exact contract
 - runtime executes the compiled artifact
 
@@ -971,16 +986,16 @@ Frontend behavior:
 
 1. The user opens plan mode and says: `Monitor our product site, search the web for mentions, and alert the internal ops agent if a launch looks risky.`
 2. Plan mode extracts intent and classifies the workflow as web + data + ACP internal-agent communication.
-3. `plan_mode_registry.rs` builds a three-slice registry candidate set with:
+3. `plan_mode_registry.rs` builds a three-choice capability packet with:
    - primary web/data candidates
    - secondary connector and integration candidates
    - fallback safety candidates
-4. The registry slice includes `web_search_tool`, `data_engine`, and `acp_session` with `list_agents`, `receive_messages`, and `send_message`.
-5. The LLM fills an explicit contract from those candidates instead of inventing tools.
-6. If a database or ACP peer is missing, plan mode emits `ask_user` with `question_type: card_open`.
+4. The capability packet includes `web_search_tool`, `data_engine`, and `acp_session` with `list_agents`, `receive_messages`, and `send_message`.
+5. The LLM fills an explicit contract from those choices instead of inventing tools.
+6. If a database, connector, MCP server, or ACP peer is missing, the backend emits `ask_user` with `question_type: card_open`.
 7. The frontend opens the relevant setup card.
-8. The user adds the missing database, connector, MCP server, or ACP peer.
-9. Plan mode resumes with the saved resource binding.
+8. The user adds the missing binding or selects a different allowed choice.
+9. Plan mode resumes with the saved resource binding or repaired contract.
 10. The compiler validates the draft and canonicalizes it into the compiled workflow artifact.
 11. A final workflow might include:
    - `search_web` with `web_search_tool`

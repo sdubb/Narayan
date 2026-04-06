@@ -125,15 +125,18 @@ export default function Sidebar({
   }
 
   return (
-    <aside className="flex h-screen w-72 shrink-0 flex-col border-r border-border bg-bg-card/90 backdrop-blur">
+    <aside className="flex h-screen w-72 shrink-0 flex-col border-r border-white/70 bg-[linear-gradient(180deg,rgba(255,253,250,0.96)_0%,rgba(247,242,235,0.94)_100%)] backdrop-blur">
 
       {/* Header */}
       <div className="flex items-start justify-between gap-3 border-b border-border px-4 py-4">
         <div>
           <p className="font-serif text-xl leading-none text-tx-1">Narayan</p>
-          <p className="mt-1 text-[0.7rem] uppercase tracking-[0.24em] text-tx-4">Operational workspace</p>
+          <p className="mt-1 text-[0.7rem] uppercase tracking-[0.24em] text-tx-4">Studio workspace</p>
         </div>
         <div className="flex items-center gap-0.5">
+          <span className="rounded-full border border-ok/20 bg-ok-soft px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-ok">
+            Live
+          </span>
           {pendingReviews.length > 0 && (
             <button
               onClick={() => onNavigate('settings')}
@@ -176,7 +179,7 @@ export default function Sidebar({
           className="flex w-full items-center gap-2 rounded-2xl border border-accent/20 bg-gradient-to-r from-accent to-accent-text px-4 py-3 text-left text-sm font-medium text-white shadow-[0_12px_30px_rgba(201,106,46,0.2)] transition-all hover:translate-y-[-1px] active:scale-[0.99]"
         >
           <Plus size={13} />
-          {canCreateAgents ? 'New agent' : 'Add AI provider'}
+          {canCreateAgents ? 'Create agent' : 'Add AI provider'}
         </button>
         {!canCreateAgents && (
           <p className="mt-2 px-1 text-[11px] leading-5 text-tx-4">
@@ -219,11 +222,11 @@ export default function Sidebar({
       </div>
 
       <div className="border-t border-border px-4 py-4">
-        <div className="rounded-2xl border border-border bg-bg-hover px-3 py-3">
+        <div className="rounded-2xl border border-border bg-bg-hover/90 px-3 py-3 shadow-[0_10px_24px_rgba(26,23,20,0.04)]">
           <p className="text-[0.7rem] uppercase tracking-[0.24em] text-tx-4">Workspace health</p>
           <div className="mt-2 flex items-center gap-2 text-sm text-tx-2">
             <span className="size-2 rounded-full bg-ok" />
-            Connected and syncing
+            Connected, traced, and syncing
           </div>
         </div>
       </div>

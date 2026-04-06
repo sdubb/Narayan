@@ -148,6 +148,11 @@ impl std::str::FromStr for TenantPlan {
 pub struct AuthenticatedTenant {
     pub tenant_id: String,
     pub plan: TenantPlan,
+    /// Set when the request carries a team-scoped JWT or X-Narayan-Team-Id header.
+    /// Middleware validates that tenant_id is a member of this team.
+    pub team_id: Option<String>,
+    /// The tenant's role within the team. None if no team context.
+    pub team_role: Option<crate::tenant::team_model::TeamMemberRole>,
 }
 
 #[cfg(test)]

@@ -647,13 +647,9 @@ pub fn build_registry_candidate_context(
     tenant_connectors: &[TenantConnector],
 ) -> String {
     let structured = build_registry_candidate_set(registry, intent, installed, tenant_connectors);
-    let json = serde_json::to_string_pretty(&structured).unwrap_or_else(|_| structured.to_string());
+    let json = serde_json::to_string(&structured).unwrap_or_else(|_| structured.to_string());
 
-    format!(
-        "{}\n\nREGISTRY CANDIDATE SET JSON:\n{}",
-        build_detailed_capability_context(registry, intent, installed, tenant_connectors),
-        json
-    )
+    format!("REGISTRY CANDIDATE SET JSON:\n{}", json)
 }
 
 fn render_candidate_slice(

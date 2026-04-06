@@ -7,7 +7,7 @@ const REGISTER_DEFAULTS = { name: '', username: '', email: '', password: '', con
 const LOGIN_DEFAULTS = { identifier: '', password: '' };
 
 const benefits = [
-  'Describe a workflow once and reuse it across roles.',
+  'Describe the job once and reuse it across roles.',
   'Validate credentials before any live action runs.',
   'Keep every decision attached to an auditable trail.',
 ];
@@ -94,12 +94,12 @@ export default function AuthPage({ onAuth, onBack }) {
             </div>
             <div>
               <p className="font-serif text-4xl leading-none text-tx-1">Narayan</p>
-              <p className="mt-1 text-sm text-tx-3">Autonomous AI employee platform</p>
+              <p className="mt-1 text-sm text-tx-3">The agent studio for structured enterprise work</p>
             </div>
           </div>
 
           <h1 className="mt-8 max-w-lg font-serif text-4xl leading-[0.95] text-tx-1 sm:text-5xl">
-            Sign in to the workspace where jobs become automated.
+            Sign in to the workspace where work becomes easy to follow.
           </h1>
 
           <p className="mt-5 max-w-lg text-base leading-7 text-tx-2">

@@ -22,6 +22,7 @@ use crate::{
     state::{AgentStatus, GoalInstance, TriggerSource},
     storage::PostgresStore,
     tenant::{encrypt_secret, model::AuthenticatedTenant, ProviderCredential, TenantStore},
+    tenant::team_store::TeamStore as TeamStoreImpl,
 };
 use printpdf::*;
 use zstd::stream::write::Encoder as ZstdEncoder;
@@ -175,6 +176,16 @@ impl AutoApprovalStore {
 pub struct AppState {
     pub store: Arc<PostgresStore>,
     pub tenant_store: Arc<TenantStore>,
+    /// Team sub-entity store — teams, membership, roles within a tenant.
+    pub team_store: Arc<TeamStoreImpl>,
+    /// Boundary handshake lifecycle store.
+    pub boundary_handshakes: Arc<crate::boundry::handshake::HandshakeStore>,
+    /// Boundary audit ledger store.
+    pub boundary_audit: Arc<crate::boundry::audit::BoundaryAuditStore>,
+    /// Boundary governance store (freeze/revoke/breach/rate-limit).
+    pub boundary_governance: Arc<crate::boundry::governance::GovernanceStore>,
+    /// Boundary broker store — external agent registry + brokered envelope queue.
+    pub boundary_broker: Arc<crate::boundry::broker::BrokerStore>,
     pub manager: Arc<AgentManager>,
     pub cost_tracker: Arc<CostTracker>,
     pub metrics: Arc<Metrics>,
@@ -4405,5 +4416,546 @@ mod tenant_isolation_tests {
         //   2. All store methods taking &str tenant_id as first param
         //   3. Code review requirement: tenant_id must come from AuthenticatedTenant
         assert!(true, "contract: tenant_id always sourced from JWT via AuthenticatedTenant extractor");
+    }
+}
+
+// ── Team routes ────────────────────────────────────────────────────────────
+//
+// Teams are sub-entities of a tenant (one company, multiple departments).
+// All team operations are scoped to the authenticated tenant's company.
+//
+// Routes:
+//   POST   /teams                           — create a team
+//   GET    /teams                           — list teams for this tenant
+//   GET    /teams/:team_id                  — get team detail
+//   POST   /teams/:team_id/members          — add a member (or update role)
+//   DELETE /teams/:team_id/members/:member  — remove a member
+//   GET    /teams/:team_id/members          — list members
+
+#[derive(Deserialize)]
+pub struct CreateTeamRequest {
+    pub name: String,
+    pub slug: String,
+    pub description: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct AddTeamMemberRequest {
+    /// The tenant_id of the account to add as a member.
+    pub tenant_id: String,
+    /// "admin" | "member" | "viewer"
+    pub role: String,
+}
+
+/// POST /teams — create a new team under the authenticated tenant.
+pub async fn create_team(
+    State(state): State<AppState>,
+    tenant: AuthenticatedTenant,
+    Json(body): Json<CreateTeamRequest>,
+) -> impl IntoResponse {
+    let name = body.name.trim().to_string();
+    let slug = body.slug.trim().to_lowercase();
+
+    if name.is_empty() || slug.is_empty() {
+        return err(StatusCode::BAD_REQUEST, "name and slug required");
+    }
+    if slug.chars().any(|c| !c.is_ascii_alphanumeric() && c != '-' && c != '_') {
+        return err(StatusCode::BAD_REQUEST, "slug must be alphanumeric with hyphens/underscores only");
+    }
+
+    match state.team_store.create_team(&tenant.tenant_id, name, slug, body.description).await {
+        Ok(team) => (StatusCode::CREATED, Json(serde_json::json!({
+            "id": team.id,
+            "tenant_id": team.tenant_id,
+            "name": team.name,
+            "slug": team.slug,
+            "description": team.description,
+            "status": team.status,
+            "created_at": team.created_at,
+        }))).into_response(),
+        Err(e) => {
+            if e.to_string().contains("duplicate") || e.to_string().contains("unique") {
+                err(StatusCode::CONFLICT, "a team with this slug already exists")
+            } else {
+                err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+            }
+        }
+    }
+}
+
+/// GET /teams — list all teams for the authenticated tenant.
+pub async fn list_teams(
+    State(state): State<AppState>,
+    tenant: AuthenticatedTenant,
+) -> impl IntoResponse {
+    match state.team_store.list_teams_for_tenant(&tenant.tenant_id).await {
+        Ok(teams) => Json(serde_json::json!({ "teams": teams })).into_response(),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+/// GET /teams/:team_id — get detail for a specific team.
+pub async fn get_team(
+    State(state): State<AppState>,
+    tenant: AuthenticatedTenant,
+    Path(team_id): Path<String>,
+) -> impl IntoResponse {
+    match state.team_store.get_team(&team_id).await {
+        Ok(Some(team)) if team.tenant_id == tenant.tenant_id => {
+            Json(serde_json::json!({
+                "id": team.id,
+                "tenant_id": team.tenant_id,
+                "name": team.name,
+                "slug": team.slug,
+                "description": team.description,
+                "status": team.status,
+                "created_at": team.created_at,
+                "updated_at": team.updated_at,
+            })).into_response()
+        }
+        Ok(Some(_)) => err(StatusCode::FORBIDDEN, "team belongs to a different tenant"),
+        Ok(None) => err(StatusCode::NOT_FOUND, "team not found"),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+/// POST /teams/:team_id/members — add or update a team member.
+/// Only the team owner (same tenant) can do this.
+pub async fn add_team_member(
+    State(state): State<AppState>,
+    tenant: AuthenticatedTenant,
+    Path(team_id): Path<String>,
+    Json(body): Json<AddTeamMemberRequest>,
+) -> impl IntoResponse {
+    // Verify team belongs to this tenant
+    if let Err(e) = state.team_store.assert_team_owner(&team_id, &tenant.tenant_id).await {
+        return err(StatusCode::FORBIDDEN, e.to_string());
+    }
+
+    let role = crate::tenant::TeamMemberRole::from_str(&body.role);
+    match state.team_store.add_member(&team_id, &body.tenant_id, role).await {
+        Ok(_) => Json(serde_json::json!({ "added": true })).into_response(),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+/// DELETE /teams/:team_id/members/:member_tenant_id — remove a member.
+pub async fn remove_team_member(
+    State(state): State<AppState>,
+    tenant: AuthenticatedTenant,
+    Path((team_id, member_tenant_id)): Path<(String, String)>,
+) -> impl IntoResponse {
+    if let Err(e) = state.team_store.assert_team_owner(&team_id, &tenant.tenant_id).await {
+        return err(StatusCode::FORBIDDEN, e.to_string());
+    }
+
+    match state.team_store.remove_member(&team_id, &member_tenant_id).await {
+        Ok(_) => Json(serde_json::json!({ "removed": true })).into_response(),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+/// GET /teams/:team_id/members — list members of a team.
+pub async fn list_team_members(
+    State(state): State<AppState>,
+    tenant: AuthenticatedTenant,
+    Path(team_id): Path<String>,
+) -> impl IntoResponse {
+    // Must own or be a member of the team to list members
+    let is_owner = state.team_store.get_team(&team_id).await
+        .ok().flatten()
+        .map(|t| t.tenant_id == tenant.tenant_id)
+        .unwrap_or(false);
+
+    let is_member = state.team_store.get_member_role(&team_id, &tenant.tenant_id).await
+        .ok().flatten()
+        .is_some();
+
+    if !is_owner && !is_member {
+        return err(StatusCode::FORBIDDEN, "not a member or owner of this team");
+    }
+
+    match state.team_store.list_members(&team_id).await {
+        Ok(members) => Json(serde_json::json!({ "members": members })).into_response(),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+// ── Boundary routes ────────────────────────────────────────────────────────────
+//
+// Tenant-facing boundary management API.
+// All peer-to-peer traffic goes through ACP (not these REST routes).
+//
+// Routes:
+//   POST /boundary/handshake/propose           — initiate a draft handshake
+//   POST /boundary/handshake/:id/accept         — accept as responder
+//   POST /boundary/handshake/:id/revoke         — permanently revoke
+//   POST /boundary/handshake/:id/freeze         — emergency freeze
+//   POST /boundary/handshake/:id/unfreeze       — unfreeze (requires re-sign)
+//   POST /boundary/handshake/:id/breach         — report a breach
+//   GET  /boundary/handshakes                   — list this tenant's handshakes
+//   GET  /boundary/audit/:handshake_id          — query bilateral audit ledger
+//   GET  /boundary/audit/:handshake_id/verify   — verify chain integrity
+
+#[derive(Deserialize)]
+pub struct ProposeBoundaryHandshakeRequest {
+    // Responder info
+    pub responder_tenant_id: String,
+    pub responder_name: String,
+    pub responder_endpoint: String,
+    // Scope
+    #[serde(default)]
+    pub scope: String, // "cross_enterprise" | "cross_team"
+    pub requester_team_id: Option<String>,
+    pub responder_team_id: Option<String>,
+    // Schemas
+    pub request_schema: serde_json::Value,
+    pub response_schema: serde_json::Value,
+    #[serde(default)]
+    pub request_visible_fields: Vec<String>,
+    #[serde(default)]
+    pub response_visible_fields: Vec<String>,
+    #[serde(default = "default_timeout")]
+    pub response_timeout_secs: u64,
+    #[serde(default = "default_true")]
+    pub idempotent: bool,
+    // Peer display name for your side
+    pub requester_name: String,
+    pub requester_endpoint: String,
+}
+
+fn default_timeout() -> u64 { 300 }
+fn default_true() -> bool { true }
+
+/// POST /boundary/handshake/propose
+pub async fn propose_boundary_handshake(
+    State(state): State<AppState>,
+    tenant: AuthenticatedTenant,
+    Json(body): Json<ProposeBoundaryHandshakeRequest>,
+) -> impl IntoResponse {
+    use crate::boundry::{BoundaryParty, BoundaryScope};
+
+    let scope = match body.scope.as_str() {
+        "cross_team" => {
+            let req_team = body.requester_team_id.clone().unwrap_or_default();
+            let resp_team = body.responder_team_id.clone().unwrap_or_default();
+            if req_team.is_empty() || resp_team.is_empty() {
+                return err(StatusCode::BAD_REQUEST,
+                    "cross_team scope requires requester_team_id and responder_team_id");
+            }
+            BoundaryScope::CrossTeam {
+                requester_team_id: req_team,
+                responder_team_id: resp_team,
+            }
+        }
+        _ => BoundaryScope::CrossEnterprise,
+    };
+
+    let requester = BoundaryParty {
+        tenant_id: tenant.tenant_id.clone(),
+        display_name: body.requester_name.clone(),
+        acp_endpoint: body.requester_endpoint.clone(),
+        public_key: String::new(),
+    };
+    let responder = BoundaryParty {
+        tenant_id: body.responder_tenant_id.clone(),
+        display_name: body.responder_name.clone(),
+        acp_endpoint: body.responder_endpoint.clone(),
+        public_key: String::new(),
+    };
+
+    match state.boundary_handshakes.create_draft(
+        &tenant.tenant_id,
+        &requester,
+        &responder,
+        &scope,
+        body.request_schema,
+        body.response_schema,
+        body.request_visible_fields,
+        body.response_visible_fields,
+        body.response_timeout_secs,
+        body.idempotent,
+    ).await {
+        Ok(handshake_id) => (StatusCode::CREATED, Json(serde_json::json!({
+            "handshake_id": handshake_id,
+            "status": "awaiting_responder_acceptance",
+        }))).into_response(),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+/// POST /boundary/handshake/:id/accept — accept as responder
+pub async fn accept_boundary_handshake(
+    State(state): State<AppState>,
+    tenant: AuthenticatedTenant,
+    Path(handshake_id): Path<String>,
+) -> impl IntoResponse {
+    match state.boundary_handshakes.accept(&handshake_id, &tenant.tenant_id, true).await {
+        Ok(_) => Json(serde_json::json!({ "accepted": true })).into_response(),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct BoundaryActionRequest {
+    pub reason: String,
+}
+
+/// POST /boundary/handshake/:id/revoke
+pub async fn revoke_boundary_handshake(
+    State(state): State<AppState>,
+    tenant: AuthenticatedTenant,
+    Path(handshake_id): Path<String>,
+    Json(body): Json<BoundaryActionRequest>,
+) -> impl IntoResponse {
+    match state.boundary_governance.revoke(
+        &handshake_id, &tenant.tenant_id, &tenant.tenant_id, &body.reason
+    ).await {
+        Ok(_) => Json(serde_json::json!({ "revoked": true })).into_response(),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+/// POST /boundary/handshake/:id/freeze
+pub async fn freeze_boundary_handshake(
+    State(state): State<AppState>,
+    tenant: AuthenticatedTenant,
+    Path(handshake_id): Path<String>,
+    Json(body): Json<BoundaryActionRequest>,
+) -> impl IntoResponse {
+    match state.boundary_governance.freeze(
+        &handshake_id, &tenant.tenant_id, &tenant.tenant_id, &body.reason
+    ).await {
+        Ok(_) => Json(serde_json::json!({ "frozen": true })).into_response(),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+/// POST /boundary/handshake/:id/unfreeze
+pub async fn unfreeze_boundary_handshake(
+    State(state): State<AppState>,
+    tenant: AuthenticatedTenant,
+    Path(handshake_id): Path<String>,
+) -> impl IntoResponse {
+    match state.boundary_governance.unfreeze(
+        &handshake_id, &tenant.tenant_id, &tenant.tenant_id
+    ).await {
+        Ok(_) => Json(serde_json::json!({ "unfrozen": true })).into_response(),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct ReportBreachRequest {
+    pub severity: String, // "low" | "medium" | "high" | "critical"
+    pub description: String,
+    #[serde(default)]
+    pub affected_envelopes: Vec<String>,
+}
+
+/// POST /boundary/handshake/:id/breach
+pub async fn report_boundary_breach(
+    State(state): State<AppState>,
+    tenant: AuthenticatedTenant,
+    Path(handshake_id): Path<String>,
+    Json(body): Json<ReportBreachRequest>,
+) -> impl IntoResponse {
+    match state.boundary_governance.report_breach(
+        &handshake_id,
+        &tenant.tenant_id,
+        &body.severity,
+        &body.description,
+        body.affected_envelopes,
+    ).await {
+        Ok(report_id) => (StatusCode::CREATED, Json(serde_json::json!({
+            "breach_report_id": report_id,
+            "status": "reported",
+        }))).into_response(),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+/// GET /boundary/handshakes — list handshakes for this tenant
+pub async fn list_boundary_handshakes(
+    State(state): State<AppState>,
+    tenant: AuthenticatedTenant,
+) -> impl IntoResponse {
+    match state.boundary_handshakes.list_for_tenant(&tenant.tenant_id).await {
+        Ok(handshakes) => Json(serde_json::json!({ "handshakes": handshakes })).into_response(),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct AuditQueryParams {
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
+/// GET /boundary/audit/:handshake_id — query the bilateral audit ledger
+pub async fn query_boundary_audit(
+    State(state): State<AppState>,
+    tenant: AuthenticatedTenant,
+    Path(handshake_id): Path<String>,
+    Query(params): Query<AuditQueryParams>,
+) -> impl IntoResponse {
+    let limit = params.limit.unwrap_or(50).min(200);
+    let offset = params.offset.unwrap_or(0);
+
+    match state.boundary_audit.query(&handshake_id, &tenant.tenant_id, limit, offset).await {
+        Ok(records) => Json(serde_json::json!({ "records": records, "limit": limit, "offset": offset })).into_response(),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+/// GET /boundary/audit/:handshake_id/verify — verify chain integrity
+pub async fn verify_boundary_audit_chain(
+    State(state): State<AppState>,
+    tenant: AuthenticatedTenant,
+    Path(handshake_id): Path<String>,
+) -> impl IntoResponse {
+    match state.boundary_audit.verify_chain(&handshake_id, &tenant.tenant_id).await {
+        Ok(count) => Json(serde_json::json!({
+            "valid": true,
+            "record_count": count,
+            "message": format!("chain integrity verified for {} records", count),
+        })).into_response(),
+        Err(e) => Json(serde_json::json!({
+            "valid": false,
+            "error": e.to_string(),
+        })).into_response(),
+    }
+}
+
+fn broker_agent_belongs_to_tenant(agent: &serde_json::Value, tenant_id: &str) -> bool {
+    agent.get("broker_tenant_id").and_then(|value| value.as_str()) == Some(tenant_id)
+}
+
+#[derive(Deserialize)]
+pub struct RegisterExternalAgentRequest {
+    pub display_name: String,
+    #[serde(default = "default_platform_hint")]
+    pub platform_hint: String,
+    pub callback_endpoint: Option<String>,
+    pub verification: crate::boundry::broker::ExternalAgentVerification,
+    #[serde(default)]
+    pub allowed_handshake_ids: Vec<String>,
+}
+
+fn default_platform_hint() -> String {
+    "unknown".to_string()
+}
+
+#[derive(Deserialize)]
+pub struct BrokerResponsesQuery {
+    pub limit: Option<i64>,
+}
+
+/// POST /boundary/broker/agents
+pub async fn register_external_agent(
+    State(state): State<AppState>,
+    tenant: AuthenticatedTenant,
+    Json(body): Json<RegisterExternalAgentRequest>,
+) -> impl IntoResponse {
+    match state.boundary_broker.register_external_agent(
+        &tenant.tenant_id,
+        &body.display_name,
+        &body.platform_hint,
+        body.callback_endpoint.as_deref(),
+        &body.verification,
+        body.allowed_handshake_ids,
+    ).await {
+        Ok(external_agent_id) => (StatusCode::CREATED, Json(serde_json::json!({
+            "external_agent_id": external_agent_id,
+            "status": "created",
+        }))).into_response(),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+/// GET /boundary/broker/agents
+pub async fn list_external_agents(
+    State(state): State<AppState>,
+    tenant: AuthenticatedTenant,
+) -> impl IntoResponse {
+    match state.boundary_broker.list_external_agents(&tenant.tenant_id).await {
+        Ok(external_agents) => Json(serde_json::json!({ "external_agents": external_agents })).into_response(),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+/// GET /boundary/broker/agents/:agent_id
+pub async fn get_external_agent(
+    State(state): State<AppState>,
+    tenant: AuthenticatedTenant,
+    Path(agent_id): Path<String>,
+) -> impl IntoResponse {
+    match state.boundary_broker.load_external_agent(&agent_id).await {
+        Ok(Some(agent)) if broker_agent_belongs_to_tenant(&agent, &tenant.tenant_id) => {
+            Json(serde_json::json!({ "external_agent": agent })).into_response()
+        }
+        Ok(Some(_)) | Ok(None) => err(StatusCode::NOT_FOUND, "external agent not found"),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+/// POST /boundary/broker/agents/:agent_id/suspend
+pub async fn suspend_external_agent(
+    State(state): State<AppState>,
+    tenant: AuthenticatedTenant,
+    Path(agent_id): Path<String>,
+) -> impl IntoResponse {
+    match state.boundary_broker.load_external_agent(&agent_id).await {
+        Ok(Some(agent)) if broker_agent_belongs_to_tenant(&agent, &tenant.tenant_id) => {
+            match state.boundary_broker.suspend_external_agent(&agent_id).await {
+                Ok(()) => Json(serde_json::json!({ "suspended": true })).into_response(),
+                Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+            }
+        }
+        Ok(Some(_)) | Ok(None) => err(StatusCode::NOT_FOUND, "external agent not found"),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+/// POST /boundary/broker/agents/:agent_id/revoke
+pub async fn revoke_external_agent(
+    State(state): State<AppState>,
+    tenant: AuthenticatedTenant,
+    Path(agent_id): Path<String>,
+) -> impl IntoResponse {
+    match state.boundary_broker.load_external_agent(&agent_id).await {
+        Ok(Some(agent)) if broker_agent_belongs_to_tenant(&agent, &tenant.tenant_id) => {
+            match state.boundary_broker.revoke_external_agent(&agent_id).await {
+                Ok(()) => Json(serde_json::json!({ "revoked": true })).into_response(),
+                Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+            }
+        }
+        Ok(Some(_)) | Ok(None) => err(StatusCode::NOT_FOUND, "external agent not found"),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+/// GET /boundary/broker/agents/:agent_id/responses
+pub async fn poll_broker_responses(
+    State(state): State<AppState>,
+    tenant: AuthenticatedTenant,
+    Path(agent_id): Path<String>,
+    Query(params): Query<BrokerResponsesQuery>,
+) -> impl IntoResponse {
+    let limit = params.limit.unwrap_or(25).clamp(1, 100);
+
+    match state.boundary_broker.load_external_agent(&agent_id).await {
+        Ok(Some(agent)) if broker_agent_belongs_to_tenant(&agent, &tenant.tenant_id) => {
+            match state.boundary_broker.poll_responses(&agent_id, limit).await {
+                Ok(responses) => Json(serde_json::json!({
+                    "responses": responses,
+                    "count": responses.len(),
+                    "limit": limit,
+                })).into_response(),
+                Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+            }
+        }
+        Ok(Some(_)) | Ok(None) => err(StatusCode::NOT_FOUND, "external agent not found"),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }

@@ -474,10 +474,10 @@ export default function DashboardPage({ onNavigate, canCreateAgents = true }) {
       <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
         <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-border bg-bg-card/85 px-6 py-4 backdrop-blur">
           <div className="min-w-0">
-            <p className="text-[11px] uppercase tracking-[0.26em] text-tx-4">Dashboard</p>
-            <h1 className="mt-1 font-serif text-3xl text-tx-1">Control plane</h1>
+            <p className="text-[11px] uppercase tracking-[0.26em] text-tx-4">Workspace</p>
+            <h1 className="mt-1 font-serif text-3xl text-tx-1">Command center</h1>
             <p className="mt-1 max-w-2xl text-sm leading-6 text-tx-3">
-              Monitor agents, roles, workspace files, connectors, and approvals from one client-side surface.
+              Monitor agents, approvals, connectors, workspace files, and runtime traces from one premium surface.
             </p>
           </div>
 
@@ -493,7 +493,7 @@ export default function DashboardPage({ onNavigate, canCreateAgents = true }) {
               )}
             >
               <PencilLine size={13} />
-              {editing ? 'Editing layout' : 'Edit layout'}
+              {editing ? 'Editing canvas' : 'Edit canvas'}
             </button>
             <button
               type="button"
@@ -501,7 +501,7 @@ export default function DashboardPage({ onNavigate, canCreateAgents = true }) {
               className="inline-flex items-center gap-2 rounded-full border border-border bg-bg px-3 py-2 text-xs font-medium text-tx-2 transition-colors hover:bg-bg-hover"
             >
               <RefreshCw size={13} className={clsx(refreshing && 'animate-spin')} />
-              Refresh
+              Sync
             </button>
             <button
               type="button"
@@ -509,7 +509,7 @@ export default function DashboardPage({ onNavigate, canCreateAgents = true }) {
               className="inline-flex items-center gap-2 rounded-full border border-accent/20 bg-gradient-to-r from-accent to-accent-text px-3 py-2 text-xs font-medium text-white shadow-[0_10px_24px_rgba(201,106,46,0.18)] transition-transform hover:-translate-y-0.5"
             >
               <Sparkles size={13} />
-              Open workspace
+              Open agent studio
             </button>
           </div>
         </div>

@@ -1,41 +1,56 @@
 import { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
-import { ArrowRight, Bot, CheckCircle2, Database, FileText, Layers3, MessageSquareText, Plug, Scale, Search, ShieldCheck, Sparkles, Workflow, Zap, } from 'lucide-react';
+import { AlertTriangle, ArrowRight, Bot, CheckCircle2, ClipboardCheck, Clock, Database, FileText, Globe2, Layers3, Lock, MessageSquareText, Plug, Scale, Search, ShieldCheck, Sparkles, Users, Workflow, Zap } from 'lucide-react';
 import BenefitsScroller from '../components/BenefitsScroller';
 
 const stats = [
-  { value: 'Cloud', label: '100% cloud-based with zero upfront setup or infrastructure costs.' },
-  { value: 'Secure', label: 'Enterprise-grade security that open-source alternatives cannot match.' },
-  { value: 'Simple', label: 'Just tell us what you need done, and we will do it.' },
+  { value: 'Structured', label: 'Every workflow is shaped before execution.' },
+  { value: 'Traceable', label: 'Every step is logged and replayable across runs.' },
+  { value: 'Guided', label: 'The system uses known capabilities instead of guessing.' },
 ];
 
 const pillars = [
   {
     icon: Workflow,
-    title: 'We improve your company',
-    text: 'Scale operations without adding headcount. We turn plain-English instructions into fully deployed digital employees, transforming how your business operates.',
+    title: 'Execution, not chat',
+    text: 'Turn plain-language intent into structured work that the backend can validate and run safely.',
   },
   {
     icon: ShieldCheck,
-    title: 'Unmatched security',
-    text: 'Enterprise-grade security that open-source tools simply cannot provide. Every action is recorded, auditable, and strictly sandboxed.',
+    title: 'Auditable by default',
+    text: 'Every workflow keeps a clear record so teams can review what happened and why.',
   },
   {
     icon: Layers3,
-    title: 'Cloud-based, zero setup costs',
-    text: 'No clunky infrastructure to deploy or servers to manage. Narayan operates entirely in the cloud, so you can skip the setup time and upfront capital.',
+    title: 'Connected to every system',
+    text: 'Workflows can move through tools, connectors, databases, APIs, and internal systems in one flow.',
   },
   {
     icon: Plug,
-    title: 'Tell us what to do',
-    text: 'Just tell us what needs to be done, and we will do it. Our agents instantly wire themselves to execute your requested jobs 24/7.',
+    title: 'Guided recovery',
+    text: 'When something is missing, the system asks for the exact next step instead of guessing.',
   },
 ];
 
 const steps = [
-  { title: 'Write the job', text: 'Describe what you need done in plain language and define the approval rules.' },
-  { title: 'Check the setup', text: 'Validate connectors, test permissions, and simulate the run before launch.' },
-  { title: 'It runs 24/7', text: 'The agent executes the job on its own and keeps a full log.' },
+  { title: 'Draft the workflow', text: 'Describe the work in plain language and turn it into a clear execution plan.' },
+  { title: 'Check the connections', text: 'Validate tools, data sources, APIs, and approval rules before launch.' },
+  { title: 'Run and recover', text: 'Execute the workflow, capture history, and repair only what is missing.' },
+];
+
+const riskSignals = [
+  {
+    label: 'Workflow pattern',
+    value: 'Each workflow keeps a consistent shape that can be compared against similar jobs.',
+  },
+  {
+    label: 'Pre-launch checks',
+    value: 'The system can compare a new workflow against past outcomes and flag likely risks before launch.',
+  },
+  {
+    label: 'Actionable fixes',
+    value: 'Warnings can point to the step and suggest a safer change before anything runs.',
+  },
 ];
 
 const examples = [
@@ -89,130 +104,183 @@ const examples = [
   },
 ];
 
+const PIPELINE_STEPS = [
+  { label: 'Ingest batch' },
+  { label: 'Score anomalies' },
+  { label: 'Route review' },
+  { label: 'Freeze & log' },
+];
+
+const LOG_LINES = [
+  { t: '14:02:11', msg: 'Payment batch TXN-9913 received · 4,218 records', ok: false },
+  { t: '14:02:12', msg: 'Anomaly scan: 11 flagged · risk score > 0.87', ok: false },
+  { t: '14:02:13', msg: 'Escalation → compliance-review-agent · handoff sent ✓', ok: true },
+  { t: '14:02:15', msg: 'Compliance ACK received · hold_and_review instruction', ok: true },
+  { t: '14:02:16', msg: 'Accounts frozen: ACC-4471, ACC-8823, ACC-0091', ok: false },
+  { t: '14:02:17', msg: 'Audit trail written · case ID: FR-2024-00441 ✓', ok: true },
+];
+
+const CONNECTORS = ['Stripe', 'Data Engine', 'Workflow Handoff', 'Compliance DB'];
+
+
 function CommandSurface() {
-  const [stage, setStage] = useState(0);
+  const [activeStep, setActiveStep] = useState(0);
+  const [logCount, setLogCount]     = useState(1);
+  const [secs, setSecs]             = useState(0);
 
   useEffect(() => {
-    const id = window.setInterval(() => {
-      setStage(prev => (prev + 1) % 3);
-    }, 2400);
-    return () => window.clearInterval(id);
+    const tick = window.setInterval(() => {
+      setActiveStep(s => (s + 1) % PIPELINE_STEPS.length);
+      setLogCount(c => (c >= LOG_LINES.length ? 1 : c + 1));
+      setSecs(s => s + 2);
+    }, 2000);
+    return () => window.clearInterval(tick);
   }, []);
 
-  const stageItems = [
-    {
-      title: 'Job spec',
-      copy: 'Process incoming invoices, route exceptions, and post approved items automatically.',
-      status: 'Ready to validate',
-    },
-    {
-      title: 'Execution plan',
-      copy: 'Connect Gmail, QuickBooks, and Workspace. Verify permissions before the first run.',
-      status: 'Checks passing',
-    },
-    {
-      title: 'Audit trail',
-      copy: 'Every action stays replayable, timestamped, and attached to the original decision.',
-      status: 'Logging live',
-    },
-  ];
+  const uptime = `${String(Math.floor(secs / 60)).padStart(2, '0')}m ${String(secs % 60).padStart(2, '0')}s`;
 
   return (
     <motion.div
-      animate={{ y: [0, -8, 0] }}
-      transition={{ duration: 6, repeat: Infinity, ease: "easeInOut" }}
-      className="relative overflow-hidden rounded-[2rem] border border-border/60 bg-[#171311] p-4 text-white shadow-[0_30px_80px_rgba(26,23,20,0.2)]"
+      animate={{ y: [0, -7, 0] }}
+      transition={{ duration: 7, repeat: Infinity, ease: 'easeInOut' }}
+      className="relative overflow-hidden rounded-[2rem] border border-white/10 bg-[#100e0c] text-white shadow-[0_40px_100px_rgba(0,0,0,0.35)]"
     >
-      <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_left,_rgba(201,106,46,0.32),_transparent_28%),radial-gradient(circle_at_bottom_right,_rgba(59,130,246,0.18),_transparent_24%)] opacity-80" />
-      <div className="absolute inset-x-8 top-10 h-px bg-gradient-to-r from-transparent via-white/15 to-transparent" />
-      <motion.div
-        animate={{ opacity: [0.3, 0.6, 0.3] }}
-        transition={{ duration: 3, repeat: Infinity }}
-        className="absolute inset-0 bg-[radial-gradient(circle_at_center,_rgba(201,106,46,0.15),_transparent_50%)]"
+      {/* Subtle ambient glows — kept minimal */}
+      <div className="pointer-events-none absolute inset-0"
+        style={{ background: 'radial-gradient(ellipse at 20% 0%, rgba(201,106,46,0.18) 0%, transparent 50%), radial-gradient(ellipse at 80% 100%, rgba(59,130,246,0.1) 0%, transparent 45%)' }}
       />
 
-      <div className="relative">
-        <div className="flex items-center justify-between gap-4 border-b border-white/10 pb-4">
-          <div>
-            <p className="text-[0.7rem] uppercase tracking-[0.28em] text-white/45">Live workflow</p>
-            <p className="mt-1 text-lg font-medium">Narayan operations view</p>
-          </div>
-          <div className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-white/75">
-            {stageItems[stage].status}
-          </div>
+      {/* ── HEADER ───────────────────────────────────────────────────── */}
+      <div className="relative flex items-center justify-between border-b border-white/[0.08] px-5 py-4">
+        <div>
+          <p className="text-[0.58rem] font-bold uppercase tracking-[0.32em] text-white/30">Agent · Risk &amp; Compliance</p>
+          <p className="mt-0.5 text-base font-semibold text-white/85">Payment Fraud Detection</p>
         </div>
-
-        <div className="grid gap-5 py-5 lg:grid-cols-[1.05fr_0.95fr]">
-          <div className="rounded-[1.5rem] border border-white/10 bg-white/[0.03] p-5">
-            <p className="text-[0.7rem] uppercase tracking-[0.28em] text-white/45">Current step</p>
-            <p className="mt-4 text-2xl leading-tight text-white">{stageItems[stage].copy}</p>
-
-            <div className="mt-6 flex items-center gap-3 text-sm text-white/70">
-              <span className="size-2 rounded-full bg-emerald-400" />
-              Checks are on
-              <span className="size-1.5 rounded-full bg-white/20" />
-              Replay available
-            </div>
-
-            <div className="mt-6 space-y-3">
-              {['Email intake', 'Role routing', 'Approval logic'].map((item, idx) => (
-                <div key={item} className="flex items-center gap-3 rounded-2xl border border-white/8 bg-black/20 px-4 py-3">
-                  <span className="flex size-7 items-center justify-center rounded-full bg-white/10 text-xs font-semibold text-white/80">
-                    {idx + 1}
-                  </span>
-                  <span className="text-sm text-white/85">{item}</span>
-                  <span className="ml-auto text-xs text-white/45">queued</span>
-                </div>
-              ))}
-            </div>
+        <div className="flex items-center gap-3">
+          <div className="flex items-center gap-1.5 rounded-full border border-emerald-500/25 bg-emerald-500/10 px-3 py-1">
+            <motion.span
+              animate={{ opacity: [1, 0.2, 1] }}
+              transition={{ duration: 1.4, repeat: Infinity }}
+              className="size-1.5 rounded-full bg-emerald-400"
+            />
+            <span className="text-[0.65rem] font-semibold text-emerald-400">RUNNING</span>
           </div>
+          <span className="font-mono text-xs text-white/30">{uptime}</span>
+        </div>
+      </div>
 
-          <div className="rounded-[1.5rem] border border-white/10 bg-white/[0.03] p-5">
-            <p className="text-[0.7rem] uppercase tracking-[0.28em] text-white/45">Connected systems</p>
-            <div className="mt-4 flex flex-wrap gap-2">
-              {['Gmail', 'QuickBooks', 'Workspace', 'Slack'].map(item => (
-                <span key={item} className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-white/70">
-                  {item}
-                </span>
-              ))}
-            </div>
+      {/* ── PIPELINE ─────────────────────────────────────────────────── */}
+      <div className="relative px-5 py-5">
+        <p className="mb-4 text-[0.58rem] font-bold uppercase tracking-[0.28em] text-white/25">Workflow steps</p>
+        <div className="flex items-center">
+          {PIPELINE_STEPS.map((step, i) => {
+            const done    = i < activeStep;
+            const current = i === activeStep;
+            return (
+              <div key={step.label} className="flex flex-1 items-center last:flex-none">
+                {/* Node */}
+                <div className="flex flex-col items-center gap-1.5">
+                  <motion.div
+                    animate={current ? { boxShadow: ['0 0 0px rgba(224,117,64,0)', '0 0 14px rgba(224,117,64,0.55)', '0 0 0px rgba(224,117,64,0)'] } : {}}
+                    transition={{ duration: 1.6, repeat: Infinity }}
+                    className={`flex size-8 items-center justify-center rounded-full border text-xs font-bold transition-all duration-500
+                      ${done    ? 'border-emerald-500/50 bg-emerald-500/20 text-emerald-400' : ''}
+                      ${current ? 'border-amber-500/60  bg-amber-500/20  text-amber-400' : ''}
+                      ${!done && !current ? 'border-white/10 bg-white/5 text-white/25' : ''}`}
+                  >
+                    {done ? '✓' : i + 1}
+                  </motion.div>
+                  <p className={`text-[0.58rem] whitespace-nowrap font-medium transition-colors duration-300
+                    ${done || current ? 'text-white/65' : 'text-white/22'}`}>
+                    {step.label}
+                  </p>
+                </div>
 
-            <div className="mt-6 rounded-[1.5rem] border border-white/10 bg-black/20 p-4">
-              <p className="text-[0.7rem] uppercase tracking-[0.28em] text-white/45">Workflow state</p>
-              <div className="mt-4 space-y-4">
-                {steps.map((item, idx) => (
-                  <div key={item.title} className="flex gap-3">
-                    <div className="flex flex-col items-center">
-                      <div className={`size-2.5 rounded-full ${idx <= stage ? 'bg-amber-300' : 'bg-white/20'}`} />
-                      {idx < steps.length - 1 ? <div className="mt-2 h-10 w-px bg-white/10" /> : null}
-                    </div>
-                    <div className="pb-4">
-                      <p className="text-sm font-medium text-white">{item.title}</p>
-                      <p className="mt-1 text-sm leading-6 text-white/60">{item.text}</p>
-                    </div>
+                {/* Connector */}
+                {i < PIPELINE_STEPS.length - 1 && (
+                  <div className="relative mx-2 h-px flex-1">
+                    {/* Track */}
+                    <div className={`absolute inset-0 rounded-full transition-colors duration-500 ${done ? 'bg-emerald-500/35' : 'bg-white/8'}`} />
+                    {/* Travelling dot */}
+                    {current && (
+                      <motion.div
+                        className="absolute top-1/2 size-2 -translate-y-1/2 rounded-full bg-amber-400"
+                        style={{ boxShadow: '0 0 8px rgba(224,117,64,0.8)' }}
+                        animate={{ left: ['0%', '100%'], opacity: [0.2, 1, 0.2] }}
+                        transition={{ duration: 1.2, repeat: Infinity, ease: 'easeInOut' }}
+                      />
+                    )}
                   </div>
-                ))}
+                )}
               </div>
-            </div>
+            );
+          })}
+        </div>
+      </div>
 
-            <div className="mt-4 grid grid-cols-3 gap-3">
-              {['47 processed', '3 escalated', '$847K handled'].map(metric => (
-                <div key={metric} className="rounded-2xl border border-white/10 bg-white/[0.03] px-3 py-3 text-center">
-                  <p className="text-sm font-medium text-white">{metric}</p>
-                </div>
-              ))}
-            </div>
+      {/* ── BODY: Log + Stats ────────────────────────────────────────── */}
+      <div className="relative grid grid-cols-[1fr_100px] border-t border-white/[0.08]">
+        {/* Log panel */}
+        <div className="border-r border-white/[0.08] px-5 py-4">
+          <p className="mb-3 text-[0.58rem] font-bold uppercase tracking-[0.28em] text-white/25">Live output</p>
+          <div className="space-y-2 font-mono">
+            {LOG_LINES.slice(0, logCount).map((line, i) => (
+              <motion.div
+                key={i}
+                initial={{ opacity: 0, x: -10 }}
+                animate={{ opacity: 1, x: 0 }}
+                transition={{ duration: 0.35 }}
+                className="flex gap-2.5 text-[0.7rem]"
+              >
+                <span className="shrink-0 text-white/22">{line.t}</span>
+                <span className={line.ok ? 'text-emerald-400/90' : 'text-white/60'}>{line.msg}</span>
+              </motion.div>
+            ))}
+            {/* Blinking cursor */}
+            <motion.span
+              animate={{ opacity: [1, 0, 1] }}
+              transition={{ duration: 0.8, repeat: Infinity }}
+              className="inline-block text-[0.7rem] text-amber-400/70"
+            >▌</motion.span>
           </div>
         </div>
 
-        <div className="flex items-center gap-2 border-t border-white/10 pt-4 text-xs text-white/50">
-          <Zap className="size-3.5 text-amber-300" />
-          Plan, check, run, review
+        {/* Stats sidebar */}
+        <div className="flex flex-col justify-center gap-4 px-4 py-4">
+          {[
+            { val: '11',    sub: 'flagged' },
+            { val: '$4.2M', sub: 'protected' },
+            { val: '3',     sub: 'frozen' },
+          ].map(({ val, sub }) => (
+            <div key={sub}>
+              <p className="font-serif text-xl font-semibold text-amber-400/90 leading-none">{val}</p>
+              <p className="mt-0.5 text-[0.58rem] text-white/30">{sub}</p>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* ── FOOTER: Connected systems ─────────────────────────────────── */}
+      <div className="relative flex items-center gap-3 border-t border-white/[0.08] px-5 py-3">
+        <Zap className="size-3 shrink-0 text-amber-400/60" />
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+          {CONNECTORS.map(c => (
+            <div key={c} className="flex items-center gap-1.5">
+              <motion.span
+                animate={{ opacity: [0.5, 1, 0.5] }}
+                transition={{ duration: 2.2, repeat: Infinity, delay: Math.random() * 1.5 }}
+                className="size-1.5 rounded-full bg-emerald-400"
+              />
+              <span className="text-[0.65rem] text-white/40">{c}</span>
+            </div>
+          ))}
         </div>
       </div>
     </motion.div>
   );
 }
+
+
 
 function SectionHeading({ eyebrow, title, text }) {
   return (
@@ -467,6 +535,382 @@ function ACPDiagram() {
 
 
 
+/* ─── Broker flow diagram ─────────────────────────────────────────────────────
+   Shows: Any external agent → Narayan Broker (governance) → Internal workflow
+   Narayan sits in the middle. Neither party needs to know the other internally.
+────────────────────────────────────────────────────────────────────────────── */
+const BROKER_LOG = [
+  { t: '11:22:01', msg: 'External agent registered · platform: LangGraph · status: active', ok: true },
+  { t: '11:22:14', msg: 'Handshake v2 · credit-check accepted by both parties ✓', ok: true },
+  { t: '11:22:15', msg: 'Inbound envelope ENV-9921 · Ed25519 signature verified ✓', ok: true },
+  { t: '11:22:15', msg: 'Data barrier: PII scan passed · SSN field redacted → hash', ok: true },
+  { t: '11:22:16', msg: 'Approval policy: auto-approved · amount $42K within threshold', ok: true },
+  { t: '11:22:16', msg: 'Routed to internal workflow · step: credit-decision-agent', ok: true },
+  { t: '11:22:31', msg: 'Response: ApprovedWithConditions · delivered via webhook ✓', ok: true },
+  { t: '11:22:31', msg: 'Bilateral audit written · chain hash verified on both sides ✓', ok: true },
+];
+
+const BROKER_PHASES = ['Register', 'Handshake', 'Receive', 'Govern', 'Route', 'Respond'];
+
+function BrokerDiagram() {
+  const [phase, setPhase] = useState(0);
+  const [logCount, setLogCount] = useState(1);
+
+  useEffect(() => {
+    const t = setInterval(() => {
+      setPhase(p => (p + 1) % BROKER_PHASES.length);
+      setLogCount(c => (c >= BROKER_LOG.length ? 1 : c + 1));
+    }, 1800);
+    return () => clearInterval(t);
+  }, []);
+
+  const externalPlatforms = ['LangGraph', 'CrewAI', 'Custom ACP', 'n8n'];
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 20 }} whileInView={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.6 }} viewport={{ once: true }}
+      className="relative overflow-hidden rounded-[2rem] border border-white/10 bg-[#0b0908] text-white"
+    >
+      <div className="pointer-events-none absolute inset-0" style={{
+        background: 'radial-gradient(ellipse at 50% 30%, rgba(99,102,241,0.18) 0%, transparent 60%), radial-gradient(ellipse at 20% 80%, rgba(234,179,8,0.08) 0%, transparent 50%)'
+      }} />
+
+      {/* Header */}
+      <div className="flex items-center justify-between border-b border-white/[0.07] px-5 py-3.5">
+        <div>
+          <p className="text-[0.58rem] font-bold uppercase tracking-[0.3em] text-white/30">Universal Boundary Broker</p>
+          <p className="mt-0.5 text-sm font-semibold text-white/75">Any agent, any platform — governed through Narayan</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <motion.span animate={{ opacity: [1, 0.2, 1] }} transition={{ duration: 1.4, repeat: Infinity }}
+            className="size-2 rounded-full bg-indigo-400" />
+          <span className="text-[0.68rem] text-white/35">broker active</span>
+        </div>
+      </div>
+
+      {/* 3-party diagram */}
+      <div className="px-5 py-5">
+        <div className="grid grid-cols-[1fr_auto_1fr_auto_1fr] items-center gap-2">
+
+          {/* Left: External agents */}
+          <div className="space-y-1.5">
+            <p className="mb-2 text-[0.58rem] font-bold uppercase tracking-[0.24em] text-white/25">External agents</p>
+            {externalPlatforms.map((p, i) => (
+              <motion.div key={p}
+                animate={{ opacity: phase >= 1 && i === phase % externalPlatforms.length ? 1 : 0.35 }}
+                transition={{ duration: 0.4 }}
+                className={`flex items-center gap-2 rounded-lg border px-2.5 py-1.5 text-[0.65rem] font-medium
+                  ${i === phase % externalPlatforms.length && phase >= 2 ? 'border-indigo-500/40 bg-indigo-500/12 text-indigo-200' : 'border-white/8 bg-white/3 text-white/40'}`}
+              >
+                <div className={`size-1.5 rounded-full ${i === phase % externalPlatforms.length && phase >= 2 ? 'bg-indigo-400' : 'bg-white/20'}`} />
+                {p}
+              </motion.div>
+            ))}
+          </div>
+
+          {/* Arrow right */}
+          <div className="flex flex-col items-center gap-1 px-1">
+            <div className="relative h-16 w-8">
+              <div className="absolute left-1/2 top-0 h-full w-px -translate-x-1/2 bg-white/8" />
+              {(phase === 2 || phase === 3) && (
+                <motion.div className="absolute left-1/2 size-2 -translate-x-1/2 rounded-full bg-indigo-400"
+                  style={{ boxShadow: '0 0 6px rgba(99,102,241,0.9)' }}
+                  animate={{ top: ['0%', '100%'], opacity: [0.2, 1, 0.2] }}
+                  transition={{ duration: 0.9, repeat: Infinity }} />
+              )}
+            </div>
+            <p className="text-[0.5rem] font-bold uppercase tracking-[0.15em] text-white/18">ACP</p>
+          </div>
+
+          {/* Center: Narayan Broker */}
+          <div className="text-center">
+            <motion.div
+              animate={{ boxShadow: phase >= 3 ? ['0 0 0px rgba(99,102,241,0)', '0 0 20px rgba(99,102,241,0.4)', '0 0 0px rgba(99,102,241,0)'] : [] }}
+              transition={{ duration: 1.6, repeat: Infinity }}
+              className="mx-auto rounded-2xl border border-indigo-500/40 bg-indigo-500/15 px-3 py-3"
+            >
+              <p className="text-[0.6rem] font-bold uppercase tracking-[0.24em] text-indigo-300/60">Narayan</p>
+              <p className="mt-0.5 text-xs font-bold text-indigo-200">Broker</p>
+            </motion.div>
+            {/* Governance steps */}
+            <div className="mt-2 space-y-1">
+              {['Verify sig', 'Data barrier', 'Rate limit', 'Approval', 'Audit'].map((s, i) => (
+                <motion.div key={s} animate={{ opacity: phase >= i + 1 ? 1 : 0.2 }} transition={{ duration: 0.3 }}
+                  className={`rounded-md px-2 py-0.5 text-[0.55rem] font-medium ${phase >= i + 1 ? 'bg-indigo-500/15 text-indigo-300' : 'text-white/20'}`}>
+                  {s}
+                </motion.div>
+              ))}
+            </div>
+          </div>
+
+          {/* Arrow right to internal */}
+          <div className="flex flex-col items-center gap-1 px-1">
+            <div className="relative h-16 w-8">
+              <div className="absolute left-1/2 top-0 h-full w-px -translate-x-1/2 bg-white/8" />
+              {(phase === 4 || phase === 5) && (
+                <motion.div className="absolute left-1/2 size-2 -translate-x-1/2 rounded-full bg-emerald-400"
+                  style={{ boxShadow: '0 0 6px rgba(52,211,153,0.9)' }}
+                  animate={{ top: ['0%', '100%'], opacity: [0.2, 1, 0.2] }}
+                  transition={{ duration: 0.9, repeat: Infinity }} />
+              )}
+            </div>
+            <p className="text-[0.5rem] font-bold uppercase tracking-[0.15em] text-white/18">Internal</p>
+          </div>
+
+          {/* Right: Internal workflow */}
+          <div className="space-y-1.5">
+            <p className="mb-2 text-[0.58rem] font-bold uppercase tracking-[0.24em] text-white/25">Your workflow</p>
+            {['Credit agent', 'Approval step', 'KYC validator', 'Response builder'].map((s, i) => (
+              <motion.div key={s}
+                animate={{ opacity: phase >= 4 && i === (phase - 4) % 4 ? 1 : 0.25 }}
+                transition={{ duration: 0.4 }}
+                className={`flex items-center gap-2 rounded-lg border px-2.5 py-1.5 text-[0.65rem] font-medium
+                  ${phase >= 4 && i === (phase - 4) % 4 ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200' : 'border-white/8 bg-white/3 text-white/40'}`}
+              >
+                <div className={`size-1.5 rounded-full ${phase >= 4 && i === (phase - 4) % 4 ? 'bg-emerald-400' : 'bg-white/20'}`} />
+                {s}
+              </motion.div>
+            ))}
+          </div>
+        </div>
+
+        {/* Phase track */}
+        <div className="mt-4 flex gap-1">
+          {BROKER_PHASES.map((p, i) => (
+            <div key={p} className={`h-1 flex-1 rounded-full transition-colors duration-500 ${i < phase ? 'bg-indigo-500/55' : i === phase ? 'bg-indigo-400' : 'bg-white/8'}`} />
+          ))}
+        </div>
+        <div className="mt-1.5 flex justify-between">
+          {BROKER_PHASES.map((p, i) => (
+            <p key={p} className={`text-[0.5rem] font-medium transition-colors duration-300 ${i <= phase ? 'text-white/50' : 'text-white/18'}`}>{p}</p>
+          ))}
+        </div>
+      </div>
+
+      {/* Live audit log */}
+      <div className="border-t border-white/[0.07] px-5 py-3">
+        <p className="mb-2 text-[0.58rem] font-bold uppercase tracking-[0.28em] text-white/25">Broker audit log</p>
+        <div className="space-y-1 font-mono">
+          {BROKER_LOG.slice(0, logCount).map((line, i) => (
+            <motion.div key={i} initial={{ opacity: 0, x: -8 }} animate={{ opacity: 1, x: 0 }}
+              transition={{ duration: 0.25 }} className="flex gap-2 text-[0.62rem]">
+              <span className="shrink-0 text-white/20">{line.t}</span>
+              <span className={line.ok ? 'text-emerald-400/80' : 'text-white/50'}>{line.msg}</span>
+            </motion.div>
+          ))}
+          <motion.span animate={{ opacity: [1, 0, 1] }} transition={{ duration: 0.8, repeat: Infinity }}
+            className="inline-block text-[0.62rem] text-indigo-400/60">▌</motion.span>
+        </div>
+      </div>
+    </motion.div>
+  );
+}
+
+/* ─── Feature cards ──────────────────────────────────────────────────────────── */
+const BOUNDARY_FEATURES = [
+  {
+    icon: Globe2, badge: 'Off-platform agents',
+    color: 'bg-indigo-500/10 text-indigo-400', border: 'border-indigo-500/20',
+    title: 'Company B can stay on LangGraph, CrewAI, REST, or a custom ACP agent',
+    body: 'Company A can run on Narayan while the other side stays on its own stack. The broker becomes the trusted medium, so neither side needs a Narayan install to connect.',
+  },
+  {
+    icon: ClipboardCheck, badge: 'Typed handshake',
+    color: 'bg-violet-500/10 text-violet-400', border: 'border-violet-500/20',
+    title: 'The contract is signed before any payload moves',
+    body: 'Request fields, response shape, timeout, visibility rules, and callback expectations are agreed up front. Narayan enforces the handshake before the step can run.',
+  },
+  {
+    icon: ShieldCheck, badge: 'Structured approvals',
+    color: 'bg-amber-500/10 text-amber-400', border: 'border-amber-500/20',
+    title: 'Security approval is a typed workflow outcome, not an email thread',
+    body: 'Approvals can be ApprovedWithConditions, PartiallyApproved, EscalatedTo, or DeferredUntil. The external agent gets structured results back, not a manual follow-up.',
+  },
+  {
+    icon: Lock, badge: 'Bilateral audit',
+    color: 'bg-emerald-500/10 text-emerald-400', border: 'border-emerald-500/20',
+    title: 'Both companies keep the same chain-hashed record',
+    body: 'Every envelope writes an immutable SHA-256 audit trail on both sides. Each party can verify the exchange independently, and neither side can rewrite history alone.',
+  },
+  {
+    icon: AlertTriangle, badge: 'Data barrier',
+    color: 'bg-red-500/10 text-red-400', border: 'border-red-500/20',
+    title: 'PII scans, redaction, and residency checks happen before crossing',
+    body: 'The broker inspects inbound and outbound envelopes, blocks residency violations, and hashes sensitive fields so only the allowed data leaves the boundary.',
+  },
+  {
+    icon: Clock, badge: 'Long-running approvals',
+    color: 'bg-sky-500/10 text-sky-400', border: 'border-sky-500/20',
+    title: 'The flow can park for hours or days without losing state',
+    body: 'Approval steps can pause the exchange, wait for a human, and resume when ready. The timeout policy is part of the handshake, so the workflow stays explicit.',
+  },
+];
+
+/* ─── Enterprise Boundary + Broker Section ──────────────────────────────────── */
+function EnterpriseBoundarySection() {
+  return (
+    <section className="pb-12">
+      {/* Heading row */}
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+        <SectionHeading
+          eyebrow="Universal boundary broker"
+          title="Narayan sits between Company A and Company B."
+          text="One side can run Narayan and the other can stay on LangGraph, CrewAI, REST, or a custom ACP agent. Narayan acts as the medium: it verifies identity, enforces the handshake, applies security approval, redacts sensitive data, and writes the audit trail."
+        />
+        <motion.div
+          initial={{ opacity: 0, scale: 0.9 }} whileInView={{ opacity: 1, scale: 1 }}
+          transition={{ duration: 0.5 }} viewport={{ once: true }}
+          className="shrink-0 self-start rounded-2xl border border-indigo-500/30 bg-indigo-500/10 px-4 py-3 sm:self-auto"
+        >
+          <p className="text-[0.6rem] font-bold uppercase tracking-[0.28em] text-indigo-400">Industry first</p>
+          <p className="mt-1 text-xs font-semibold text-indigo-200">Brokered company-to-company work, even when the other side is off-platform.</p>
+        </motion.div>
+      </div>
+
+      {/* Scenarios: who can connect */}
+      <motion.div
+        initial={{ opacity: 0, y: 12 }} whileInView={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.5, delay: 0.1 }} viewport={{ once: true }}
+        className="mt-8 overflow-hidden rounded-2xl border border-indigo-500/20 bg-gradient-to-r from-indigo-500/8 via-violet-500/6 to-indigo-500/8 px-6 py-5"
+      >
+        <p className="mb-4 text-[0.6rem] font-bold uppercase tracking-[0.28em] text-tx-3">Narayan stays in the middle, even when only one side is on the platform</p>
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          {[
+            { from: 'Company A on Narayan', to: 'Company B on Narayan', tag: 'Native', color: 'text-indigo-400', bg: 'bg-indigo-500/10' },
+            { from: 'Company A on Narayan', to: 'Company B on LangGraph', tag: 'Brokered', color: 'text-violet-400', bg: 'bg-violet-500/10' },
+            { from: 'Company A on Narayan', to: 'Company B on CrewAI', tag: 'Brokered', color: 'text-amber-400', bg: 'bg-amber-500/10' },
+            { from: 'Company A on Narayan', to: 'Company B via REST', tag: 'Pure broker', color: 'text-emerald-400', bg: 'bg-emerald-500/10' },
+          ].map(({ from, to, tag, color, bg }) => (
+            <div key={tag} className={`rounded-xl ${bg} border border-white/8 px-3 py-2.5`}>
+              <span className={`text-[0.58rem] font-bold uppercase tracking-[0.2em] ${color}`}>{tag}</span>
+              <p className="mt-1.5 text-[0.7rem] font-medium text-tx-1">{from}</p>
+              <div className="my-1 flex items-center gap-1">
+                <div className="h-px flex-1 bg-white/10" />
+                <span className="text-[0.55rem] text-white/30">Narayan broker</span>
+                <div className="h-px flex-1 bg-white/10" />
+              </div>
+              <p className="text-[0.7rem] font-medium text-tx-1">{to}</p>
+            </div>
+          ))}
+        </div>
+      </motion.div>
+
+      {/* Main grid: broker diagram + feature cards */}
+      <div className="mt-10 grid gap-8 lg:grid-cols-[1.15fr_0.85fr]">
+        <BrokerDiagram />
+        <div className="space-y-3">
+          {BOUNDARY_FEATURES.slice(0, 4).map(({ icon: Icon, badge, color, border, title, body }, idx) => (
+            <motion.div key={badge}
+              initial={{ opacity: 0, x: 16 }} whileInView={{ opacity: 1, x: 0 }}
+              transition={{ duration: 0.4, delay: idx * 0.07 }} viewport={{ once: true }}
+              className={`group relative overflow-hidden rounded-[1.5rem] border ${border} bg-bg-card/90 p-4 transition-all duration-300 hover:shadow-md`}
+            >
+              <div className="flex items-start gap-3">
+                <div className={`flex size-8 shrink-0 items-center justify-center rounded-xl ${color}`}>
+                  <Icon className="size-4" />
+                </div>
+                <div className="min-w-0">
+                  <span className={`rounded-lg px-2 py-0.5 text-[0.58rem] font-bold uppercase tracking-[0.15em] ${color}`}>{badge}</span>
+                  <h3 className="mt-1.5 text-sm font-semibold text-tx-1 leading-snug">{title}</h3>
+                  <p className="mt-1 text-xs leading-5 text-tx-3">{body}</p>
+                </div>
+              </div>
+            </motion.div>
+          ))}
+        </div>
+      </div>
+
+      {/* Bottom two wider cards */}
+      <div className="mt-4 grid gap-4 md:grid-cols-2">
+        {BOUNDARY_FEATURES.slice(4).map(({ icon: Icon, badge, color, border, title, body }, idx) => (
+          <motion.div key={badge}
+            initial={{ opacity: 0, y: 14 }} whileInView={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.4, delay: idx * 0.08 }} viewport={{ once: true }}
+            className={`group relative overflow-hidden rounded-[1.5rem] border ${border} bg-bg-card/90 p-5 transition-all duration-300 hover:shadow-md`}
+          >
+            <div className="flex items-start gap-4">
+              <div className={`flex size-10 shrink-0 items-center justify-center rounded-2xl ${color}`}>
+                <Icon className="size-5" />
+              </div>
+              <div>
+                <span className={`rounded-lg px-2.5 py-1 text-[0.6rem] font-bold uppercase tracking-[0.15em] ${color}`}>{badge}</span>
+                <h3 className="mt-2 text-sm font-semibold text-tx-1">{title}</h3>
+                <p className="mt-1.5 text-xs leading-5 text-tx-3">{body}</p>
+              </div>
+            </div>
+          </motion.div>
+        ))}
+      </div>
+
+      {/* Dark comparison: before vs after */}
+      <motion.div
+        initial={{ opacity: 0, y: 16 }} whileInView={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.5, delay: 0.15 }} viewport={{ once: true }}
+        className="mt-8 overflow-hidden rounded-[2rem] border border-white/10 bg-[#0f0d0b] px-8 py-7"
+      >
+        <div className="grid gap-6 sm:grid-cols-3">
+          <div>
+            <p className="text-[0.6rem] font-bold uppercase tracking-[0.28em] text-white/30">Without a broker</p>
+            <div className="mt-4 space-y-2.5">
+              {[
+                'Direct API calls expose internal structure',
+                'Manual key exchange between teams',
+                'No governance on what crosses the boundary',
+                'Either side can breach without detection',
+                'No shared audit record',
+                'Approval must be tracked in a spreadsheet',
+              ].map(t => (
+                <div key={t} className="flex items-center gap-2 text-xs text-white/38">
+                  <div className="size-1 shrink-0 rounded-full bg-red-500/60" />
+                  {t}
+                </div>
+              ))}
+            </div>
+          </div>
+          <div>
+            <p className="text-[0.6rem] font-bold uppercase tracking-[0.28em] text-violet-400/70">Narayan on both sides</p>
+            <div className="mt-4 space-y-2.5">
+              {[
+                'Signed handshake, both parties accept',
+                'Typed schema enforced at compile time',
+                'Data barrier: PII scan + redaction',
+                'Bilateral chain-hashed audit ledger',
+                'Structured approval, not email',
+                'Freeze or revoke unilaterally in seconds',
+              ].map(t => (
+                <div key={t} className="flex items-center gap-2 text-xs text-white/65">
+                  <CheckCircle2 className="size-3 shrink-0 text-violet-400" />
+                  {t}
+                </div>
+              ))}
+            </div>
+          </div>
+          <div>
+            <p className="text-[0.6rem] font-bold uppercase tracking-[0.28em] text-indigo-400/70">External agent via broker</p>
+            <div className="mt-4 space-y-2.5">
+              {[
+                'Register once — any platform, any language',
+                'Same signed handshake, same typed schema',
+                'Same data barrier — Narayan enforces it',
+                'Same bilateral audit ledger',
+                'Same structured approval flow',
+                'Webhook delivery or polling — agent chooses',
+              ].map(t => (
+                <div key={t} className="flex items-center gap-2 text-xs text-white/70">
+                  <CheckCircle2 className="size-3 shrink-0 text-indigo-400" />
+                  {t}
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </motion.div>
+    </section>
+  );
+}
+
+
 export default function LandingPage({ onEnterApp, onSignIn }) {
   return (
     <main className="relative min-h-screen overflow-hidden bg-[radial-gradient(circle_at_top_left,_rgba(201,106,46,0.16),_transparent_28%),radial-gradient(circle_at_top_right,_rgba(59,130,246,0.12),_transparent_24%),linear-gradient(180deg,_#f9f6f2_0%,_#f4f0ea_48%,_#efe8de_100%)] text-tx-1">
@@ -484,7 +928,7 @@ export default function LandingPage({ onEnterApp, onSignIn }) {
             </div>
             <div>
               <p className="font-serif text-2xl leading-none">Narayan</p>
-              <p className="text-xs uppercase tracking-[0.24em] text-tx-4">Hire digital employees. Write the job.</p>
+              <p className="text-xs uppercase tracking-[0.24em] text-tx-4">Enterprise work, orchestrated</p>
             </div>
           </div>
 
@@ -507,17 +951,16 @@ export default function LandingPage({ onEnterApp, onSignIn }) {
           >
             <div className="mb-4 inline-flex items-center gap-2 rounded-full border border-border bg-bg-card/90 px-3 py-1.5 text-xs font-medium text-tx-2 shadow-card">
               <Sparkles className="size-3.5 text-accent" />
-              Hire digital employees for any job
+              Tell us what you need. Narayan builds the agent.
             </div>
 
             <h1 className="font-serif text-4xl leading-[0.95] text-tx-1 sm:text-5xl lg:text-6xl">
-              Just tell us what needs to be done.
-              <span className="block text-accent">We will do it.</span>
+              Describe the job.
+              <span className="block text-accent">We create the agent.</span>
             </h1>
 
             <p className="mt-5 max-w-lg text-base leading-7 text-tx-2 sm:text-lg">
-              We fundamentally improve how your company operates. Skip the setup costs of traditional software with our secure, cloud-based platform that open-source tools can't match.
-              Deploy intelligent agents across any department, instantly.
+              Agent creation is just telling Narayan what you need. Describe the outcome, connect the systems, and we will turn it into a structured workflow with approvals, audit, and recovery built in.
             </p>
 
             <div className="mt-7 flex flex-col gap-3 sm:flex-row">
@@ -528,6 +971,10 @@ export default function LandingPage({ onEnterApp, onSignIn }) {
                 Sign in to workspace
               </button>
             </div>
+
+            <p className="mt-4 text-sm leading-6 text-tx-3">
+              No forms to learn. Just explain the task in plain language and we will shape the agent around it.
+            </p>
 
             <div className="mt-8 grid gap-4 sm:grid-cols-3">
               {stats.map(item => (
@@ -552,8 +999,8 @@ export default function LandingPage({ onEnterApp, onSignIn }) {
         <section className="pb-5">
           <SectionHeading
             eyebrow="Job examples"
-            title="Agents at work. Real roles, real results."
-            text="Write these job specs once. Agents execute them 24/7 with logs and approvals built in."
+            title="Structured workflows. Real enterprise results."
+            text="Write the workflow once. Narayan checks the plan, runs the job, and keeps the record attached."
           />
 
           <div className="mt-8 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
@@ -572,8 +1019,8 @@ export default function LandingPage({ onEnterApp, onSignIn }) {
         <section className="pb-12">
           <SectionHeading
             eyebrow="How agents connect"
-            title="Multi-role agents. Any connector. Any system."
-            text="One agent can handle multiple tasks. Each task reads from its connectors and sends output to the right place."
+            title="Every connection stays clear."
+            text="One workflow can cross tools, connectors, databases, APIs, and internal systems without losing context."
           />
 
           <div className="mt-8 overflow-hidden rounded-[2rem] border border-border bg-bg-card/85">
@@ -676,9 +1123,9 @@ export default function LandingPage({ onEnterApp, onSignIn }) {
 
         <section className="pb-12">
           <SectionHeading
-            eyebrow="Open Standard"
-            title="Built on ACP: agents that collaborate, not just compute"
-            text="Narayan is built natively on the Agent Communication Protocol (ACP) — an open IBM/BeeAI standard that lets autonomous agents delegate, stream results, and coordinate across trust boundaries without any centralised controller."
+            eyebrow="ACP-powered collaboration"
+            title="Agents work together through ACP"
+            text="Narayan uses ACP to coordinate secure handoffs between specialist agents, teams, and systems without losing progress or control."
           />
 
           <div className="mt-12 grid items-stretch gap-8 lg:grid-cols-2">
@@ -688,26 +1135,26 @@ export default function LandingPage({ onEnterApp, onSignIn }) {
                 {
                   badge: 'Delegation',
                   color: 'bg-accent-soft text-accent',
-                  title: 'One agent, many specialists',
-                  body: 'Your top-level Narayan agent breaks a job into sub-tasks and spawns specialist agents via ACP. The invoice agent calls a PO-matching agent. The support agent calls a knowledge-search agent. Each runs independently and returns a typed result.',
+                  title: 'One workflow, many specialists',
+                  body: 'ACP lets one workflow route each part of the job to the right specialist and bring the results back together in one place.',
                 },
                 {
                   badge: 'Streaming',
                   color: 'bg-info-soft text-info',
-                  title: 'Real-time progress, not black boxes',
-                  body: 'ACP supports server-sent streaming, so Narayan surfaces live progress as agents work — partial answers, intermediate steps, and status changes appear in your audit trail the moment they happen.',
+                  title: 'Live progress, not guesswork',
+                  body: 'As agents work, progress and intermediate results can surface in real time so teams know what is happening as it happens.',
                 },
                 {
                   badge: 'Orchestration',
                   color: 'bg-vio/15 text-vio',
-                  title: 'Multi-agent DAG execution',
-                  body: 'Complex workflows fan out across agent networks. Narayan\'s DAG engine schedules ACP calls in parallel, waits for dependencies, and merges results — all expressed in the same job spec you write in plain English.',
+                  title: 'Parallel by design',
+                  body: 'Complex work can fan out, wait on dependencies, and come back together in a single flow that stays easy to follow.',
                 },
                 {
                   badge: 'Fault isolation',
                   color: 'bg-accent-soft text-accent',
-                  title: 'Agents fail safely, not silently',
-                  body: 'Because every ACP call is an isolated request with a typed response, a failing specialist agent never crashes the whole workflow. Narayan catches, logs, and either retries or escalates — with a full trace attached.',
+                  title: 'Safe by default',
+                  body: 'If one specialist fails, Narayan can retry, escalate, or continue with a full trace attached.',
                 },
               ].map(({ badge, color, title, body }) => (
                 <div
@@ -725,8 +1172,62 @@ export default function LandingPage({ onEnterApp, onSignIn }) {
               ))}
             </div>
 
-            {/* Right: 3-D ACP diagram */}
+            {/* Right: ACP diagram */}
             <ACPDiagram />
+          </div>
+        </section>
+
+        <div className="my-12 flex items-center gap-4">
+          <div className="h-px flex-1 bg-gradient-to-r from-transparent via-border to-transparent" />
+          <Database className="size-4 text-accent/40" />
+          <div className="h-px flex-1 bg-gradient-to-r from-transparent via-border to-transparent" />
+        </div>
+
+        {/* ── ENTERPRISE BOUNDARY SECTION ──────────────────────────────────── */}
+        <EnterpriseBoundarySection />
+
+        <div className="my-12 flex items-center gap-4">
+          <div className="h-px flex-1 bg-gradient-to-r from-transparent via-border to-transparent" />
+          <Database className="size-4 text-accent/40" />
+          <div className="h-px flex-1 bg-gradient-to-r from-transparent via-border to-transparent" />
+        </div>
+
+        <section className="pb-12">
+          <SectionHeading
+            eyebrow="Reliability advantage"
+            title="Spot risk before the first run."
+            text="Because Narayan validates workflow structure ahead of time, it can compare similar jobs and surface likely issues before a user clicks run."
+          />
+
+          <div className="mt-8 grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
+            <div className="space-y-4">
+              {riskSignals.map(({ label, value }) => (
+                <div key={label} className="rounded-[1.5rem] border border-border bg-bg-card/90 p-5">
+                  <p className="text-xs font-semibold uppercase tracking-[0.22em] text-accent">{label}</p>
+                  <p className="mt-3 text-sm leading-6 text-tx-2">{value}</p>
+                </div>
+              ))}
+            </div>
+
+            <div className="rounded-[1.75rem] border border-accent/20 bg-gradient-to-br from-bg-card via-bg-card/95 to-accent/5 p-6">
+              <p className="text-xs font-semibold uppercase tracking-[0.24em] text-accent">Example warning</p>
+              <h3 className="mt-3 font-serif text-2xl text-tx-1">Step 4 may fail on missing input</h3>
+              <p className="mt-3 text-sm leading-6 text-tx-2">
+                Similar workflows with the same shape show a recurring failure at an aggregation step when upstream records do not include a required field.
+              </p>
+              <div className="mt-5 space-y-3">
+                {[
+                  'Insert a check before aggregation',
+                  'Mark the field as optional where appropriate',
+                  'Add a fallback step for incomplete records',
+                ].map(item => (
+                  <div key={item} className="flex items-center gap-2 text-sm text-tx-2">
+                    <CheckCircle2 className="size-4 text-accent" />
+                    {item}
+                  </div>
+                ))}
+              </div>
+            </div>
           </div>
         </section>
 
@@ -774,11 +1275,10 @@ export default function LandingPage({ onEnterApp, onSignIn }) {
               <div className="max-w-2xl">
                 <p className="text-xs font-semibold uppercase tracking-[0.28em] text-accent">Final CTA</p>
                 <h2 className="mt-3 font-serif text-3xl text-tx-1 sm:text-4xl">
-                  Hire your first digital employee
+                  Build your first workflow
                 </h2>
                 <p className="mt-4 text-base leading-7 text-tx-2">
-                  Write a job spec. Check the connections. Launch. Your agent works 24/7, keeps a record, and escalates
-                  when needed.
+                  Write a workflow spec. Validate the connections. Launch. Narayan keeps the record, highlights risk, and escalates when needed.
                 </p>
               </div>
               <div className="flex flex-col gap-3 sm:flex-row lg:flex-col">
@@ -797,6 +1297,7 @@ export default function LandingPage({ onEnterApp, onSignIn }) {
     </main>
   );
 }
+
 
 
 

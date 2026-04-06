@@ -36,6 +36,13 @@ where
 ///   - `Authorization: Bearer nar_<key>` — API key auth
 ///   - `Authorization: Bearer <jwt>`     — JWT session auth
 ///
+/// Team context (optional):
+///   - Embedded in JWT `team_id` claim, OR
+///   - Provided via `X-Narayan-Team-Id` header (for API key auth)
+///
+/// Note: team membership is NOT validated here to avoid a DB hit on every
+/// request. Route handlers that require team access call TeamStore::assert_member_role.
+///
 /// Injects `AuthenticatedTenant` into request extensions on success.
 pub async fn auth_middleware(
     axum::extract::State(auth): axum::extract::State<AuthState>,
@@ -56,7 +63,14 @@ pub async fn auth_middleware(
         }
     };
 
-    let authenticated = validate_jwt(&token, &auth.jwt_secret);
+    // Extract optional team context from header (used when token has no team claim)
+    let header_team_id = request
+        .headers()
+        .get("X-Narayan-Team-Id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    let authenticated = validate_jwt(&token, &auth.jwt_secret, header_team_id);
 
     match authenticated {
         Ok(tenant) => {
@@ -67,7 +81,11 @@ pub async fn auth_middleware(
     }
 }
 
-fn validate_jwt(token: &str, secret: &str) -> Result<AuthenticatedTenant, anyhow::Error> {
+fn validate_jwt(
+    token: &str,
+    secret: &str,
+    header_team_id: Option<String>,
+) -> Result<AuthenticatedTenant, anyhow::Error> {
     let claims = crate::auth::jwt::validate_token(token, secret)?;
 
     let plan = match claims.plan.as_str() {
@@ -77,5 +95,13 @@ fn validate_jwt(token: &str, secret: &str) -> Result<AuthenticatedTenant, anyhow
         _ => TenantPlan::Free,
     };
 
-    Ok(AuthenticatedTenant { tenant_id: claims.sub, plan })
+    // Team context: prefer JWT claim (signed) over header
+    let team_id = claims.team_id.or(header_team_id);
+
+    Ok(AuthenticatedTenant {
+        tenant_id: claims.sub,
+        plan,
+        team_id,
+        team_role: None, // populated lazily by handlers that require team access
+    })
 }

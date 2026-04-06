@@ -168,6 +168,9 @@ pub enum DslStepType {
     Branch,
     Notify,
     StoreResult,
+    /// Cross-company or cross-team ACP boundary step.
+    /// Validated at compile time against a signed handshake contract.
+    AcpBoundary,
 }
 
 pub const LLM_WORKER_TOOL_NAME: &str = "llm_worker";
@@ -214,6 +217,19 @@ pub struct DraftDslStep {
     pub loop_back_to: Option<String>,
     #[serde(default)]
     pub retry_policy: RetryPolicy,
+    // ── Boundary fields (only set for AcpBoundary steps) ─────────────────
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handshake_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handshake_version: Option<u32>,
+    /// "requester" | "responder"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boundary_role: Option<String>,
+    /// "cross_enterprise" | "cross_team"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boundary_scope: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_endpoint: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -707,6 +723,17 @@ pub struct CompiledStep {
     pub condition: Option<crate::agent::planner::StepCondition>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource: Option<String>,
+    // ── Boundary contract (only for AcpBoundary steps) ────────────────────
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handshake_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handshake_version: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boundary_role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boundary_scope: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_endpoint: Option<String>,
 }
 
 impl Default for IdempotencyClass {
@@ -1166,6 +1193,11 @@ fn typed_draft_steps(intent: &serde_json::Value) -> Vec<DraftDslStep> {
                 fallback_step,
                 loop_back_to,
                 retry_policy,
+                handshake_id: None,
+                handshake_version: None,
+                boundary_role: None,
+                boundary_scope: None,
+                peer_endpoint: None,
             })
         })
         .collect()
@@ -1186,6 +1218,7 @@ fn parse_dsl_step_type(value: &str) -> Option<DslStepType> {
         "branch" => Some(DslStepType::Branch),
         "notify" => Some(DslStepType::Notify),
         "store_result" => Some(DslStepType::StoreResult),
+        "acp_boundary" => Some(DslStepType::AcpBoundary),
         _ => None,
     }
 }
@@ -1664,6 +1697,7 @@ fn registry_step_type(dsl_type: &DslStepType) -> semantic_registry::DslStepType 
         DslStepType::Branch => semantic_registry::DslStepType::Branch,
         DslStepType::Notify => semantic_registry::DslStepType::Notify,
         DslStepType::StoreResult => semantic_registry::DslStepType::StoreResult,
+        DslStepType::AcpBoundary => semantic_registry::DslStepType::Notify,
     }
 }
 
@@ -1762,6 +1796,7 @@ fn default_operation_for_step(step: &DraftDslStep) -> Option<String> {
         DslStepType::Notify => "send",
         DslStepType::StoreResult => "write",
         DslStepType::Branch => return None,
+        DslStepType::AcpBoundary => return None,
     }
     .to_string())
 }
@@ -1996,6 +2031,51 @@ fn compile_step(
     let dependency = previous_step_id.map(str::to_string).into_iter().collect::<Vec<_>>();
 
     match dsl_type {
+        DslStepType::AcpBoundary => {
+            let boundary_role = draft_step.boundary_role.clone().unwrap_or_else(|| "requester".into());
+            let operation = if boundary_role == "responder" { "receive" } else { "send" }.to_string();
+            let output_schema = draft_step.output_schema.clone().unwrap_or_else(|| serde_json::json!({"type": "object"}));
+
+            Ok(CompiledStep {
+                id: step_id.clone(),
+                dsl_type: dsl_type.clone(),
+                tool: Some("acp_boundary".into()),
+                operation: Some(operation),
+                branch_condition: explicit_branch_condition(draft_step),
+                repeat_until: draft_step.repeat_until.clone(),
+                fallback_step: draft_step.fallback_step.clone(),
+                loop_back_to: draft_step.loop_back_to.clone(),
+                llm_role: None,
+                execution_intent: None,
+                llm_generation: None,
+                args: draft_step.args_hint.clone().unwrap_or_else(|| serde_json::json!({})),
+                input_mapping: if draft_step.input_mapping.is_empty() {
+                    BTreeMap::new()
+                } else {
+                    draft_step.input_mapping.clone()
+                },
+                output_mapping: BTreeMap::new(),
+                output_schema,
+                success_criteria: if draft_step.success_criteria.is_empty() {
+                    vec!["boundary handoff completed".into()]
+                } else {
+                    draft_step.success_criteria.clone()
+                },
+                retry_policy: draft_step.retry_policy.clone(),
+                execution_policy: ExecutionPolicy::default(),
+                idempotency: IdempotencyClass::SideEffect,
+                locks: Vec::new(),
+                depends_on: if draft_step.depends_on.is_empty() { dependency } else { draft_step.depends_on.clone() },
+                next_steps: draft_step.next_steps.clone(),
+                condition: None,
+                resource: draft_step.resource_id.clone().or_else(|| draft_step.resource_hint.clone()),
+                handshake_id: draft_step.handshake_id.clone(),
+                handshake_version: draft_step.handshake_version,
+                boundary_role: draft_step.boundary_role.clone(),
+                boundary_scope: draft_step.boundary_scope.clone(),
+                peer_endpoint: draft_step.peer_endpoint.clone(),
+            })
+        }
         DslStepType::FetchRecords => {
             let bound = bind_semantic_step(draft_step, resources)?;
             let tool = bound.tool_name.to_string();
@@ -2104,6 +2184,11 @@ fn compile_step(
                     .as_ref()
                     .map(|_| expression_from_hint(hint, &step_id, "records")),
                 resource,
+                handshake_id: draft_step.handshake_id.clone(),
+                handshake_version: draft_step.handshake_version,
+                boundary_role: draft_step.boundary_role.clone(),
+                boundary_scope: draft_step.boundary_scope.clone(),
+                peer_endpoint: draft_step.peer_endpoint.clone(),
             })
         }
         DslStepType::Filter | DslStepType::Compute | DslStepType::Aggregate | DslStepType::DetectAnomaly => {
@@ -2177,6 +2262,11 @@ fn compile_step(
                     _ => None,
                 },
                 resource: None,
+                handshake_id: draft_step.handshake_id.clone(),
+                handshake_version: draft_step.handshake_version,
+                boundary_role: draft_step.boundary_role.clone(),
+                boundary_scope: draft_step.boundary_scope.clone(),
+                peer_endpoint: draft_step.peer_endpoint.clone(),
             })
         }
         DslStepType::LlmWorker => {
@@ -2232,6 +2322,11 @@ fn compile_step(
                 llm_role: Some(llm_role),
                 execution_intent: Some(execution_intent),
                 llm_generation: Some(llm_generation),
+                handshake_id: draft_step.handshake_id.clone(),
+                handshake_version: draft_step.handshake_version,
+                boundary_role: draft_step.boundary_role.clone(),
+                boundary_scope: draft_step.boundary_scope.clone(),
+                peer_endpoint: draft_step.peer_endpoint.clone(),
             })
         }
         DslStepType::Branch => {
@@ -2266,6 +2361,11 @@ fn compile_step(
                 next_steps: draft_step.next_steps.clone(),
                 condition: Some(expression_from_hint(hint, &source_ref, source_output_key)),
                 resource: None,
+                handshake_id: draft_step.handshake_id.clone(),
+                handshake_version: draft_step.handshake_version,
+                boundary_role: draft_step.boundary_role.clone(),
+                boundary_scope: draft_step.boundary_scope.clone(),
+                peer_endpoint: draft_step.peer_endpoint.clone(),
             })
         }
         DslStepType::Notify => {
@@ -2311,6 +2411,11 @@ fn compile_step(
                 next_steps: draft_step.next_steps.clone(),
                 condition: None,
                 resource: None,
+                handshake_id: draft_step.handshake_id.clone(),
+                handshake_version: draft_step.handshake_version,
+                boundary_role: draft_step.boundary_role.clone(),
+                boundary_scope: draft_step.boundary_scope.clone(),
+                peer_endpoint: draft_step.peer_endpoint.clone(),
             })
         }
         DslStepType::StoreResult => {
@@ -2357,6 +2462,11 @@ fn compile_step(
                 next_steps: draft_step.next_steps.clone(),
                 condition: None,
                 resource: None,
+                handshake_id: draft_step.handshake_id.clone(),
+                handshake_version: draft_step.handshake_version,
+                boundary_role: draft_step.boundary_role.clone(),
+                boundary_scope: draft_step.boundary_scope.clone(),
+                peer_endpoint: draft_step.peer_endpoint.clone(),
             })
         }
     }
