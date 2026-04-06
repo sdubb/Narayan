@@ -3,12 +3,17 @@ use std::{collections::HashMap, io::BufWriter, path::PathBuf, sync::Arc};
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
-    response::IntoResponse,
+    response::{
+        sse::{Event, KeepAlive},
+        IntoResponse, Sse,
+    },
     Json,
 };
 use dashmap::DashMap;
+use futures::stream;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
+use std::{convert::Infallible, time::Duration};
 
 use sqlx::Row;
 
@@ -23,6 +28,7 @@ use crate::{
     storage::PostgresStore,
     tenant::{encrypt_secret, model::AuthenticatedTenant, ProviderCredential, TenantStore},
     tenant::team_store::TeamStore as TeamStoreImpl,
+    tools::{tool_spec_from_tool, ToolRegistry},
 };
 use printpdf::*;
 use zstd::stream::write::Encoder as ZstdEncoder;
@@ -32,6 +38,12 @@ pub struct AgentMessageQuery {
     pub direction: Option<String>,
     pub undelivered_only: Option<bool>,
     pub limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct AgentMcpQuery {
+    pub agent_id: Option<String>,
+    pub role_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -209,6 +221,7 @@ pub struct AppState {
     pub billing: Arc<crate::billing::BillingStore>,
     /// Connector install store — OAuth tokens and API keys per tenant.
     pub connector_installs: Arc<crate::connectors::ConnectorInstallStore>,
+    pub tool_registry: Arc<ToolRegistry>,
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -372,6 +385,217 @@ fn provider_catalog_json() -> serde_json::Value {
     serde_json::json!({ "providers": providers, "count": providers.len() })
 }
 
+fn openrouter_model_free(model: &serde_json::Value) -> bool {
+    let id = model["id"].as_str().unwrap_or_default().to_lowercase();
+    if id == "openrouter/free" || id.contains(":free") {
+        return true;
+    }
+    let prompt = model["pricing"]["prompt"].as_str().unwrap_or_default();
+    let completion = model["pricing"]["completion"].as_str().unwrap_or_default();
+    (prompt == "0" || prompt == "0.0") && (completion == "0" || completion == "0.0")
+}
+
+fn openrouter_model_text_only(model: &serde_json::Value) -> bool {
+    let input_modalities = model["architecture"]["input_modalities"].as_array();
+    let output_modalities = model["architecture"]["output_modalities"].as_array();
+
+    let inputs_are_text_only = input_modalities.map(|mods| {
+        mods.iter().all(|m| m.as_str().map(|s| s.eq_ignore_ascii_case("text")).unwrap_or(false))
+    }).unwrap_or(true);
+
+    let outputs_are_text_only = output_modalities.map(|mods| {
+        mods.iter().all(|m| m.as_str().map(|s| s.eq_ignore_ascii_case("text")).unwrap_or(false))
+    }).unwrap_or(true);
+
+    inputs_are_text_only && outputs_are_text_only
+}
+
+fn openrouter_model_supports_tools(model: &serde_json::Value) -> bool {
+    model["supported_parameters"]
+        .as_array()
+        .map(|params| params.iter().any(|p| p.as_str().map(|s| s == "tools" || s == "tool_choice").unwrap_or(false)))
+        .unwrap_or(false)
+}
+
+fn openrouter_model_supports_structured_outputs(model: &serde_json::Value) -> bool {
+    model["supported_parameters"]
+        .as_array()
+        .map(|params| {
+            params.iter().any(|p| {
+                p.as_str()
+                    .map(|s| s == "structured_outputs" || s == "response_format")
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn openrouter_model_is_agent_friendly(model: &serde_json::Value) -> bool {
+    openrouter_model_text_only(model)
+        || openrouter_model_supports_tools(model)
+        || openrouter_model_supports_structured_outputs(model)
+        || model["architecture"]["output_modalities"]
+            .as_array()
+            .map(|mods| mods.iter().any(|m| m.as_str().map(|s| s.eq_ignore_ascii_case("text")).unwrap_or(false)))
+            .unwrap_or(true)
+}
+
+async fn openrouter_models_json() -> serde_json::Value {
+    let client = reqwest::Client::new();
+    let resp = match client
+        .get("https://openrouter.ai/api/v1/models")
+        .header("accept", "application/json")
+        .send()
+        .await
+    {
+        Ok(resp) => match resp.error_for_status() {
+            Ok(resp) => resp.json::<serde_json::Value>().await.ok(),
+            Err(_) => None,
+        },
+        Err(_) => None,
+    };
+
+    let raw_models = resp
+        .and_then(|payload| {
+            payload["data"]
+                .as_array()
+                .cloned()
+                .or_else(|| payload["models"].as_array().cloned())
+                .or_else(|| payload.as_array().cloned())
+        })
+        .unwrap_or_default();
+
+    let models: Vec<serde_json::Value> = raw_models
+        .into_iter()
+        .filter(openrouter_model_is_agent_friendly)
+        .map(|model| {
+            let id = model["id"].as_str().unwrap_or_default().to_string();
+            let name = model["name"].as_str().unwrap_or(&id).to_string();
+            let is_free = openrouter_model_free(&model);
+            serde_json::json!({
+                "id": id,
+                "name": name,
+                "badge": if is_free { "Free" } else { "Paid" },
+                "supported_parameters": model["supported_parameters"].clone(),
+                "default_parameters": model["default_parameters"].clone(),
+                "per_request_limits": model["per_request_limits"].clone(),
+                "canonical_slug": model["canonical_slug"].clone(),
+                "limit_hint": if is_free {
+                    "Free models are rate-limited by OpenRouter and are best for testing."
+                } else {
+                    "Usage is billed by the upstream provider through OpenRouter."
+                },
+                "context_length": model["context_length"].clone(),
+                "pricing": model["pricing"].clone(),
+                "architecture": model["architecture"].clone(),
+                "top_provider": model["top_provider"].clone(),
+                "capabilities": {
+                    "tools": openrouter_model_supports_tools(&model),
+                    "structured_outputs": openrouter_model_supports_structured_outputs(&model),
+                    "text_only": openrouter_model_text_only(&model),
+                },
+            })
+        })
+        .collect();
+
+    serde_json::json!({
+        "provider": "openrouter",
+        "models": models,
+        "count": models.len(),
+        "source": "https://openrouter.ai/api/v1/models",
+    })
+}
+
+fn credential_validation_hint(provider: &str, error: &str) -> String {
+    let error_lc = error.to_lowercase();
+    match provider {
+        "openrouter" => {
+            if error_lc.contains("401") || error_lc.contains("unauthorized") || error_lc.contains("api key") {
+                "OpenRouter key was not accepted. Check the key and try again.".into()
+            } else if error_lc.contains("404") || error_lc.contains("not found") || error_lc.contains("model") {
+                "OpenRouter could reach your key, but the selected model is unavailable or misspelled.".into()
+            } else if error_lc.contains("429") || error_lc.contains("rate limit") {
+                "OpenRouter accepted the key, but the selected model is temporarily rate-limited upstream. Try `openrouter/free` or another free OpenRouter model, then validate again.".into()
+            } else {
+                format!("OpenRouter validation failed: {}", error)
+            }
+        }
+        "groq" => {
+            if error_lc.contains("401") || error_lc.contains("unauthorized") || error_lc.contains("api key") {
+                "Groq key was not accepted. Check the key from Groq Console and try again.".into()
+            } else if error_lc.contains("429") || error_lc.contains("rate limit") {
+                "Groq accepted the key, but the request was rate-limited. Try again in a moment.".into()
+            } else {
+                format!("Groq validation failed: {}", error)
+            }
+        }
+        "anthropic" => {
+            if error_lc.contains("401") || error_lc.contains("unauthorized") || error_lc.contains("api key") {
+                "Anthropic key was not accepted. Check the key in Anthropic Console and try again.".into()
+            } else {
+                format!("Anthropic validation failed: {}", error)
+            }
+        }
+        "openai" => {
+            if error_lc.contains("401") || error_lc.contains("unauthorized") || error_lc.contains("api key") {
+                "OpenAI key was not accepted. Check the API key or project key and try again.".into()
+            } else if error_lc.contains("404") || error_lc.contains("model") {
+                "OpenAI could reach your key, but the selected model may be unavailable on your account.".into()
+            } else {
+                format!("OpenAI validation failed: {}", error)
+            }
+        }
+        _ => format!("{} validation failed: {}", provider, error),
+    }
+}
+
+async fn openrouter_model_by_id(model_id: &str) -> Option<serde_json::Value> {
+    let catalog = openrouter_models_json().await;
+    catalog["models"].as_array().and_then(|models| {
+        models.iter().find(|model| {
+            model["id"].as_str().map(|id| id == model_id).unwrap_or(false)
+                || model["canonical_slug"].as_str().map(|slug| slug == model_id).unwrap_or(false)
+        }).cloned()
+    })
+}
+
+fn openrouter_validation_model_matches_capabilities(model: &serde_json::Value, validate_with_json: bool) -> bool {
+    if validate_with_json {
+        openrouter_model_supports_structured_outputs(model)
+    } else {
+        openrouter_model_supports_tools(model)
+    }
+}
+
+async fn openrouter_validation_fallback_model(
+    selected_model: &str,
+    validate_with_json: bool,
+) -> Option<String> {
+    let catalog = openrouter_models_json().await;
+    let models = catalog["models"].as_array()?;
+    let selected_id = selected_model.to_string();
+    let preferred = models.iter().find(|model| {
+        let id = model["id"].as_str().unwrap_or_default();
+        id == "openrouter/free"
+            && id != selected_id
+            && openrouter_model_free(model)
+            && openrouter_validation_model_matches_capabilities(model, validate_with_json)
+    });
+    if let Some(model) = preferred {
+        return model["id"].as_str().map(|s| s.to_string());
+    }
+
+    models
+        .iter()
+        .find(|model| {
+            let id = model["id"].as_str().unwrap_or_default();
+            id != selected_id
+                && openrouter_model_free(model)
+                && openrouter_validation_model_matches_capabilities(model, validate_with_json)
+        })
+        .and_then(|model| model["id"].as_str().map(|s| s.to_string()))
+}
+
 // ── Health ─────────────────────────────────────────────────────────────────
 
 pub async fn health() -> impl IntoResponse {
@@ -487,12 +711,24 @@ pub async fn list_providers(_tenant: AuthenticatedTenant) -> impl IntoResponse {
     Json(provider_catalog_json()).into_response()
 }
 
+/// GET /providers/openrouter/models — live OpenRouter catalog filtered for agent-friendly models.
+pub async fn list_openrouter_models(_tenant: AuthenticatedTenant) -> impl IntoResponse {
+    Json(openrouter_models_json().await).into_response()
+}
+
 #[derive(Deserialize)]
 pub struct SetCredentialRequest {
     pub provider: String,
     pub api_key: String,
     pub model: String,
     pub label: String,
+}
+
+#[derive(Deserialize)]
+pub struct ValidateCredentialRequest {
+    pub provider: String,
+    pub api_key: String,
+    pub model: String,
 }
 
 /// PUT /credentials — store provider API key for this tenant (encrypted at rest).
@@ -554,6 +790,333 @@ pub async fn set_credential(
             }
         }
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+/// POST /credentials/validate — verify a provider key can actually reach the selected model.
+pub async fn validate_credential(
+    tenant: AuthenticatedTenant,
+    Json(body): Json<ValidateCredentialRequest>,
+) -> impl IntoResponse {
+    if !crate::providers::supports_provider(&body.provider) {
+        return err(StatusCode::BAD_REQUEST, format!("unsupported provider '{}'", body.provider));
+    }
+
+    if body.provider == "openrouter" {
+        match openrouter_model_by_id(&body.model).await {
+            Some(model) => {
+                let tools = model["capabilities"]["tools"].as_bool().unwrap_or(false);
+                let structured_outputs = model["capabilities"]["structured_outputs"].as_bool().unwrap_or(false);
+                if !tools && !structured_outputs {
+                    return err(
+                        StatusCode::BAD_REQUEST,
+                        "selected OpenRouter model does not advertise tool or structured output support; choose an agent-capable model",
+                    );
+                }
+            }
+            None => {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    "selected OpenRouter model was not found in the live catalog; refresh the model list and try again",
+                );
+            }
+        }
+    }
+
+    let Some(provider) = crate::providers::build_provider(&body.provider, body.api_key.clone(), body.model.clone()) else {
+        return err(StatusCode::BAD_REQUEST, format!("unsupported provider '{}'", body.provider));
+    };
+
+    let messages = vec![
+        crate::providers::Message::system(
+            "You are a validation assistant. Return only the JSON object matching the schema. Do not wrap it in markdown or extra text.",
+        ),
+        crate::providers::Message::user("Return the validation JSON now."),
+    ];
+
+    let validation_generation_json = crate::gateway::llm_controls::LlmGenerationConfig::new(
+        crate::gateway::llm_controls::LlmRole::Validator,
+        crate::gateway::llm_controls::LlmExecutionIntent::Strict,
+        crate::gateway::llm_controls::LlmBudgetTier::Lean,
+    )
+    .with_limits(256, 0.0)
+    .with_json_schema_response(
+        "credential_validation",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "ok": { "type": "boolean" },
+                "message": { "type": "string" }
+            },
+            "required": ["ok", "message"],
+            "additionalProperties": false
+        }),
+    );
+    let validation_generation_tool = crate::gateway::llm_controls::LlmGenerationConfig::new(
+        crate::gateway::llm_controls::LlmRole::Validator,
+        crate::gateway::llm_controls::LlmExecutionIntent::Strict,
+        crate::gateway::llm_controls::LlmBudgetTier::Lean,
+    )
+    .with_limits(256, 0.0);
+    let openrouter_caps = if body.provider == "openrouter" {
+        openrouter_model_by_id(&body.model)
+            .await
+            .map(|model| {
+                (
+                    model["capabilities"]["tools"].as_bool().unwrap_or(false),
+                    model["capabilities"]["structured_outputs"].as_bool().unwrap_or(false),
+                )
+            })
+            .unwrap_or((false, false))
+    } else {
+        (false, false)
+    };
+
+    let validate_with_json = body.provider == "openrouter" && openrouter_caps.1;
+    let tools = if validate_with_json {
+        Vec::new()
+    } else {
+        vec![crate::providers::ToolSpec {
+            name: "validation_check".into(),
+            description: "Return a tiny confirmation that the model can execute tool calls.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "ok": { "type": "boolean" },
+                    "message": { "type": "string" }
+                },
+                "required": ["ok", "message"],
+                "additionalProperties": false
+            }),
+            output_schema: None,
+        }]
+    };
+
+    tracing::info!(
+        provider = %body.provider,
+        model = %body.model,
+        validate_mode = if validate_with_json { "structured_output" } else { "tool_call" },
+        tools_enabled = !tools.is_empty(),
+        "credential validation request"
+    );
+    tracing::info!(
+        provider = %body.provider,
+        model = %body.model,
+        generation = ?if validate_with_json { &validation_generation_json } else { &validation_generation_tool },
+        messages = ?messages.iter().map(|m| serde_json::json!({
+            "role": format!("{:?}", m.role).to_lowercase(),
+            "content": m.content,
+            "tool_call_id": m.tool_call_id,
+        })).collect::<Vec<_>>(),
+        tools = ?tools.iter().map(|t| serde_json::json!({
+            "name": t.name,
+            "description": t.description,
+            "parameters": t.parameters,
+            "output_schema": t.output_schema,
+        })).collect::<Vec<_>>(),
+        "credential validation payload"
+    );
+
+    let validation_generation = if validate_with_json {
+        &validation_generation_json
+    } else {
+        &validation_generation_tool
+    };
+
+    match provider.chat(messages.clone(), tools.clone(), Some(validation_generation)).await {
+        Ok(response) => {
+            tracing::info!(
+                provider = %body.provider,
+                model = %body.model,
+                content = ?response.content,
+                tool_calls = ?response.tool_calls,
+                input_tokens = response.input_tokens,
+                output_tokens = response.output_tokens,
+                "credential validation response"
+            );
+            if validate_with_json {
+                let parsed = response
+                    .content
+                    .as_deref()
+                    .and_then(|content| serde_json::from_str::<serde_json::Value>(content).ok());
+                tracing::info!(
+                    provider = %body.provider,
+                    model = %body.model,
+                    parsed = ?parsed,
+                    "credential validation parsed structured output"
+                );
+                let ok = parsed
+                    .as_ref()
+                    .and_then(|value| value.get("ok"))
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false);
+                if ok {
+                    Json(serde_json::json!({
+                        "valid": true,
+                        "provider": body.provider,
+                        "model": body.model,
+                        "tenant_id": tenant.tenant_id,
+                        "mode": "structured_output",
+                    }))
+                    .into_response()
+                } else {
+                    if body.provider == "openrouter" {
+                        if let Some(fallback_model) = openrouter_validation_fallback_model(&body.model, true).await {
+                            tracing::info!(
+                                provider = %body.provider,
+                                model = %body.model,
+                                fallback_model = %fallback_model,
+                                "credential validation retrying after invalid structured response"
+                            );
+                            if let Some(fallback_provider) =
+                                crate::providers::build_provider(&body.provider, body.api_key.clone(), fallback_model.clone())
+                            {
+                                match fallback_provider.chat(messages.clone(), tools.clone(), Some(validation_generation)).await {
+                                    Ok(fallback_response) => {
+                                        tracing::info!(
+                                            provider = %body.provider,
+                                            model = %body.model,
+                                            fallback_model = %fallback_model,
+                                            content = ?fallback_response.content,
+                                            tool_calls = ?fallback_response.tool_calls,
+                                            input_tokens = fallback_response.input_tokens,
+                                            output_tokens = fallback_response.output_tokens,
+                                            "credential validation fallback structured response"
+                                        );
+                                        let fallback_parsed = fallback_response
+                                            .content
+                                            .as_deref()
+                                            .and_then(|content| serde_json::from_str::<serde_json::Value>(content).ok());
+                                        let fallback_ok = fallback_parsed
+                                            .as_ref()
+                                            .and_then(|value| value.get("ok"))
+                                            .and_then(|value| value.as_bool())
+                                            .unwrap_or(false);
+                                        if fallback_ok {
+                                            return Json(serde_json::json!({
+                                                "valid": true,
+                                                "provider": body.provider,
+                                                "model": body.model,
+                                                "tenant_id": tenant.tenant_id,
+                                                "mode": "structured_output",
+                                                "fallback_model": fallback_model,
+                                                "warning": "The selected model did not return valid JSON, so Narayan validated with a compatible free OpenRouter model instead.",
+                                            }))
+                                            .into_response();
+                                        }
+                                    }
+                                    Err(fallback_error) => {
+                                        tracing::info!(
+                                            provider = %body.provider,
+                                            model = %body.model,
+                                            fallback_model = %fallback_model,
+                                            error = %fallback_error,
+                                            "credential validation fallback structured retry failed"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    err(
+                        StatusCode::BAD_REQUEST,
+                        "provider responded but did not return a valid JSON validation response; choose a structured-output-capable model",
+                    )
+                }
+            } else if !response.tool_calls.is_empty() {
+                Json(serde_json::json!({
+                    "valid": true,
+                    "provider": body.provider,
+                    "model": body.model,
+                    "tenant_id": tenant.tenant_id,
+                    "mode": "tool_call",
+                }))
+                .into_response()
+            } else {
+                err(
+                    StatusCode::BAD_REQUEST,
+                    "provider responded but did not call the validation tool; choose a tools-capable model",
+                )
+            }
+        }
+        Err(e) => {
+            let error_text = e.to_string();
+            let error_lc = error_text.to_lowercase();
+            if body.provider == "openrouter" && (error_lc.contains("429") || error_lc.contains("rate limit")) {
+                if let Some(fallback_model) = openrouter_validation_fallback_model(&body.model, validate_with_json).await {
+                    tracing::info!(
+                        provider = %body.provider,
+                        model = %body.model,
+                        fallback_model = %fallback_model,
+                        "credential validation retrying with fallback OpenRouter model"
+                    );
+                    if let Some(fallback_provider) =
+                        crate::providers::build_provider(&body.provider, body.api_key.clone(), fallback_model.clone())
+                    {
+                        let fallback_result = fallback_provider.chat(messages, tools, Some(validation_generation)).await;
+                        match fallback_result {
+                            Ok(response) => {
+                                tracing::info!(
+                                    provider = %body.provider,
+                                    model = %body.model,
+                                    fallback_model = %fallback_model,
+                                    content = ?response.content,
+                                    tool_calls = ?response.tool_calls,
+                                    input_tokens = response.input_tokens,
+                                    output_tokens = response.output_tokens,
+                                    "credential validation fallback response"
+                                );
+                                if validate_with_json {
+                                    let parsed = response
+                                        .content
+                                        .as_deref()
+                                        .and_then(|content| serde_json::from_str::<serde_json::Value>(content).ok());
+                                    let ok = parsed
+                                        .as_ref()
+                                        .and_then(|value| value.get("ok"))
+                                        .and_then(|value| value.as_bool())
+                                        .unwrap_or(false);
+                                    if ok {
+                                        return Json(serde_json::json!({
+                                            "valid": true,
+                                            "provider": body.provider,
+                                            "model": body.model,
+                                            "tenant_id": tenant.tenant_id,
+                                            "mode": "structured_output",
+                                            "fallback_model": fallback_model,
+                                            "warning": "The selected model is temporarily rate-limited upstream. Validation succeeded with a compatible free fallback model.",
+                                        }))
+                                        .into_response();
+                                    }
+                                } else if !response.tool_calls.is_empty() {
+                                    return Json(serde_json::json!({
+                                        "valid": true,
+                                        "provider": body.provider,
+                                        "model": body.model,
+                                        "tenant_id": tenant.tenant_id,
+                                        "mode": "tool_call",
+                                        "fallback_model": fallback_model,
+                                        "warning": "The selected model is temporarily rate-limited upstream. Validation succeeded with a compatible free fallback model.",
+                                    }))
+                                    .into_response();
+                                }
+                            }
+                            Err(fallback_error) => {
+                                tracing::info!(
+                                    provider = %body.provider,
+                                    model = %body.model,
+                                    fallback_model = %fallback_model,
+                                    error = %fallback_error,
+                                    "credential validation fallback failed"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
+            err(StatusCode::BAD_REQUEST, credential_validation_hint(&body.provider, &error_text))
+        }
     }
 }
 
@@ -3236,6 +3799,207 @@ pub async fn delete_tenant_wasm_tool(
 // ══════════════════════════════════════════════════════════════════════════
 
 /// POST /connections/mcp/test — test an MCP server connection and list its tools
+pub async fn agent_mcp(
+    State(state): State<AppState>,
+    tenant: AuthenticatedTenant,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let id = body.get("id").cloned().unwrap_or(serde_json::Value::Null);
+    let method = body.get("method").and_then(|v| v.as_str()).unwrap_or_default();
+    let params = body.get("params").cloned().unwrap_or_default();
+    let requested_agent_id = params.get("agent_id").and_then(|v| v.as_str()).map(str::to_string);
+    let requested_role_id = params.get("role_id").and_then(|v| v.as_str()).map(str::to_string);
+    let registry = &state.tool_registry;
+    let manifest = || {
+        registry
+            .list()
+            .into_iter()
+            .filter_map(|name| registry.get(name).map(|tool| tool_spec_from_tool(tool.as_ref())))
+            .map(|spec| {
+                serde_json::json!({
+                    "name": spec.name,
+                    "description": spec.description,
+                    "inputSchema": spec.parameters,
+                    "outputSchema": spec.output_schema,
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let ok = |result: serde_json::Value| -> axum::response::Response {
+        Json(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": result,
+        }))
+        .into_response()
+    };
+    let fail = |code: i64, message: &str| -> axum::response::Response {
+        Json(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": { "code": code, "message": message },
+        }))
+        .into_response()
+    };
+
+    match method {
+        "initialize" => ok(serde_json::json!({
+            "protocolVersion": "2024-11-05",
+            "serverInfo": {
+                "name": "narayan-agent",
+                "version": env!("CARGO_PKG_VERSION"),
+            },
+            "capabilities": {
+                "tools": { "listChanged": false },
+                "resources": { "subscribe": false, "listChanged": false },
+                "prompts": { "listChanged": false }
+            }
+        })),
+        "tools/list" => ok(serde_json::json!({ "tools": manifest() })),
+        "tools/call" => {
+            let tool_name = params.get("name").and_then(|v| v.as_str()).or_else(|| params.get("tool_name").and_then(|v| v.as_str()));
+            let arguments = params.get("arguments").cloned().unwrap_or_else(|| params.get("args").cloned().unwrap_or_default());
+            let Some(tool_name) = tool_name else {
+                return fail(-32602, "tools/call requires params.name or params.tool_name");
+            };
+            let Some(tool) = registry.get(tool_name) else {
+                return fail(-32601, "unknown tool");
+            };
+            match tool.execute(arguments).await {
+                Ok(result) => {
+                    let output = result.output.clone();
+                    let error = result.error.clone();
+                    ok(serde_json::json!({
+                    "content": [{
+                        "type": "text",
+                        "text": serde_json::to_string_pretty(&output).unwrap_or_else(|_| output.to_string()),
+                    }],
+                    "isError": !result.success,
+                    "structuredContent": {
+                        "success": result.success,
+                        "output": output,
+                        "error": error,
+                    }
+                    }))
+                }
+                Err(e) => fail(-32000, &format!("tool execution failed: {}", e)),
+            }
+        }
+        "resources/list" => ok(serde_json::json!({
+            "resources": [{
+                "uri": "narayan://agent/tools",
+                "name": "Agent tool manifest",
+                "description": "Live tool manifest exported from the agent registry.",
+                "mimeType": "application/json"
+            }]
+        })),
+        "resources/read" => {
+            let uri = params.get("uri").and_then(|v| v.as_str()).unwrap_or_default();
+            match uri {
+                "narayan://agent/tools" => ok(serde_json::json!({
+                    "contents": [{
+                        "uri": uri,
+                        "mimeType": "application/json",
+                        "text": serde_json::to_string_pretty(&serde_json::json!({ "tools": manifest() }))
+                            .unwrap_or_else(|_| "{}".to_string())
+                    }]
+                })),
+                uri if uri.starts_with("narayan://agent/") => {
+                    let agent_id = uri.trim_start_matches("narayan://agent/").trim();
+                    let agent = match state.store.get_agent(&tenant.tenant_id, agent_id).await {
+                        Ok(Some(agent)) => agent,
+                        Ok(None) => return fail(-32602, "agent not found"),
+                        Err(e) => return fail(-32000, &format!("agent lookup failed: {}", e)),
+                    };
+                    let final_answer = agent.final_answer().map(str::to_string);
+                    let key_findings = agent.metadata.get("key_findings").cloned().unwrap_or_else(|| serde_json::json!([]));
+                    let plan_json = agent.plan.as_ref().map(|p| serde_json::to_value(p).unwrap_or_default());
+                    let step_count = agent.plan.as_ref().map(|p| p.steps.len()).unwrap_or(0);
+                    let job_type = agent.plan.as_ref().and_then(|p| p.job_type.clone());
+                    let unread_message_count = state
+                        .store
+                        .count_undelivered_agent_messages(&tenant.tenant_id, &agent.id)
+                        .await
+                        .unwrap_or(0);
+
+                    ok(serde_json::json!({
+                        "contents": [{
+                            "uri": uri,
+                            "mimeType": "application/json",
+                            "text": serde_json::to_string_pretty(&serde_json::json!({
+                                "id": agent.id,
+                                "goal": agent.goal,
+                                "status": format!("{:?}", agent.status).to_lowercase(),
+                                "current_step": agent.current_step,
+                                "step_count": step_count,
+                                "workspace_path": agent.workspace_path,
+                                "next_run": agent.next_run.to_rfc3339(),
+                                "created_at": agent.created_at.to_rfc3339(),
+                                "updated_at": agent.updated_at.to_rfc3339(),
+                                "started_at": agent.started_at.map(|t| t.to_rfc3339()),
+                                "final_answer": final_answer.clone(),
+                                "plan": plan_json,
+                                "job_type": job_type,
+                                "parent_agent_id": agent.parent_agent_id,
+                                "pending_children": agent.pending_children,
+                                "unread_message_count": unread_message_count,
+                                "conversation_id": agent.conversation_id,
+                                "agent_id": requested_agent_id,
+                                "role_id": requested_role_id,
+                                "metadata": {
+                                    "final_answer": final_answer,
+                                    "last_reflection": agent.metadata.get("last_reflection"),
+                                    "key_findings": key_findings,
+                                }
+                            }))
+                            .unwrap_or_else(|_| "{}".to_string())
+                        }]
+                    }))
+                }
+                _ => fail(-32602, "unknown resource uri"),
+            }
+        }
+        "prompts/list" => ok(serde_json::json!({
+            "prompts": [{
+                "name": "agent_overview",
+                "description": "Summarize the current agent snapshot and capability manifest.",
+                "arguments": []
+            }, {
+                "name": "agent_tools",
+                "description": "List the agent's available tools and their input/output shapes.",
+                "arguments": []
+            }, {
+                "name": "agent_snapshot",
+                "description": "Read the current agent snapshot for a specific agent_id.",
+                "arguments": [{
+                    "name": "agent_id",
+                    "description": "Agent identifier to inspect.",
+                    "required": true
+                }]
+            }]
+        })),
+        _ => fail(-32601, "unsupported method"),
+    }
+}
+
+pub async fn agent_mcp_sse(
+    State(_state): State<AppState>,
+    _tenant: AuthenticatedTenant,
+) -> impl IntoResponse {
+    let stream = stream::once(async move {
+        let payload = serde_json::json!({
+            "event": "ready",
+            "transport": "mcp-sse",
+            "endpoint": "/mcp",
+            "note": "Use POST /mcp for JSON-RPC requests."
+        });
+        Ok::<Event, Infallible>(Event::default().event("ready").data(payload.to_string()))
+    });
+
+    Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)).text("ping")).into_response()
+}
+
 pub async fn test_mcp_connection(
     State(_state): State<AppState>,
     _tenant: AuthenticatedTenant,
@@ -4308,12 +5072,13 @@ mod tests {
     }
 
     #[test]
-    fn test_provider_catalog_json_includes_latest_groq_and_nvidia_models() {
+    fn test_provider_catalog_json_includes_latest_groq_nvidia_and_openrouter_models() {
         let payload = provider_catalog_json();
 
         let providers = payload["providers"].as_array().expect("providers should be an array");
         let groq = providers.iter().find(|provider| provider["id"] == "groq").expect("groq should exist");
         let nvidia = providers.iter().find(|provider| provider["id"] == "nvidia").expect("nvidia should exist");
+        let openrouter = providers.iter().find(|provider| provider["id"] == "openrouter").expect("openrouter should exist");
 
         assert!(groq["models"]
             .as_array()
@@ -4330,6 +5095,16 @@ mod tests {
             .expect("nvidia models should be an array")
             .iter()
             .any(|model| model == "nvidia/nemotron-3-nano-30b-a3b"));
+        assert!(openrouter["models"]
+            .as_array()
+            .expect("openrouter models should be an array")
+            .iter()
+            .any(|model| model == "openrouter/free"));
+        assert!(openrouter["models"]
+            .as_array()
+            .expect("openrouter models should be an array")
+            .iter()
+            .any(|model| model == "openai/gpt-4o-mini"));
     }
 }
 

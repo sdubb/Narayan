@@ -6,7 +6,7 @@ import {
 import clsx from 'clsx';
 import {
   CredentialsTab, RoutingTab, UsageTab, SkillsTab, ReviewsTab,
-  CitationsTab, ConnectorsTab, AutoApprovalsTab, BillingTab,
+  CitationsTab, ConnectorsTab, ACPTab, AutoApprovalsTab, BillingTab,
 } from '../components/settings';
 
 const TABS = [
@@ -17,6 +17,7 @@ const TABS = [
   { id: 'reviews', label: 'Reviews', icon: Bell },
   { id: 'citations', label: 'Citations', icon: Link2 },
   { id: 'connectors', label: 'Connectors', icon: Plug },
+  { id: 'acp', label: 'ACP', icon: Shield },
   { id: 'autoapprovals', label: 'Auto-approvals', icon: Shield },
   { id: 'billing', label: 'Billing', icon: DollarSign },
 ];
@@ -29,6 +30,7 @@ const TAB_COMPONENTS = {
   reviews: ReviewsTab,
   citations: CitationsTab,
   connectors: ConnectorsTab,
+  acp: ACPTab,
   autoapprovals: AutoApprovalsTab,
   billing: BillingTab,
 };
@@ -62,7 +64,7 @@ export default function SettingsPage({ onBack, canCreateAgents = true, onProvide
             </p>
             <p className="text-[11px] uppercase tracking-[0.22em] text-tx-4">
               {canCreateAgents
-                ? 'Credentials, routing, reviews, and billing'
+                ? 'Credentials, routing, integrations, and billing'
                 : 'Add one provider to unlock agent creation'}
             </p>
           </div>

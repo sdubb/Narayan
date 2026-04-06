@@ -32,17 +32,22 @@ pub enum Role {
 pub struct Message {
     pub role: Role,
     pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
 }
 
 impl Message {
     pub fn system(content: impl Into<String>) -> Self {
-        Self { role: Role::System, content: content.into() }
+        Self { role: Role::System, content: content.into(), tool_call_id: None }
     }
     pub fn user(content: impl Into<String>) -> Self {
-        Self { role: Role::User, content: content.into() }
+        Self { role: Role::User, content: content.into(), tool_call_id: None }
     }
     pub fn assistant(content: impl Into<String>) -> Self {
-        Self { role: Role::Assistant, content: content.into() }
+        Self { role: Role::Assistant, content: content.into(), tool_call_id: None }
+    }
+    pub fn tool(content: impl Into<String>, tool_call_id: impl Into<String>) -> Self {
+        Self { role: Role::Tool, content: content.into(), tool_call_id: Some(tool_call_id.into()) }
     }
 }
 
@@ -277,13 +282,23 @@ impl Provider for OpenAiProvider {
 
         let mut payload = serde_json::json!({
             "model": self.model,
-            "messages": messages.iter().map(|m| serde_json::json!({ "role": m.role, "content": m.content })).collect::<Vec<_>>(),
+            "messages": messages.iter().map(|m| {
+                let mut msg = serde_json::json!({ "role": m.role, "content": m.content });
+                if let Some(tool_call_id) = &m.tool_call_id {
+                    msg["tool_call_id"] = serde_json::json!(tool_call_id);
+                }
+                msg
+            }).collect::<Vec<_>>(),
             "max_tokens": generation.max_tokens,
             "temperature": generation.temperature,
         });
 
         if self.model.contains("gpt-oss") {
             payload["include_reasoning"] = serde_json::json!(false);
+        }
+
+        if let Some(response_format) = generation.response_format.clone() {
+            payload["response_format"] = response_format;
         }
 
         if !oai_tools.is_empty() {
@@ -435,6 +450,23 @@ pub fn provider_catalog() -> Vec<ProviderCatalogEntry> {
         },
         ProviderCatalogEntry { id: "openai", label: "OpenAI", models: &["gpt-4o", "gpt-4o-mini", "o1", "o3-mini"] },
         ProviderCatalogEntry {
+            id: "openrouter",
+            label: "OpenRouter",
+            models: &[
+                "openai/gpt-4o",
+                "openai/gpt-4o-mini",
+                "anthropic/claude-3.5-sonnet",
+                "anthropic/claude-3.5-haiku",
+                "meta-llama/llama-3.3-70b-instruct",
+                "meta-llama/llama-3.1-8b-instruct",
+                "qwen/qwen-2.5-72b-instruct",
+                "deepseek/deepseek-chat",
+                "google/gemma-2-9b-it",
+                "mistralai/mistral-small-3.1",
+                "openrouter/free",
+            ],
+        },
+        ProviderCatalogEntry {
             id: "groq",
             label: "Groq",
             models: &["openai/gpt-oss-120b", "llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"],
@@ -455,11 +487,6 @@ pub fn provider_catalog() -> Vec<ProviderCatalogEntry> {
                 "meta/llama-3.1-8b-instruct",
                 "nvidia/llama-3.1-nemotron-70b-instruct",
             ],
-        },
-        ProviderCatalogEntry {
-            id: "openrouter",
-            label: "OpenRouter",
-            models: &["openai/gpt-4o", "anthropic/claude-3-5-sonnet", "meta-llama/llama-3.3-70b-instruct"],
         },
         ProviderCatalogEntry { id: "ollama", label: "Ollama", models: &["llama3.3", "qwen2.5-coder", "deepseek-r1"] },
         ProviderCatalogEntry { id: "compatible", label: "Compatible", models: &["custom-model"] },
@@ -497,7 +524,7 @@ mod tests {
     use super::{provider_catalog, supports_provider};
 
     #[test]
-    fn test_provider_catalog_includes_latest_groq_and_nvidia_models() {
+    fn test_provider_catalog_includes_latest_groq_nvidia_and_openrouter_models() {
         let catalog = provider_catalog();
 
         let groq = catalog.iter().find(|provider| provider.id == "groq").expect("groq provider should exist");
@@ -507,6 +534,10 @@ mod tests {
         assert!(nvidia.models.contains(&"openai/gpt-oss-120b"));
         assert!(nvidia.models.contains(&"nvidia/nemotron-3-super-120b-a12b"));
         assert!(nvidia.models.contains(&"nvidia/nemotron-3-nano-30b-a3b"));
+
+        let openrouter = catalog.iter().find(|provider| provider.id == "openrouter").expect("openrouter provider should exist");
+        assert!(openrouter.models.contains(&"openrouter/free"));
+        assert!(openrouter.models.contains(&"openai/gpt-4o-mini"));
     }
 
     #[test]

@@ -56,10 +56,27 @@ impl Provider for GroqProviderAdapter {
 
         let mut payload = serde_json::json!({
             "model": self.model,
-            "messages": messages.iter().map(|m| serde_json::json!({ "role": m.role, "content": m.content })).collect::<Vec<_>>(),
+            "messages": messages.iter().map(|m| {
+                let mut msg = serde_json::json!({ "role": m.role, "content": m.content });
+                if let Some(tool_call_id) = &m.tool_call_id {
+                    msg["tool_call_id"] = serde_json::json!(tool_call_id);
+                }
+                msg
+            }).collect::<Vec<_>>(),
             "max_tokens": generation.max_tokens,
             "temperature": generation.temperature,
         });
+
+        if let Some(response_format) = generation.response_format.clone() {
+            if !groq_tools.is_empty() {
+                tracing::info!(
+                    "provider request note provider=groq model={} dropping response_format because tools are present",
+                    self.model
+                );
+            } else {
+            payload["response_format"] = response_format;
+            }
+        }
 
         if !groq_tools.is_empty() {
             payload["tools"] = serde_json::json!(groq_tools);

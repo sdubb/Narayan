@@ -62,7 +62,9 @@ pub fn build_router(
         .route("/costs", get(get_costs))
         // Provider catalog
         .route("/providers", get(list_providers))
+        .route("/providers/openrouter/models", get(list_openrouter_models))
         // Credentials & routing
+        .route("/credentials/validate", post(validate_credential))
         .route("/credentials", put(set_credential))
         .route("/credentials", get(list_credentials))
         .route("/credentials/{provider}", delete(delete_credential))
@@ -162,6 +164,8 @@ pub fn build_router(
         .route("/auto-approvals/{rule_id}", delete(delete_auto_approval))
         // Swarm
         .route("/swarm/status", get(swarm_status))
+        .route("/mcp", post(agent_mcp))
+        .route("/mcp/sse", get(agent_mcp_sse))
         // ── Connector install & management ────────────────────────────────
         // Install API-key connectors
         .route("/connectors", get(oauth::list_connectors))

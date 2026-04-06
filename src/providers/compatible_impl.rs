@@ -32,7 +32,13 @@ impl Provider for CompatibleProviderAdapter {
         let history: Vec<serde_json::Value> = messages
             .iter()
             .filter(|m| !matches!(m.role, Role::System))
-            .map(|m| serde_json::json!({"role": format!("{:?}", m.role).to_lowercase(), "content": m.content}))
+            .map(|m| {
+                let mut msg = serde_json::json!({"role": format!("{:?}", m.role).to_lowercase(), "content": m.content});
+                if let Some(tool_call_id) = &m.tool_call_id {
+                    msg["tool_call_id"] = serde_json::json!(tool_call_id);
+                }
+                msg
+            })
             .collect();
 
         let generation = generation.cloned().unwrap_or_else(|| {
@@ -52,6 +58,9 @@ impl Provider for CompatibleProviderAdapter {
         });
         if let Some(sys) = system {
             payload["system"] = serde_json::json!(sys);
+        }
+        if let Some(response_format) = generation.response_format.clone() {
+            payload["response_format"] = response_format;
         }
 
         // Add tools in OpenAI-compatible format for compatible providers

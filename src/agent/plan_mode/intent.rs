@@ -1,6 +1,7 @@
 use serde_json::Value;
 
 use crate::agent::definition::TriggerDef;
+use crate::tools::connector_tool::ALL_CONNECTORS;
 
 /// Compact snapshot used by repair and summary prompts.
 pub fn compact_intent_snapshot(initial: &Value) -> Value {
@@ -39,6 +40,117 @@ pub fn compact_intent_snapshot(initial: &Value) -> Value {
         "candidate_connectors": initial.get("candidate_connectors").cloned().unwrap_or(Value::Null),
         "missing_capabilities": initial.get("missing_capabilities").cloned().unwrap_or(Value::Null),
         "workflow_dsl": workflow_dsl,
+    })
+}
+
+/// Build a lightweight pre-inference intent from the raw user description.
+/// This is used to seed the planning search terms before the first LLM pass.
+pub fn seed_intent_from_description(description: &str) -> Value {
+    let lower = description.to_lowercase();
+
+    let mut preferred_tool_categories = Vec::new();
+    let mut needed_connector_categories = Vec::new();
+    let mut candidate_connectors = Vec::new();
+    let mut missing_capabilities = Vec::new();
+    let mut registry_search_terms = Vec::new();
+
+    let mut push_tool_category = |value: &str| {
+        if !preferred_tool_categories.iter().any(|entry| entry == value) {
+            preferred_tool_categories.push(value.to_string());
+        }
+    };
+    let mut push_connector_category = |value: &str| {
+        if !needed_connector_categories.iter().any(|entry| entry == value) {
+            needed_connector_categories.push(value.to_string());
+        }
+    };
+    let mut push_missing = |value: &str| {
+        if !missing_capabilities.iter().any(|entry| entry == value) {
+            missing_capabilities.push(value.to_string());
+        }
+    };
+    let mut push_search_term = |value: &str| {
+        let normalized = value.trim().to_lowercase();
+        if !normalized.is_empty() && !registry_search_terms.iter().any(|entry| entry == &normalized) {
+            registry_search_terms.push(normalized);
+        }
+    };
+
+    if lower.contains("database") || lower.contains("db") || lower.contains("sql") || lower.contains("table") {
+        push_tool_category("data");
+        push_connector_category("database");
+        push_missing("custom_db");
+        push_search_term("database");
+    }
+    if lower.contains("api") || lower.contains("http") || lower.contains("webhook") || lower.contains("endpoint") {
+        push_tool_category("web");
+        push_connector_category("api");
+        push_missing("custom_api");
+        push_search_term("api");
+    }
+    if lower.contains("mcp") || lower.contains("model context protocol") {
+        push_tool_category("integration");
+        push_connector_category("mcp");
+        push_missing("connector/mcp");
+        push_search_term("mcp");
+    }
+    if lower.contains("acp") || lower.contains("peer agent") || lower.contains("agent-to-agent") || lower.contains("peer") {
+        push_tool_category("integration");
+        push_connector_category("acp");
+        push_missing("connector/acp");
+        push_search_term("acp");
+    }
+    if lower.contains("slack") || lower.contains("email") || lower.contains("notify") || lower.contains("summary") {
+        push_tool_category("communication");
+        push_search_term("communication");
+    }
+    if lower.contains("schedule") || lower.contains("daily") || lower.contains("hourly") || lower.contains("every day") {
+        push_tool_category("automation");
+    }
+    if lower.contains("fetch") || lower.contains("monitor") || lower.contains("search") || lower.contains("scrape") {
+        push_tool_category("web");
+    }
+    if lower.contains("report") || lower.contains("summary") || lower.contains("aggregate") || lower.contains("count") {
+        push_tool_category("data");
+    }
+
+    for connector in ALL_CONNECTORS {
+        if connector
+            .keywords
+            .iter()
+            .any(|keyword| lower.contains(keyword))
+        {
+            if !candidate_connectors.iter().any(|name| name == connector.name) {
+                candidate_connectors.push(connector.name.to_string());
+            }
+            let category = connector.category.strip_prefix("connector/").unwrap_or(connector.category);
+            push_connector_category(category);
+        }
+    }
+
+    if lower.contains("mcp") {
+        push_missing("connector/mcp");
+    }
+    if lower.contains("acp") || lower.contains("peer") {
+        push_missing("connector/acp");
+    }
+
+    candidate_connectors.sort();
+    candidate_connectors.dedup();
+    preferred_tool_categories.sort();
+    preferred_tool_categories.dedup();
+    needed_connector_categories.sort();
+    needed_connector_categories.dedup();
+    missing_capabilities.sort();
+    missing_capabilities.dedup();
+
+    serde_json::json!({
+        "preferred_tool_categories": preferred_tool_categories,
+        "needed_connector_categories": needed_connector_categories,
+        "candidate_connectors": candidate_connectors,
+        "missing_capabilities": missing_capabilities,
+        "registry_search_terms": registry_search_terms,
+        "workflow_dsl": [],
     })
 }
 

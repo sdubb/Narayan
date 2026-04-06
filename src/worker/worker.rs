@@ -103,6 +103,14 @@ fn classify_recompile_failure(reason: &str) -> Option<FailureKind> {
 
 fn outcome_recompile_request(outcome: &StepOutcome, state: &crate::state::AgentState) -> Option<(FailureKind, String)> {
     let (kind, reason) = match outcome {
+        StepOutcome::NeedsRecompile { reason, failure_kind } => {
+            let kind = match failure_kind.as_str() {
+                "policy" => FailureKind::Policy,
+                _ => FailureKind::Structural,
+            };
+            // NeedsRecompile is an explicit signal — always honour it.
+            return Some((kind, reason.clone()));
+        }
         StepOutcome::PermanentError { reason } => Some((FailureKind::Structural, reason.clone())),
         StepOutcome::PolicyViolation { reason } => Some((FailureKind::Policy, reason.clone())),
         StepOutcome::Failed(reason) => classify_recompile_failure(reason).map(|kind| (kind, reason.clone())),
@@ -742,6 +750,18 @@ impl Worker {
                     state.goal.clone(),
                     "failed".into(),
                 );
+            }
+            StepOutcome::NeedsRecompile { reason, .. } => {
+                self.persist_goal_instance_status(
+                    &state,
+                    GoalInstanceStatus::Failed,
+                    Some(serde_json::json!({ "error": reason, "recompile": true })),
+                    Some(reason.clone()),
+                    Some(format!("recompile requested: {}", reason)),
+                    plan.as_ref().map(|p| p.steps.len() as u32),
+                )
+                .await;
+                tracing::warn!(agent_id = %task.agent_id, reason = %reason, "agent needs recompilation");
             }
             _ => {}
         }

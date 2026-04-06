@@ -32,10 +32,10 @@ pub struct TenantRoutingConfig {
 impl Default for TenantRoutingConfig {
     fn default() -> Self {
         Self {
-            simple: "anthropic".into(),
-            medium: "anthropic".into(),
+            simple: "openrouter".into(),
+            medium: "openrouter".into(),
             complex: "anthropic".into(),
-            fallback: "anthropic".into(),
+            fallback: "openrouter".into(),
         }
     }
 }

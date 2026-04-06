@@ -84,6 +84,21 @@ pub struct ClarificationStep {
     pub multi_select: bool,
 }
 
+/// LLM-authored clarification step suggestion.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClarificationQuestionSpec {
+    pub id: String,
+    pub prompt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question_type: Option<String>,
+    #[serde(default)]
+    pub options: Vec<String>,
+    #[serde(default)]
+    pub required: bool,
+}
+
 impl ClarificationStep {
     pub fn new(id: impl Into<String>, question: impl Into<String>, field: StepField) -> Self {
         Self {
@@ -133,10 +148,14 @@ pub fn generate_steps(
     _installed: &[String],
     existing_roles: &[String],
 ) -> Vec<ClarificationStep> {
-    let mut steps: Vec<ClarificationStep> = Vec::new();
+    let mut steps: Vec<ClarificationStep> = llm_clarification_steps(intent);
+    let use_llm_clarifications_only = !steps.is_empty();
 
     // â”€â”€ Step 1: Multi-role split â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    if intent["multi_role_suggested"].as_bool().unwrap_or(false) {
+    if !use_llm_clarifications_only
+        && intent["multi_role_suggested"].as_bool().unwrap_or(false)
+        && !has_llm_clarification_for(&steps, "role_split")
+    {
         let names: Vec<&str> = intent["responsibilities"]
             .as_array()
             .map(|arr| arr.iter().filter_map(|r| r["name"].as_str()).collect())
@@ -166,7 +185,7 @@ pub fn generate_steps(
     let trigger_confidence = intent["trigger_confidence"].as_str().unwrap_or("medium");
     let is_workforce = trigger_hint == "workforce_event" || trigger_hint == "after_role";
 
-    if is_workforce {
+    if !use_llm_clarifications_only && is_workforce && !has_llm_clarification_for(&steps, "workforce_filter") {
         // 2a: which role fires this?
         let role_hint = if !existing_roles.is_empty() {
             format!(
@@ -207,15 +226,84 @@ pub fn generate_steps(
                 .optional(),
             );
         }
-    } else if trigger_confidence != "high" {
+    } else if !use_llm_clarifications_only
+        && trigger_confidence != "high"
+        && !has_llm_clarification_for(&steps, "trigger")
+    {
         let q =
             intent["trigger_confirmation"].as_str().map(String::from).unwrap_or_else(|| build_trigger_question(intent));
         steps.push(ClarificationStep::new("trigger", q, StepField::Trigger));
     }
 
+    let missing_capabilities: Vec<String> = intent["missing_capabilities"]
+        .as_array()
+        .map(|arr| arr.iter().filter_map(|value| value.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    if !use_llm_clarifications_only
+        && (
+            intent["uses_external_db"].as_bool().unwrap_or(false)
+            || intent["uses_external_db"].as_str().map(|value| !value.trim().is_empty() && value.trim() != "null").unwrap_or(false)
+            || missing_capabilities.iter().any(|value| value == "custom_db")
+        )
+        && !has_llm_clarification_for(&steps, "database_connection")
+    {
+        steps.push(ClarificationStep::new(
+            "database_connection",
+            "Which database should this agent use? Use the inline database card, or reply with the exact saved database name if it already exists.",
+            StepField::SourceDiscovery,
+        ).with_question_type("card_open"));
+    }
+    if !use_llm_clarifications_only
+        && (
+            intent["uses_external_api"].as_bool().unwrap_or(false)
+            || intent["uses_external_api"].as_str().map(|value| !value.trim().is_empty() && value.trim() != "null").unwrap_or(false)
+            || missing_capabilities.iter().any(|value| value == "custom_api")
+        )
+        && !has_llm_clarification_for(&steps, "api_connection")
+    {
+        steps.push(ClarificationStep::new(
+            "api_connection",
+            "Which API should this agent use? Use the inline API card, or reply with the exact saved API name if it already exists.",
+            StepField::SourceDiscovery,
+        ).with_question_type("card_open"));
+    }
+    if !use_llm_clarifications_only
+        && (
+            intent["needed_connector_categories"]
+                .as_array()
+                .map(|arr| arr.iter().any(|value| value.as_str() == Some("mcp")))
+                .unwrap_or(false)
+            || missing_capabilities.iter().any(|value| value == "connector/mcp")
+        )
+        && !has_llm_clarification_for(&steps, "mcp_connection")
+    {
+        steps.push(ClarificationStep::new(
+            "mcp_connection",
+            "Which MCP server should this agent use? Use the inline MCP card, or reply with the exact saved MCP server name if it already exists.",
+            StepField::SourceDiscovery,
+        ).with_question_type("card_open"));
+    }
+    if !use_llm_clarifications_only
+        && (
+            intent["needed_connector_categories"]
+                .as_array()
+                .map(|arr| arr.iter().any(|value| value.as_str() == Some("acp")))
+                .unwrap_or(false)
+            || missing_capabilities.iter().any(|value| value == "connector/acp")
+            || intent["uses_acp_peer"].as_bool().unwrap_or(false)
+            || intent["uses_acp_peer"].as_str().map(|value| !value.trim().is_empty() && value.trim() != "null").unwrap_or(false)
+        )
+        && !has_llm_clarification_for(&steps, "acp_connection")
+    {
+        steps.push(ClarificationStep::new(
+            "acp_connection",
+            "Which ACP peer should this agent use? Use the inline ACP card, or reply with the exact saved peer name if it already exists.",
+            StepField::SourceDiscovery,
+        ).with_question_type("card_open"));
+    }
     // â”€â”€ Step 3: Output destination â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     let dest_hint = intent["output_destination_hint"].as_str().unwrap_or("");
-    if dest_hint.is_empty() {
+    if !use_llm_clarifications_only && dest_hint.is_empty() && !has_llm_clarification_for(&steps, "output_dest") {
         let hint = intent["output_hint"].as_str().unwrap_or("workspace");
         let q: String = match hint {
             "email_draft" | "email_send" =>
@@ -238,14 +326,90 @@ pub fn generate_steps(
     steps.extend(domain_steps_for(category));
 
     // â”€â”€ Final: Completion criteria â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    steps.push(ClarificationStep::new(
-        "completion",
-        "What does 'done' look like for one run? e.g. 'all leads enriched, drafts saved, errors logged'. \
-         Or say 'auto' for smart defaults.",
-        StepField::CompletionCriteria,
-    ));
+    if !has_llm_clarification_for(&steps, "completion") {
+        steps.push(ClarificationStep::new(
+            "completion",
+            "What does 'done' look like for one run? e.g. 'all leads enriched, drafts saved, errors logged'. \
+             Or say 'auto' for smart defaults.",
+            StepField::CompletionCriteria,
+        ));
+    }
 
     steps
+}
+
+fn has_llm_clarification_for(steps: &[ClarificationStep], id: &str) -> bool {
+    steps.iter().any(|step| step.id == id)
+}
+
+fn llm_clarification_steps(intent: &serde_json::Value) -> Vec<ClarificationStep> {
+    let mut out = Vec::new();
+    let specs = intent
+        .get("clarification_steps")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let fallback_questions = intent
+        .get("clarifying_questions")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    for (idx, value) in specs.into_iter().enumerate() {
+        if let Ok(spec) = serde_json::from_value::<ClarificationQuestionSpec>(value) {
+            out.push(spec_to_step(spec, idx));
+        }
+    }
+
+    if out.is_empty() {
+        for (idx, value) in fallback_questions.into_iter().enumerate() {
+            if let Some(prompt) = value.as_str() {
+                out.push(ClarificationStep::new(
+                    format!("llm_clarification_{}", idx + 1),
+                    prompt,
+                    StepField::SourceDiscovery,
+                ));
+            }
+        }
+    }
+
+    out
+}
+
+fn spec_to_step(spec: ClarificationQuestionSpec, idx: usize) -> ClarificationStep {
+    let field = match spec.field_type.as_deref().unwrap_or("source_discovery") {
+        "trigger" => StepField::Trigger,
+        "workforce_event_filter" => StepField::WorkforceEventFilter,
+        "workforce_event_input_mapping" => StepField::WorkforceEventInputMapping,
+        "depends_on_role" => StepField::DependsOnRole,
+        "output_destination" => StepField::OutputDestination,
+        "output_format" => StepField::OutputFormat,
+        "role_split" => StepField::RoleSplit,
+        "guideline_rule" => StepField::GuidelineRule,
+        "failure_handling" => StepField::FailureHandling { tool_scope: None },
+        "completion_criteria" => StepField::CompletionCriteria,
+        "agent_constraint" => StepField::AgentConstraint,
+        "user_guidelines" => StepField::UserGuidelines,
+        "source_discovery" => StepField::SourceDiscovery,
+        _ => StepField::SourceDiscovery,
+    };
+    let mut step = ClarificationStep::new(
+        if spec.id.trim().is_empty() {
+            format!("llm_clarification_{}", idx + 1)
+        } else {
+            spec.id
+        },
+        spec.prompt,
+        field,
+    );
+    step.required = spec.required;
+    if let Some(qt) = spec.question_type {
+        step.question_type = Some(qt);
+    }
+    if !spec.options.is_empty() {
+        step.options = spec.options;
+    }
+    step
 }
 
 fn build_trigger_question(intent: &serde_json::Value) -> String {
@@ -489,7 +653,7 @@ pub fn parse_trigger_answer(answer: &str, intent: &serde_json::Value) -> (Trigge
 
     if is_confirmation {
         // Accept the intent's parsed trigger at high confidence
-        let (mut trigger, _) = intent_to_trigger(intent);
+        let mut trigger = intent_to_trigger(intent);
         trigger.confidence = TriggerConfidence::High;
         return (trigger, TriggerConfidence::High);
     }
@@ -499,6 +663,124 @@ pub fn parse_trigger_answer(answer: &str, intent: &serde_json::Value) -> (Trigge
         if trigger_answer_is_specific(answer) { TriggerConfidence::High } else { TriggerConfidence::Medium };
     trigger.confidence = confidence.clone();
     (trigger, confidence)
+}
+
+pub fn parse_trigger_from_text(answer: &str) -> TriggerDef {
+    let lower = answer.to_lowercase();
+    let mut trigger = TriggerDef::default();
+
+    if lower.contains("webhook") {
+        trigger.trigger_type = TriggerType::Webhook;
+        trigger.source_connector = extract_trigger_source_connector(answer);
+        trigger.event_filter = extract_trigger_event_filter(answer);
+        return trigger;
+    }
+
+    if lower.contains("schedule")
+        || lower.contains("cron")
+        || lower.contains("daily")
+        || lower.contains("hourly")
+        || lower.contains("weekly")
+        || lower.contains("monthly")
+        || lower.contains("every day")
+        || lower.contains("every hour")
+    {
+        trigger.trigger_type = TriggerType::Schedule;
+        trigger.cron = extract_cron_expression(answer);
+        trigger.timezone = extract_timezone(answer);
+        return trigger;
+    }
+
+    if lower.contains("after another role")
+        || lower.contains("workforce event")
+        || lower.contains("after role")
+    {
+        trigger.trigger_type = TriggerType::WorkforceEvent;
+        trigger.depends_on_role_id = extract_depends_on_role(answer);
+        trigger.workforce_event_filter = extract_workforce_event_filter(answer);
+        return trigger;
+    }
+
+    if lower.contains("user message") || lower.contains("message") {
+        trigger.trigger_type = TriggerType::UserMessage;
+        trigger.allowed_users = extract_allowed_users(answer);
+        trigger.intent_keywords = extract_intent_keywords(answer);
+        return trigger;
+    }
+
+    trigger.trigger_type = TriggerType::Manual;
+    trigger
+}
+
+fn extract_trigger_source_connector(answer: &str) -> Option<String> {
+    answer
+        .split_whitespace()
+        .find(|token| token.contains("slack") || token.contains("salesforce") || token.contains("hubspot"))
+        .map(|token| token.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-').to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn extract_trigger_event_filter(answer: &str) -> Option<String> {
+    let lower = answer.to_lowercase();
+    if lower.contains("created") {
+        Some("created".into())
+    } else if lower.contains("updated") {
+        Some("updated".into())
+    } else if lower.contains("deleted") {
+        Some("deleted".into())
+    } else {
+        None
+    }
+}
+
+fn extract_cron_expression(answer: &str) -> Option<String> {
+    answer
+        .split_whitespace()
+        .find(|token| token.contains('*') || token.chars().all(|ch| ch.is_ascii_digit()))
+        .map(str::to_string)
+}
+
+fn extract_timezone(answer: &str) -> Option<String> {
+    answer
+        .split_whitespace()
+        .find(|token| token.contains('/') && token.len() > 3)
+        .map(|token| token.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '/' && c != '_').to_string())
+}
+
+fn extract_depends_on_role(answer: &str) -> Option<String> {
+    answer
+        .split_whitespace()
+        .find(|token| token.to_lowercase().contains("role"))
+        .map(str::to_string)
+}
+
+fn extract_workforce_event_filter(answer: &str) -> Option<String> {
+    let lower = answer.to_lowercase();
+    if lower.contains("completed") {
+        Some("completed".into())
+    } else if lower.contains("failed") {
+        Some("failed".into())
+    } else {
+        None
+    }
+}
+
+fn extract_allowed_users(answer: &str) -> Option<Vec<String>> {
+    let users: Vec<String> = answer
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| s.contains('@') || s.len() > 2)
+        .collect();
+    if users.is_empty() { None } else { Some(users) }
+}
+
+fn extract_intent_keywords(answer: &str) -> Option<Vec<String>> {
+    let keywords: Vec<String> = answer
+        .split(&[',', ';'][..])
+        .map(|s| s.trim().to_string())
+        .filter(|s| s.len() > 2)
+        .collect();
+    if keywords.is_empty() { None } else { Some(keywords) }
 }
 
 fn trigger_answer_is_specific(answer: &str) -> bool {
@@ -1146,6 +1428,16 @@ pub fn workflow_contract_prompt_fragment() -> &'static str {
   "output_hint": "workspace|connector_record|slack_message|email_draft|email_send|report|notification",
   "output_destination_hint": "where exactly - workspace path, connector name, or channel",
   "output_questions": ["specific missing output detail questions, empty array if clear"],
+  "clarification_steps": [
+    {
+      "id": "database_connection",
+      "prompt": "Which database should this agent use?",
+      "field_type": "source_discovery",
+      "question_type": "card_open",
+      "options": [],
+      "required": true
+    }
+  ],
   "responsibilities": [
     {"name": "short role name", "actions": ["verbs"], "trigger_hint": "schedule|webhook|manual"}
   ],
@@ -1160,9 +1452,10 @@ Rules:
 - Prefer emitting the explicit contract fields: `tool`, `tool_operation`, `resource_id`, `resource_type`, `input_mapping`, `output_schema`, `read_only`, `depends_on`, `next_steps`, `branch_condition`, `repeat_until`, `fallback_step`, `loop_back_to`, `retry_policy`
 - Prefer data_engine for deterministic record workflows when the task fits the typed DSL
 - Do not suggest free-form code or runtime custom tools when data_engine can express the workflow
+- Prefer `clarification_steps` for any missing information you need from the user; keep `clarifying_questions` only as a fallback summary list
 - Use data_extractor first for semi-structured source extraction from HTML/text/PDF-like content, then use data_engine for deterministic record transforms
 - Use exact connector names only when they are clearly supported by the context
-- Use `mcp_session` for MCP-backed workflows and `acp_session` for ACP-backed workflows when those appear in the candidate set
+- Use `mcp_session` for MCP-backed workflows and `acp_session` for ACP-backed workflows when those appear in the search results
 - For MCP, prefer explicit `integration_protocol: "mcp"` and actions such as `connect`, `list_tools`, `list_resources`, `read_resource`, or `call_tool`
 - For ACP, prefer explicit `integration_protocol: "acp"` and actions such as `list_agents`, `receive_messages`, or `send_message` on the currently available protocol surface, including internal agent-to-agent workflows
 - workflow_dsl should be ordered and typed. Use the smallest set of steps needed to express the workflow.
@@ -1172,28 +1465,46 @@ Rules:
 "#
 }
 
-pub fn intent_extractor_system_prompt(capability_section: &str, dsl_fragment: &str) -> String {
+pub fn intent_extractor_system_prompt(
+    capability_section: &str,
+    registry_candidate_context: &str,
+    dsl_fragment: &str,
+) -> String {
     let capability_section = if capability_section.is_empty() {
         String::new()
     } else {
         format!("\n\nCAPABILITY DIRECTORY:\n{}", capability_section)
     };
+    let registry_candidate_context = if registry_candidate_context.is_empty() {
+        String::new()
+    } else {
+        format!("\n\n{}", registry_candidate_context)
+    };
 
     format!(
         r#"You are a business analyst helping configure an AI automation agent.
-Extract structured intent AND generate specific clarifying questions.
+Extract structured intent, search the registry if needed, and author the clarification questions needed to finish the draft.
 
-Work in two stages internally:
-1. Infer the business workflow shape and the capability categories needed.
-2. Pick exact connectors or tools only when the directory/context makes them clear.
-3. Treat the detailed capability context as three candidate slices and choose from the most specific matching slice first.
+Use the capability directory and search tools to keep decisions grounded:
+- identify the goal and missing information
+- search for connectors, MCP servers, or ACP peers when needed
+- choose only supported tools and bindings
+- emit clarification steps for anything still unknown
+- prefer the most specific matching context slice before widening your search
+- use `ask_user` only after the search loop still leaves a real human choice or missing binding
 {capability_section}
+{registry_candidate_context}
 
 Respond ONLY with valid JSON.
+Do not invent tools, connectors, MCP servers, or ACP peers that are not present in the search results or context.
+Keep the tool search loop narrow: search, inspect results, refine, and then finalize the draft.
+Prefer `clarification_steps` as the primary way to ask follow-up questions.
+Use `clarifying_questions` only as a compact fallback summary if you truly cannot express the step structurally.
 {workflow_contract}
 
 {dsl_fragment}"#,
         capability_section = capability_section,
+        registry_candidate_context = registry_candidate_context,
         workflow_contract = workflow_contract_prompt_fragment(),
         dsl_fragment = dsl_fragment,
     )

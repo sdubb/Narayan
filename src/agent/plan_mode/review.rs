@@ -22,12 +22,10 @@ use crate::{
         },
         planner::AdaptiveResearchMemo,
     },
-    state::{SessionTask, SessionTaskOutput, SessionTaskResultStatus, SessionTaskStatus},
+    state::{SessionTaskOutput, SessionTaskResultStatus, SessionTaskStatus},
 };
 
 use super::intent::AGENT_SUBSYSTEMS;
-use super::subsystems::SubsystemPolicy;
-
 // ── Contract types ───────────────────────────────────────────────────────────
 
 /// Full typed contract that replaces the old `Vec<String>` workflow hints.
@@ -198,6 +196,39 @@ pub fn finalize_saved_role_execution_strategy(role: &mut AgentRole) {
         ExecutionStrategy::AdaptivePlanning
     ) {
         role.execution_guidelines.execution_strategy = ExecutionStrategy::DeterministicWorkflow;
+    }
+}
+
+/// Reconcile the draft role's execution policy after clarification and
+/// compiler validation have narrowed the draft down.
+///
+/// This keeps the backend authoritative for the final tool pool selection
+/// while still preserving the role-category defaults when they remain valid.
+pub fn reconcile_role_tool_pool(role: &mut AgentRole) {
+    match role.role_category {
+        crate::agent::definition::RoleCategory::SoftwareEngineer => {
+            role.execution_guidelines.execution_strategy = ExecutionStrategy::AdaptivePlanning;
+            role.execution_guidelines.tool_pool = ToolPool::Worker;
+        }
+        crate::agent::definition::RoleCategory::ResearchAnalyst => {
+            role.execution_guidelines.execution_strategy = ExecutionStrategy::CoordinatorShell;
+            role.execution_guidelines.tool_pool = ToolPool::Coordinator;
+        }
+        _ => {
+            if matches!(
+                role.execution_guidelines.execution_strategy,
+                ExecutionStrategy::CoordinatorShell
+            ) {
+                role.execution_guidelines.tool_pool = ToolPool::Coordinator;
+            } else if matches!(
+                role.execution_guidelines.execution_strategy,
+                ExecutionStrategy::AdaptivePlanning
+            ) {
+                role.execution_guidelines.execution_strategy =
+                    ExecutionStrategy::DeterministicWorkflow;
+                role.execution_guidelines.tool_pool = ToolPool::Worker;
+            }
+        }
     }
 }
 

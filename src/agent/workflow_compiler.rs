@@ -1907,7 +1907,7 @@ pub(crate) fn llm_generation_for_hint(hint: &str, role: &LlmRole) -> LlmGenerati
         config.max_tokens = config.max_tokens.min(128);
         config.temperature = 0.0;
     }
-    config
+    config.with_json_schema_response(format!("llm_{:?}_output", role).to_lowercase(), llm_output_schema(role))
 }
 
 pub(crate) fn llm_output_schema(role: &LlmRole) -> serde_json::Value {
@@ -2019,7 +2019,7 @@ fn compile_step(
     index: usize,
     draft_step: &DraftDslStep,
     resources: &BTreeMap<String, ResourceBinding>,
-    tools: &ToolRegistry,
+    _tools: &ToolRegistry,
     role: &AgentRole,
     previous_step_id: Option<&str>,
     previous_output_key: Option<&str>,

@@ -95,6 +95,8 @@ export const auth = {
 export const credentials = {
   set:    (provider, api_key, model, label) =>
     req('PUT', '/credentials', { provider, api_key, model, label }),
+  validate: (provider, api_key, model) =>
+    req('POST', '/credentials/validate', { provider, api_key, model }),
   list:   () => req('GET', '/credentials'),
   delete: (provider) => req('DELETE', `/credentials/${provider}`),
 };
@@ -108,6 +110,7 @@ export const databaseConnections = {
 
 export const providers = {
   list: () => req('GET', '/providers'),
+  openrouterModels: () => req('GET', '/providers/openrouter/models'),
 };
 
 // ── Routing ────────────────────────────────────────────────────────────────

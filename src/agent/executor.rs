@@ -408,8 +408,22 @@ fn llm_generation_from_step(step: &PlannedStep) -> Option<LlmGenerationConfig> {
         .unwrap_or_else(|| budget_tier.default_temperature());
     let cost_budget_usd = args.get("cost_budget_usd").and_then(|value| value.as_f64());
     let cadence = args.get("cadence").and_then(|value| value.as_str()).map(str::to_string);
+    let response_format = match args.get("response_format") {
+        Some(value) if value == "json" => Some(serde_json::json!({ "type": "json_object" })),
+        Some(value) => Some(value.clone()),
+        None => None,
+    };
 
-    Some(LlmGenerationConfig { role, execution_intent, budget_tier, max_tokens, temperature, cost_budget_usd, cadence })
+    Some(LlmGenerationConfig {
+        role,
+        execution_intent,
+        budget_tier,
+        max_tokens,
+        temperature,
+        cost_budget_usd,
+        cadence,
+        response_format,
+    })
 }
 
 fn llm_output_schema_from_step(step: &PlannedStep) -> Option<serde_json::Value> {

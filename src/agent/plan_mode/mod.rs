@@ -26,14 +26,9 @@ pub mod subsystems;
 // Re-export the public API from orchestrator (PlanModeManager, IntentExtractor, etc.)
 pub use orchestrator::*;
 
-// Re-export key types from submodules for convenience
-pub use boundary::{BoundaryNeed, BoundaryScope, BoundarySetupResult};
-pub use registry::CapabilityPacket;
-pub use review::{WorkflowContract, CompilerValidationState, ApprovalStatus, GovernanceCheck, ReviewChecklistItem};
-pub use steps::{
-    ClarificationStep, StepField, PlanModeRetryPolicy, PlanModeWorkflowDraft,
-    PlanModeWorkflowResponsibility, PlanModeWorkflowStep,
-    generate_steps, parse_and_apply, default_completion_criteria,
-    workflow_contract_prompt_fragment, intent_extractor_system_prompt,
+// Re-export the intent helpers still used directly by API routes.
+pub use intent::{
+    intent_needs_api_connection, intent_needs_database_connection, intent_needs_mcp_connection,
+    intent_to_trigger,
 };
-pub use subsystems::SubsystemPolicy;
+pub use steps::parse_trigger_from_text;

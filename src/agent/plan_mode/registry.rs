@@ -4,7 +4,7 @@
 //! tool overrides (external_db, external_api, acp_session), and optional
 //! clarifying questions when ambiguity exists.
 //!
-//! Registry helper functions (capability directory, candidate sets, etc.)
+//! Registry helper functions (search results, capability directory, candidate sets, etc.)
 //! are the authoritative implementations — previously in `plan_mode_registry.rs`.
 
 use std::collections::BTreeMap;
@@ -21,7 +21,7 @@ use crate::{
 
 use super::intent::{
     intent_named_acp_peer, intent_named_external_db, intent_needs_acp_connection,
-    intent_needs_database_connection,
+    intent_needs_api_connection, intent_needs_database_connection, intent_needs_mcp_connection,
 };
 
 // ── Registry helper functions (absorbed from plan_mode_registry.rs) ─────
@@ -200,6 +200,21 @@ fn connector_categories_from_intent(intent: &serde_json::Value) -> Vec<String> {
     categories.sort();
     categories.dedup();
     categories
+}
+
+fn registry_search_terms(intent: &serde_json::Value) -> Vec<String> {
+    intent["registry_search_terms"]
+        .as_array()
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_lowercase)).collect())
+        .unwrap_or_default()
+}
+
+fn matches_search_terms(haystack: &str, terms: &[String]) -> bool {
+    if terms.is_empty() {
+        return true;
+    }
+    let haystack = haystack.to_lowercase();
+    terms.iter().any(|term| haystack.contains(term))
 }
 
 fn tool_family_label(family: &ToolFamily) -> &'static str {
@@ -395,6 +410,14 @@ fn integration_candidate(tool_name: &str, registry: &ToolRegistry) -> Option<ser
         "family": entry.map(|entry| tool_family_label(&entry.family)).unwrap_or("unknown"),
         "operations": entry.map(|entry| entry.operations.iter().copied().collect::<Vec<_>>()).unwrap_or_default(),
         "sub_operations": integration_sub_operations(tool_name),
+        "operation_contract": entry.map(|entry| {
+            entry.operations.iter().map(|operation| {
+                serde_json::json!({
+                    "name": operation,
+                    "kind": if tool_name == "mcp_session" { "protocol_action" } else { "operation" },
+                })
+            }).collect::<Vec<_>>()
+        }).unwrap_or_default(),
         "requires_resource": entry.and_then(|entry| resource_kind_label(entry.requires_resource.as_ref())),
         "read_only": entry.map(|entry| entry.read_only).unwrap_or(false),
         "requires_approval": entry.map(|entry| entry.requires_approval).unwrap_or(false),
@@ -479,7 +502,7 @@ pub fn build_custom_context(_installed: &[String], tenant_connectors: &[TenantCo
 
     let mcps: Vec<&TenantConnector> = tenant_connectors.iter().filter(|tc| tc.category.contains("mcp")).collect();
     if !mcps.is_empty() {
-        lines.push("MCP servers (available as connector tools):".into());
+        lines.push("MCP servers (discover first, then connect, then call an action):".into());
         for mcp in &mcps {
             lines.push(format!("  - name='{}' \u{2014} {}", mcp.name, mcp.summary));
         }
@@ -606,6 +629,7 @@ pub fn build_registry_candidate_set(
     let secondary_categories = secondary_tool_categories(intent, &primary_categories);
     let fallback_categories = fallback_tool_categories(&primary_categories, &secondary_categories);
     let connector_categories = connector_categories_from_intent(intent);
+    let search_terms = registry_search_terms(intent);
 
     let primary_tools = candidate_tool_names(&primary_categories, registry)
         .into_iter()
@@ -620,12 +644,54 @@ pub fn build_registry_candidate_set(
         .filter_map(|name| registry_tool_candidate(&name, registry))
         .collect::<Vec<_>>();
 
+    let tool_actions = |candidate: &serde_json::Value| {
+        candidate["tool"]
+            .as_str()
+            .map(|tool_name| {
+                serde_json::json!({
+                    "name": tool_name,
+                    "operation": candidate["tool_operation"].clone(),
+                    "resource_type": candidate["requires_resource"].clone(),
+                    "read_only": candidate["read_only"].clone(),
+                    "parameters": candidate["parameters"].clone(),
+                    "output_schema": candidate["output_schema"].clone(),
+                    "contract": candidate["contract"].clone(),
+                })
+            })
+    };
+
+    let tool_discovery: Vec<serde_json::Value> = primary_tools
+        .iter()
+        .chain(secondary_tools.iter())
+        .chain(fallback_tools.iter())
+        .filter_map(|candidate| {
+            candidate["name"].as_str().map(|name| {
+                serde_json::json!({
+                    "name": name,
+                    "description": candidate["description"].clone(),
+                    "family": candidate["family"].clone(),
+                    "resource_type": candidate["requires_resource"].clone(),
+                    "read_only": candidate["read_only"].clone(),
+                })
+            })
+        })
+        .collect();
+
+    let tool_action_candidates: Vec<serde_json::Value> = primary_tools
+        .iter()
+        .chain(secondary_tools.iter())
+        .chain(fallback_tools.iter())
+        .filter_map(tool_actions)
+        .collect();
+
     let builtin_connector_names: Vec<String> = connector_categories
         .iter()
         .flat_map(|category| {
+            let search_terms = search_terms.clone();
             BUILTIN_CONNECTORS.iter().filter_map(move |entry| {
                 let cat = entry.category.strip_prefix("connector/").unwrap_or(entry.category);
-                if cat == category {
+                let haystack = format!("{} {} {}", entry.name, entry.summary, entry.operations.join(" "));
+                if cat == category && matches_search_terms(&haystack, &search_terms) {
                     Some(entry.name.to_string())
                 } else {
                     None
@@ -637,9 +703,11 @@ pub fn build_registry_candidate_set(
     let tenant_connector_names: Vec<String> = connector_categories
         .iter()
         .flat_map(|category| {
+            let search_terms = search_terms.clone();
             tenant_connectors.iter().filter_map(move |connector| {
                 let cat = connector.category.strip_prefix("connector/").unwrap_or(connector.category.as_str());
-                if cat == category {
+                let haystack = format!("{} {} {}", connector.name, connector.summary, connector.endpoints.iter().map(|e| e.path.as_str()).collect::<Vec<_>>().join(" "));
+                if cat == category && matches_search_terms(&haystack, &search_terms) {
                     Some(connector.name.clone())
                 } else {
                     None
@@ -663,8 +731,58 @@ pub fn build_registry_candidate_set(
         .filter_map(|name| integration_candidate(name, registry))
         .collect::<Vec<_>>();
 
+    let mcp_discovery_candidates: Vec<serde_json::Value> = tenant_connectors
+        .iter()
+        .filter(|connector| connector.category.contains("mcp"))
+        .map(|connector| serde_json::json!({
+            "name": connector.name,
+            "summary": connector.summary,
+            "category": connector.category,
+            "resource_type": "mcp_server",
+            "required_fields": ["server_url", "action", "tool_name", "tool_args"],
+            "actions": ["connect", "list_tools", "list_resources", "read_resource", "call_tool"],
+        }))
+        .collect();
+
+    let mcp_selected_candidates: Vec<serde_json::Value> = tenant_connectors
+        .iter()
+        .filter(|connector| connector.category.contains("mcp"))
+        .map(|connector| serde_json::json!({
+            "server_name": connector.name,
+            "server_url": connector.endpoints.first().map(|endpoint| endpoint.path.clone()).unwrap_or_default(),
+            "resource_type": "mcp_server",
+            "selected": true,
+        }))
+        .collect();
+
+    let mcp_action_candidates: Vec<serde_json::Value> = integration_candidates
+        .iter()
+        .filter(|candidate| candidate["name"].as_str() == Some("mcp_session"))
+        .map(|candidate| serde_json::json!({
+            "name": "mcp_session",
+            "actions": candidate["sub_operations"].clone(),
+            "required_fields": ["server_url", "action"],
+            "operation_contract": candidate["operation_contract"].clone(),
+            "output_schema": candidate["output_schema"].clone(),
+        }))
+        .collect();
+
+    let acp_candidates: Vec<serde_json::Value> = tenant_connectors
+        .iter()
+        .filter(|connector| connector.category.contains("acp") || connector.category.contains("agent"))
+        .map(|connector| serde_json::json!({
+            "name": connector.name,
+            "summary": connector.summary,
+            "category": connector.category,
+            "resource_type": "acp_peer",
+            "required_fields": ["target_agent", "message", "response_contract"],
+            "actions": ["list_agents", "receive_messages", "send_message"],
+        }))
+        .collect();
+
     serde_json::json!({
         "version": 1,
+        "search_terms": search_terms,
         "intent": {
             "preferred_tool_categories": primary_categories,
             "secondary_tool_categories": secondary_categories,
@@ -688,7 +806,13 @@ pub fn build_registry_candidate_set(
                 "connectors": [],
             }
         ],
+        "tool_discovery": tool_discovery,
+        "tool_actions": tool_action_candidates,
         "integrations": integration_candidates,
+        "mcp_discovery": mcp_discovery_candidates,
+        "mcp_selected": mcp_selected_candidates,
+        "mcp_actions": mcp_action_candidates,
+        "acp": acp_candidates,
         "rules": [
             "Choose the most specific matching slice first.",
             "Select one exact tool and one exact operation from the selected slice.",
@@ -723,6 +847,150 @@ pub fn inferred_preferred_tools(registry: &ToolRegistry, intent: &serde_json::Va
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default()
+}
+
+/// Reconcile the draft role's tool list against the current intent and
+/// confirmed connectors.
+///
+/// This keeps the backend in charge of the final tool set while still
+/// preserving connector-bound tool overrides that the clarification flow has
+/// already confirmed.
+pub fn reconcile_role_tools(
+    registry: &ToolRegistry,
+    intent: &serde_json::Value,
+    current_tools: &[String],
+    confirmed_connectors: &[String],
+) -> Vec<String> {
+    let mut tools = inferred_preferred_tools(registry, intent);
+
+    for tool in current_tools {
+        let is_bound_tool = if tool.starts_with("external_db:") {
+            intent_needs_database_connection(intent)
+        } else if tool.starts_with("external_api:") {
+            intent_needs_api_connection(intent)
+        } else if tool.starts_with("mcp_session") {
+            intent_needs_mcp_connection(intent)
+        } else if tool.starts_with("acp_session:") {
+            intent_needs_acp_connection(intent)
+        } else {
+            false
+        };
+        let matches_confirmed_connector = confirmed_connectors.iter().any(|connector| {
+            tool.ends_with(connector) || tool.contains(connector)
+        });
+        if is_bound_tool || matches_confirmed_connector {
+            tools.push(tool.clone());
+        }
+    }
+
+    tools.sort();
+    tools.dedup();
+    tools
+}
+
+pub fn reconcile_database_bindings(intent: &serde_json::Value, current_tools: &[String]) -> Vec<String> {
+    let mut tools: Vec<String> = current_tools
+        .iter()
+        .filter(|tool| !tool.starts_with("external_db:") || intent_needs_database_connection(intent))
+        .cloned()
+        .collect();
+    if intent_needs_database_connection(intent) {
+        if let Some(name) = intent_named_external_db(intent) {
+            let tool = format!("external_db:{}", name);
+            if !tools.iter().any(|existing| existing == &tool) {
+                tools.push(tool);
+            }
+        }
+    }
+    tools.sort();
+    tools.dedup();
+    tools
+}
+
+pub fn reconcile_api_bindings(intent: &serde_json::Value, current_tools: &[String]) -> Vec<String> {
+    let mut tools: Vec<String> = current_tools
+        .iter()
+        .filter(|tool| !tool.starts_with("external_api:") || intent_needs_api_connection(intent))
+        .cloned()
+        .collect();
+    if intent_needs_api_connection(intent) {
+        if let Some(api_name) = intent.get("uses_external_api").and_then(|value| value.as_str()) {
+            let api_name = api_name.trim();
+            if !api_name.is_empty() && api_name != "null" {
+                let tool = format!("external_api:{}", api_name);
+                if !tools.iter().any(|existing| existing == &tool) {
+                    tools.push(tool);
+                }
+            }
+        }
+    }
+    tools.sort();
+    tools.dedup();
+    tools
+}
+
+pub fn reconcile_mcp_bindings(intent: &serde_json::Value, current_tools: &[String]) -> Vec<String> {
+    let mut tools: Vec<String> = current_tools
+        .iter()
+        .filter(|tool| !tool.starts_with("mcp_session") || intent_needs_mcp_connection(intent))
+        .cloned()
+        .collect();
+    if intent_needs_mcp_connection(intent) && !tools.iter().any(|tool| tool == "mcp_session") {
+        tools.push("mcp_session".into());
+    }
+    tools.sort();
+    tools.dedup();
+    tools
+}
+
+pub fn reconcile_acp_bindings(intent: &serde_json::Value, current_tools: &[String]) -> Vec<String> {
+    let mut tools: Vec<String> = current_tools
+        .iter()
+        .filter(|tool| !tool.starts_with("acp_session:") || intent_needs_acp_connection(intent))
+        .cloned()
+        .collect();
+    if intent_needs_acp_connection(intent) {
+        if let Some(peer_name) = intent_named_acp_peer(intent) {
+            let tool = format!("acp_session:{}", peer_name);
+            if !tools.iter().any(|existing| existing == &tool) {
+                tools.push(tool);
+            }
+        }
+    }
+    tools.sort();
+    tools.dedup();
+    tools
+}
+
+/// Reconcile the connector list from the current intent plus any confirmed
+/// connector selections.
+///
+/// This keeps the backend authoritative for the final connector set and
+/// allows the clarification flow to keep refining ACP, MCP, DB, and API
+/// auth choices without losing earlier confirmed selections.
+pub fn reconcile_role_connectors(
+    intent: &serde_json::Value,
+    current_connectors: &[String],
+) -> Vec<String> {
+    let mut connectors = current_connectors.to_vec();
+    connectors.extend(
+        intent["candidate_connectors"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|value| value.as_str().map(String::from)),
+    );
+    connectors.extend(
+        intent["needed_connector_categories"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|value| value.as_str().map(String::from))
+            .map(|category| format!("connector:{category}")),
+    );
+    connectors.sort();
+    connectors.dedup();
+    connectors
 }
 
 pub fn missing_tool_categories(intent: &serde_json::Value) -> Vec<String> {
@@ -1050,11 +1318,27 @@ pub(super) fn build_missing_connector_question(
     }
     if missing_capabilities.iter().any(|value| value == "connector/acp") {
         return Some(
-            "This may need an ACP peer connection for internal agent-to-agent communication. Use the inline connection card to add it, or tell me the exact saved ACP peer name if it already exists.".into()
+            "This may need an ACP peer connection for internal agent-to-agent communication. Use the inline ACP card to name the peer, its target agent, and the message/response contract, or tell me the exact saved ACP peer name if it already exists.".into()
         );
     }
 
     None
+}
+
+pub(super) fn database_connection_question() -> String {
+    "Which database should this agent use? Use the inline database card, or reply with the exact saved database name if it already exists.".into()
+}
+
+pub(super) fn api_connection_question() -> String {
+    "Which API should this agent use? Use the inline API card, or reply with the exact saved API name if it already exists.".into()
+}
+
+pub(super) fn mcp_connection_question() -> String {
+    "Which MCP server should this agent use? Use the inline MCP card, or reply with the exact saved MCP server name if it already exists.".into()
+}
+
+pub(super) fn acp_connection_question() -> String {
+    "Which ACP peer should this agent use? Use the inline ACP card, or reply with the exact saved peer name if it already exists.".into()
 }
 
 // ── Local-document workflow detection ────────────────────────────────────

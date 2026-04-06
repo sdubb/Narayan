@@ -63,10 +63,10 @@ pub struct RoutingTable {
 impl Default for RoutingTable {
     fn default() -> Self {
         Self {
-            simple: "ollama".into(),
-            medium: "openai".into(),
+            simple: "openrouter".into(),
+            medium: "openrouter".into(),
             complex: "anthropic".into(),
-            fallback: "anthropic".into(),
+            fallback: "openrouter".into(),
         }
     }
 }

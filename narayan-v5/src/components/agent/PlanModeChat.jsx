@@ -13,11 +13,12 @@ import {
 } from '../connectors/ConnectorSetupModal';
 import DatabaseConnectionCard from '../cards/DatabaseConnectionCard';
 import CustomConnectionCard from '../cards/CustomConnectionCard';
+import ACPConnectionCard from '../cards/ACPConnectionCard';
 
 // Phase labels shown in the progress strip
 const PHASE_LABELS = {
   capturing_intent:      'Understanding your goal',
-  resolving_connectors:  'Identifying integrations',
+  resolving_connectors:  'Connecting backends',
   capturing_trigger:     'Setting the trigger',
   capturing_output:      'Defining output',
   capturing_constraints: 'Adding rules',
@@ -104,6 +105,28 @@ function formatModeLabel(value, fallback = 'n/a') {
     .replace(/\s+/g, ' ')
     .trim()
     .replace(/\b\w/g, c => c.toUpperCase());
+}
+
+function inferBackendKind(request = {}) {
+  const values = [
+    request.backendKind,
+    request.backend_kind,
+    request.cardType,
+    request.card_type,
+    request.bindingTarget,
+    request.binding_target,
+    request.id,
+    request.questionId,
+    request.question_id,
+    request.stepId,
+    request.step_id,
+  ].map(value => String(value || '').toLowerCase().trim());
+
+  if (values.some(value => value.includes('database'))) return 'database';
+  if (values.some(value => value.includes('api'))) return 'api';
+  if (values.some(value => value.includes('mcp'))) return 'mcp';
+  if (values.some(value => value.includes('acp'))) return 'acp';
+  return '';
 }
 
 function stripOptionMarkers(line) {
@@ -1023,6 +1046,7 @@ export default function PlanModeChat({
     const cardType = String(request.cardType || request.card_type || '').toLowerCase().trim();
     const bindingTarget = String(request.bindingTarget || request.binding_target || '').toLowerCase().trim();
     const connectorType = String(request.connectorType || request.connector_type || '').toLowerCase().trim();
+    const backendKind = inferBackendKind(request);
     const requiredFields = Array.isArray(request.requiredFields || request.required_fields)
       ? (request.requiredFields || request.required_fields)
       : [];
@@ -1048,18 +1072,27 @@ export default function PlanModeChat({
       return true;
     }
 
-    if (cardType === 'mcp' || bindingTarget === 'mcp') {
+    if (cardType === 'mcp' || bindingTarget === 'mcp' || backendKind === 'mcp') {
       setShowDatabaseCard(false);
       setShowConnectorModal(false);
       setInlineConnectionKinds(prev => [...new Set([...prev, 'mcp'])]);
       return true;
     }
 
-    if (cardType === 'api_auth' || cardType === 'api' || bindingTarget === 'api') {
+    if (cardType === 'api_auth' || cardType === 'api' || bindingTarget === 'api' || backendKind === 'api') {
       setShowDatabaseCard(false);
       setShowConnectorModal(false);
       setInlineConnectionKinds(prev => [...new Set([...prev, 'api'])]);
       return true;
+    }
+
+    if (cardType === 'acp' || bindingTarget === 'acp' || backendKind === 'acp') {
+      setShowDatabaseCard(false);
+      setInlineConnectionKinds([]);
+      setInlineConnectorIds([]);
+      setShowConnectorModal(false);
+      setInlineConnectionKinds(prev => [...new Set([...prev, 'acp'])]);
+      return routeToSettings();
     }
 
     if (cardType === 'connector' || uniqueConnectors.length > 0 || connectorType) {
@@ -1083,6 +1116,8 @@ export default function PlanModeChat({
     const connectionKinds = [
       ...(Array.isArray(inlineSetup.connection_kinds) ? inlineSetup.connection_kinds : []),
       ...(Array.isArray(turn.connection_kinds) ? turn.connection_kinds : []),
+      inferBackendKind(inlineSetup),
+      inferBackendKind(turn),
     ];
     const requiredConnectors = [
       ...(Array.isArray(inlineSetup.required_connectors) ? inlineSetup.required_connectors : []),
@@ -1090,11 +1125,12 @@ export default function PlanModeChat({
       ...extractConnectorIdsFromText(reply),
     ];
     const uniqueConnectors = [...new Set(requiredConnectors.filter(Boolean))];
-    const uniqueKinds = [...new Set(connectionKinds.filter(kind => ['db', 'api', 'mcp'].includes(kind)))];
+    const uniqueKinds = [...new Set(connectionKinds.map(kind => String(kind || '').toLowerCase().trim()).filter(kind => ['db', 'database', 'api', 'mcp', 'acp'].includes(kind)))];
     const setupRequest = {
       cardType: inlineSetup.card_type || inlineSetup.cardType || turn.card_type || turn.cardType || '',
       bindingTarget: inlineSetup.binding_target || inlineSetup.bindingTarget || turn.binding_target || turn.bindingTarget || '',
       connectorType: inlineSetup.connector_type || inlineSetup.connectorType || turn.connector_type || turn.connectorType || '',
+      backendKind: inlineSetup.backend_kind || inlineSetup.backendKind || turn.backend_kind || turn.backendKind || inferBackendKind(inlineSetup) || inferBackendKind(turn),
       requiredFields: inlineSetup.required_fields || inlineSetup.requiredFields || turn.required_fields || turn.requiredFields || [],
       resumeToken: inlineSetup.resume_token || inlineSetup.resumeToken || turn.resume_token || turn.resumeToken || '',
       requiredConnectors: uniqueConnectors,
@@ -1115,6 +1151,7 @@ export default function PlanModeChat({
             || lower.includes('database card')
             || lower.includes('connect your db')
             || lower.includes('database using the inline connection card')
+            || lower.includes('acp')
           );
 
     if (!pendingInlineSetup) {
@@ -1541,6 +1578,12 @@ export default function PlanModeChat({
                     <CustomConnectionCard
                       kind="api"
                       onConnected={({ name }) => resumeWithInlineSetup(name, name)}
+                    />
+                  )}
+                  {inlineConnectionKinds.includes('acp') && (
+                    <ACPConnectionCard
+                      onConnected={({ name }) => resumeWithInlineSetup(name, name)}
+                      onOpenSettings={onNavigateSettings}
                     />
                   )}
                   {inlineConnectorIds.length > 0 && (

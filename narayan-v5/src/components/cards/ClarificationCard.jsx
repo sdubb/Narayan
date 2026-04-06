@@ -16,6 +16,7 @@ function normalizeQuestion(question, index) {
       secret: false,
       connectorType: '',
       actionLabel: '',
+      backendKind: '',
       questionType: 'text',
       multiSelect: false,
     };
@@ -24,6 +25,13 @@ function normalizeQuestion(question, index) {
     ? question.options.map(o => typeof o === 'string' ? o : o?.label).filter(Boolean)
     : [];
   const questionType = String(question?.question_type || question?.type || '').trim().toLowerCase();
+  const inferredBackendKind = String(question?.backend_kind || question?.backendKind || question?.id || '')
+    .toLowerCase()
+    .includes('database') ? 'database'
+    : String(question?.backend_kind || question?.backendKind || question?.id || '').toLowerCase().includes('api') ? 'api'
+    : String(question?.backend_kind || question?.backendKind || question?.id || '').toLowerCase().includes('mcp') ? 'mcp'
+    : String(question?.backend_kind || question?.backendKind || question?.id || '').toLowerCase().includes('acp') ? 'acp'
+    : String(question?.backend_kind || question?.backendKind || '').toLowerCase();
   const derivedType = questionType.includes('card_open')
     ? 'card_open'
     : questionType.includes('multi_select') || question?.multi_select || question?.multiSelect
@@ -46,6 +54,7 @@ function normalizeQuestion(question, index) {
     connectorType: question?.connector_type || question?.connectorType || '',
     actionLabel: question?.action_label || question?.actionLabel || '',
     cardType: question?.card_type || question?.cardType || '',
+    backendKind: inferredBackendKind,
     requiredFields: Array.isArray(question?.required_fields)
       ? question.required_fields
       : Array.isArray(question?.requiredFields)
@@ -69,6 +78,7 @@ export default function ClarificationCard({ agentId, questions, onDone, onNaviga
   function openSetup(q) {
     onNavigateSettings?.({
       cardType: q.cardType,
+      backendKind: q.backendKind,
       bindingTarget: q.bindingTarget,
       requiredFields: q.requiredFields,
       resumeToken: q.resumeToken,
@@ -154,6 +164,7 @@ export default function ClarificationCard({ agentId, questions, onDone, onNaviga
               {q.secret && <span className="badge bg-warn-soft text-warn border border-warn/20"><Lock size={9} /> secret</span>}
               {q.connectorType && <span className="badge bg-info-soft text-info border border-info/20"><Plug size={9} /> {q.connectorType}</span>}
               {q.cardType && <span className="badge bg-accent-soft text-accent border border-accent/20">{q.cardType.replace(/_/g, ' ')}</span>}
+              {q.backendKind && <span className="badge bg-accent-soft text-accent border border-accent/20">{q.backendKind.toUpperCase()}</span>}
               {q.questionType && <span className="badge bg-bg-card text-tx-3 border border-border">{q.questionType.replace(/_/g, ' ')}</span>}
             </div>
             {q.helperText && <p className="text-xs text-tx-3">{q.helperText}</p>}
@@ -162,9 +173,9 @@ export default function ClarificationCard({ agentId, questions, onDone, onNaviga
               {q.requiredFields.length > 0 && <span>Required: {q.requiredFields.join(', ')}</span>}
               {q.resumeToken && <span className="font-mono">Resume: {q.resumeToken}</span>}
             </div>
-            {q.questionType === 'card_open' && (q.connectorType || q.cardType || q.bindingTarget) && onNavigateSettings && (
+            {q.questionType === 'card_open' && (q.connectorType || q.cardType || q.bindingTarget || q.backendKind) && onNavigateSettings && (
               <button onClick={() => openSetup(q)} className="inline-flex items-center gap-1.5 text-xs font-medium text-accent hover:text-accent-text transition-colors">
-                {q.actionLabel || `Open ${q.cardType ? q.cardType.replace(/_/g, ' ') : q.connectorType} setup`} <ArrowRight size={10} />
+                {q.actionLabel || `Open ${q.cardType ? q.cardType.replace(/_/g, ' ') : (q.backendKind || q.connectorType)} setup`} <ArrowRight size={10} />
               </button>
             )}
             {q.questionType !== 'card_open' && (
@@ -195,7 +206,7 @@ export default function ClarificationCard({ agentId, questions, onDone, onNaviga
                 ))}
               </div>
             )}
-            {q.questionType === 'card_open' && !(q.connectorType || q.cardType || q.bindingTarget) && (
+            {q.questionType === 'card_open' && !(q.connectorType || q.cardType || q.bindingTarget || q.backendKind) && (
               <p className="text-xs text-tx-4">Open the matching setup card in settings, then come back here to continue.</p>
             )}
           </div>

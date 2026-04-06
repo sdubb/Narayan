@@ -51,7 +51,6 @@ pub use plan_mode::steps::{
 #[allow(unused_imports)]
 pub use plan_mode::registry::{build_registry_candidate_context, build_registry_candidate_set};
 #[allow(unused_imports)]
-#[allow(unused_imports)]
 pub use preflight::LlmPreflight;
 #[allow(unused_imports)]
 pub use r#loop::AgentLoop;

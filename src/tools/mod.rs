@@ -2665,6 +2665,213 @@ pub fn tool_spec_from_tool(tool: &dyn Tool) -> crate::providers::ToolSpec {
     }
 }
 
+pub fn planning_tool_spec(name: &str) -> Option<crate::providers::ToolSpec> {
+    match name {
+        "search_connector_registry" => Some(crate::providers::ToolSpec {
+            name: "search_connector_registry".into(),
+            description: "Search installed and available connectors by keyword, name, or category, and return compact connector candidates for plan mode.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "required": ["query"],
+                "properties": {
+                    "query": { "type": "string", "description": "Short search phrase, e.g. notion, salesforce, slack, crm, project management." },
+                    "category": { "type": ["string", "null"], "description": "Optional exact connector category such as crm, communication, project_management, finance, itsm, hr, legal, data, devtools." },
+                    "limit": { "type": ["integer", "null"], "description": "Maximum number of results to return." }
+                },
+                "additionalProperties": true
+            }),
+            output_schema: Some(serde_json::json!({
+                "type": "object",
+                "required": ["query", "count", "connectors", "tip"],
+                "properties": {
+                    "query": { "type": "string" },
+                    "count": { "type": "integer" },
+                    "connectors": { "type": "array", "items": { "type": "object" } },
+                    "tip": { "type": "string" }
+                },
+                "additionalProperties": true
+            })),
+        }),
+        "search_acp_peers" => Some(crate::providers::ToolSpec {
+            name: "search_acp_peers".into(),
+            description: "Search configured ACP peers or agent-to-agent endpoints by peer name, target agent, or capability keyword.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "required": ["query"],
+                "properties": {
+                    "query": { "type": "string", "description": "Short search phrase, e.g. billing agent, reviewer peer, slack bridge." },
+                    "limit": { "type": ["integer", "null"], "description": "Maximum number of peers to return." }
+                },
+                "additionalProperties": true
+            }),
+            output_schema: Some(serde_json::json!({
+                "type": "object",
+                "required": ["query", "count", "peers", "tip"],
+                "properties": {
+                    "query": { "type": "string" },
+                    "count": { "type": "integer" },
+                    "peers": { "type": "array", "items": { "type": "object" } },
+                    "tip": { "type": "string" }
+                },
+                "additionalProperties": true
+            })),
+        }),
+        _ => None,
+    }
+}
+
+/// Execute a planning-time search tool against the live registry or the
+/// registered tool implementation.
+///
+/// This is used by plan mode so the LLM can ask for narrow searches instead of
+/// receiving a giant pre-rendered registry dump.
+pub async fn run_planning_search_tool(
+    registry: &ToolRegistry,
+    tool_name: &str,
+    arguments: &serde_json::Value,
+) -> Result<ToolResult> {
+    match tool_name {
+        "search_connector_registry" => {
+            let query = arguments["query"].as_str().unwrap_or_default().trim().to_lowercase();
+            let category = arguments["category"].as_str().map(|value| value.trim().to_lowercase());
+            let limit = arguments["limit"].as_u64().unwrap_or(8) as usize;
+            let mut connectors = Vec::new();
+
+            for connector in connector_tool::ALL_CONNECTORS {
+                let category_name = connector.category.strip_prefix("connector/").unwrap_or(connector.category);
+                if let Some(ref category_filter) = category {
+                    if !category_name.eq_ignore_ascii_case(category_filter) {
+                        continue;
+                    }
+                }
+                let haystack = format!(
+                    "{} {} {} {}",
+                    connector.name,
+                    connector.summary,
+                    connector.description,
+                    connector.keywords.join(" ")
+                )
+                .to_lowercase();
+                if query.is_empty() || haystack.contains(&query) {
+                    connectors.push(serde_json::json!({
+                        "name": connector.name,
+                        "category": category_name,
+                        "summary": connector.summary,
+                        "operations": connector.operations,
+                        "keywords": connector.keywords,
+                        "mcp_url": connector.mcp_url,
+                    }));
+                }
+                if connectors.len() >= limit {
+                    break;
+                }
+            }
+
+            Ok(ToolResult::ok(serde_json::json!({
+                "query": query,
+                "count": connectors.len(),
+                "connectors": connectors,
+                "tip": "Pick one connector name, then continue with the exact connector operation.",
+            })))
+        }
+        "search_acp_peers" => {
+            let query = arguments["query"].as_str().unwrap_or_default().trim().to_lowercase();
+            let limit = arguments["limit"].as_u64().unwrap_or(8) as usize;
+            let mut peers = Vec::new();
+
+            crate::tools::memory_store_internal::with_store(|store| {
+                for entry in store.iter() {
+                    if !entry.key().starts_with("acp_peer:") {
+                        continue;
+                    }
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(entry.value()) {
+                        let name = val["name"].as_str().unwrap_or_default();
+                        let target = val["target_agent"].as_str().unwrap_or_default();
+                        let summary = val["summary"].as_str().unwrap_or_default();
+                        let action = val["action"].as_str().unwrap_or_default();
+                        let haystack = format!("{} {} {} {}", name, target, summary, action).to_lowercase();
+                        if query.is_empty() || haystack.contains(&query) {
+                            peers.push(serde_json::json!({
+                                "name": name,
+                                "target_agent": target,
+                                "summary": summary,
+                                "action": action,
+                                "binding_target": val["binding_target"].clone(),
+                                "resume_token": val["resume_token"].clone(),
+                            }));
+                        }
+                    }
+                    if peers.len() >= limit {
+                        break;
+                    }
+                }
+            });
+
+            Ok(ToolResult::ok(serde_json::json!({
+                "query": query,
+                "count": peers.len(),
+                "peers": peers,
+                "tip": "Pick one ACP peer, then continue with the exact peer action and binding target.",
+            })))
+        }
+        "list_connectors_in_category" => {
+            let category = arguments["category"].as_str().unwrap_or("all");
+            let connectors = if category.eq_ignore_ascii_case("all") {
+                registry
+                    .by_category()
+                    .into_iter()
+                    .flat_map(|(category_name, names)| {
+                        names.into_iter().filter_map(move |name| {
+                            registry.get(name).map(|tool| {
+                                serde_json::json!({
+                                    "name": tool.name(),
+                                    "category": category_name,
+                                    "summary": tool.description(),
+                                })
+                            })
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                registry
+                    .by_category()
+                    .into_iter()
+                    .filter(|(category_name, _)| category_name.eq_ignore_ascii_case(category))
+                    .flat_map(|(category_name, names)| {
+                        names.into_iter().filter_map(move |name| {
+                            registry.get(name).map(|tool| {
+                                serde_json::json!({
+                                    "name": tool.name(),
+                                    "category": category_name,
+                                    "summary": tool.description(),
+                                })
+                            })
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            };
+
+            Ok(ToolResult::ok(serde_json::json!({
+                "category": category,
+                "connectors": connectors,
+                "instruction": "Choose one connector name, then continue with the exact tool or connector operation.",
+            })))
+        }
+        "ask_user" | "search_mcp_registry" => {
+            let tool = registry
+                .get(tool_name)
+                .ok_or_else(|| anyhow::anyhow!("planning tool '{}' is not registered", tool_name))?;
+            tool.execute(arguments.clone()).await
+        }
+        other => {
+            let tool = registry
+                .get(other)
+                .ok_or_else(|| anyhow::anyhow!("planning tool '{}' is not registered", other))?;
+            tool.execute(arguments.clone()).await
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -17,7 +17,6 @@ use crate::{
     },
     agent::plan_mode::steps::{
         generate_steps, parse_and_apply, ClarificationStep, StepField,
-        default_completion_criteria,
     },
     boundry::{AskUserBoundaryHandshake, TypedSchema},
     connectors::ConnectorInstallStore,
@@ -187,14 +186,9 @@ pub(super) fn build_clarification_refinement_context(session: &PlanModeSession) 
 ///
 /// Returns the assistant reply text for this turn.
 pub(super) async fn handle_clarifications(
-    engine: &ClarificationEngine,
+    _engine: &ClarificationEngine,
     session: &mut PlanModeSession,
     answer: &str,
-    // Callbacks the orchestrator injects because they touch state it owns.
-    refine_after: impl AsyncFnOnce(&mut PlanModeSession) -> Result<Option<String>>,
-    domain_skill: impl AsyncFnOnce(&str) -> Option<String>,
-    ensure_memo: impl AsyncFnOnce(&mut PlanModeSession) -> Result<()>,
-    build_review: impl AsyncFnOnce(&PlanModeSession) -> String,
 ) -> Result<String> {
     // Pop the front step — that is the one we are answering now.
     let current_step: Option<ClarificationStep> = if !session.pending_steps.is_empty() {
@@ -249,58 +243,14 @@ pub(super) async fn handle_clarifications(
             }
         }
 
-        // No more steps — check if post-clarification refinement produces
-        // a new connector question that sends us back to ResolvingConnectors.
-        if let Some(question) = refine_after(session).await? {
-            session.phase = PlanModePhase::ResolvingConnectors;
-            return Ok(format!("OK {}\n\n{}", summary, question));
-        }
-
-        // Inject domain skill execution brief then go to constraints.
-        let category = session
-            .intent_cache
-            .as_ref()
-            .and_then(|i| i["category"].as_str())
-            .unwrap_or("general")
-            .to_string();
-
-        if let Some(skill_text) = domain_skill(&category).await {
-            let brief: String = skill_text
-                .lines()
-                .skip_while(|l| !l.starts_with("EXECUTION BRIEF"))
-                .collect::<Vec<_>>()
-                .join("\n");
-            if !brief.is_empty() {
-                if let Some(role) = session.draft_role.as_mut() {
-                    let parsed =
-                        crate::agent::definition::ExecutionGuidelines::from_skill_text(&brief);
-                    role.execution_guidelines.extend_dedup(parsed);
-                }
-            }
-            // Auto-generate default completion criteria if none yet.
-            if let Some(role) = session.draft_role.as_mut() {
-                if role.execution_guidelines.completion_criteria.is_empty() {
-                    let defaults = default_completion_criteria(role);
-                    for c in defaults {
-                        role.execution_guidelines.add_completion(c);
-                    }
-                }
-            }
-        }
-
-        ensure_memo(session).await?;
+        // No more steps — transition back to the orchestrator for review.
         session.phase = PlanModePhase::Reviewing;
-        return Ok(format!(
-            "\u{2713} {}\n\n{}",
-            summary,
-            build_review(session).await
-        ));
+        return Ok(format!("✓ {}\n\nContinue with the review.", summary));
     }
 
     // pending_steps was already empty — go straight to review.
-    ensure_memo(session).await?;
     session.phase = PlanModePhase::Reviewing;
-    Ok(build_review(session).await)
+    Ok("Continue with the review.".into())
 }
 
 // ── handle_connector_clarification ──────────────────────────────────────────
@@ -445,7 +395,8 @@ pub(super) async fn handle_connector_clarification(
                     {
                         intent.remove("_pending_connector_resolution");
                     }
-                    pending_connector_resolution = false;
+                    session.phase = PlanModePhase::ResolvingConnectors;
+                    return Ok("Connector matched. Continue with the next clarification step.".into());
 
                 // ── Tenant database match ──────────────────────────────
                 } else if let Some(db_name) = matched_db_name {
@@ -574,11 +525,7 @@ pub(super) async fn handle_connector_clarification(
                         intent.remove("_pending_connector_resolution");
                     }
                     session.phase = PlanModePhase::ResolvingConnectors;
-                    return Ok(
-                        "Please add the database using the inline connection card, \
-                         then reply with the saved database name so I can continue."
-                            .into(),
-                    );
+                    return Ok("Connector matched. Continue with the next clarification step.".into());
                 } else if needs_acp_connection {
                     if let Some(intent) = session
                         .intent_cache
@@ -588,11 +535,7 @@ pub(super) async fn handle_connector_clarification(
                         intent.remove("_pending_connector_resolution");
                     }
                     session.phase = PlanModePhase::ResolvingConnectors;
-                    return Ok(
-                        "Please add the ACP peer using the inline connection card, \
-                         then reply with the saved peer name so I can continue."
-                            .into(),
-                    );
+                    return Ok("Connector matched. Continue with the next clarification step.".into());
                 } else if local_document_workflow {
                     if let Some(intent) = session
                         .intent_cache
@@ -604,11 +547,7 @@ pub(super) async fn handle_connector_clarification(
                     pending_connector_resolution = false;
                 } else {
                     session.phase = PlanModePhase::ResolvingConnectors;
-                    return Ok(
-                        "Please reply with the exact connector name to use \
-                         (for example: salesforce, hubspot, zendesk)."
-                            .into(),
-                    );
+                    return Ok("Please name the exact connector to use, or continue with the relevant setup card.".into());
                 }
             }
         }
@@ -618,13 +557,28 @@ pub(super) async fn handle_connector_clarification(
     if !pending_custom_tool_categories.is_empty() || pending_connector_resolution {
         session.phase = PlanModePhase::ResolvingConnectors;
         if needs_db_connection {
-            return Ok(
-                "Please add the database using the inline connection card, \
-                 then reply with the saved database name so I can continue."
-                    .into(),
-            );
+            return Ok("The draft still needs database setup. Continue with the database card.".into());
         }
-        return Ok("Please confirm the pending connector/custom-tool setup first.".into());
+        if session
+            .intent_cache
+            .as_ref()
+            .map(|intent| crate::agent::plan_mode::intent::intent_needs_api_connection(intent))
+            .unwrap_or(false)
+        {
+            return Ok("The draft still needs API setup. Continue with the API card.".into());
+        }
+        if session
+            .intent_cache
+            .as_ref()
+            .map(|intent| crate::agent::plan_mode::intent::intent_needs_mcp_connection(intent))
+            .unwrap_or(false)
+        {
+            return Ok("The draft still needs MCP setup. Continue with the MCP card.".into());
+        }
+        if needs_acp_connection {
+            return Ok("The draft still needs ACP setup. Continue with the ACP card.".into());
+        }
+        return Ok("Please confirm the pending connector or custom-tool setup first.".into());
     }
 
     // Regenerate the step queue now that the connector is confirmed.
@@ -644,8 +598,6 @@ pub(super) async fn handle_connector_clarification(
 pub(super) async fn handle_constraints(
     session: &mut PlanModeSession,
     answer: &str,
-    ensure_memo: impl AsyncFnOnce(&mut PlanModeSession) -> Result<()>,
-    build_review: impl AsyncFnOnce(&PlanModeSession) -> String,
 ) -> Result<String> {
     let lower = answer.to_lowercase();
     let is_empty = lower.contains("no constraint")
@@ -677,9 +629,8 @@ pub(super) async fn handle_constraints(
         session.draft_agent.constraints.extend(constraint_items);
     }
 
-    ensure_memo(session).await?;
     session.phase = PlanModePhase::Reviewing;
-    Ok(build_review(session).await)
+    Ok("Continue with the review.".into())
 }
 
 // ── boundary_handshake_question ─────────────────────────────────────────────
@@ -719,7 +670,7 @@ pub fn boundary_handshake_question(
 /// before the workflow is compiled.
 pub(super) fn generate_boundary_handshake_steps(
     intent: &serde_json::Value,
-    session: &PlanModeSession,
+    _session: &PlanModeSession,
 ) -> Vec<ClarificationStep> {
     let mut steps = Vec::new();
 
@@ -789,7 +740,7 @@ pub(super) fn generate_boundary_handshake_steps(
         let clarification = ClarificationStep::new(
             format!("boundary_{}", step_id),
             prompt,
-            StepField::Constraint, // boundary details stored as structured constraints
+            StepField::AgentConstraint, // boundary details stored as structured constraints
         )
         .with_question_type("boundary_handshake");
 
@@ -810,7 +761,7 @@ pub(super) fn generate_boundary_handshake_steps(
         };
 
         steps.push(
-            ClarificationStep::new("boundary_general", prompt, StepField::Constraint)
+            ClarificationStep::new("boundary_general", prompt, StepField::AgentConstraint)
                 .with_question_type("boundary_handshake"),
         );
     }
@@ -958,7 +909,7 @@ pub(super) fn generate_subsystem_steps(
         let mut step = ClarificationStep::new(
             format!("subsystem_{}", subsystem),
             question,
-            StepField::Constraint,
+            StepField::AgentConstraint,
         )
         .with_question_type("subsystem_config");
 

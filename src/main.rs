@@ -68,11 +68,11 @@ const DEFAULT_BROWSER_POOL_SIZE: usize = 4;
 const KNOWN_PROVIDERS: [&str; 12] = [
     "anthropic",
     "openai",
+    "openrouter",
     "groq",
     "gemini",
     "nvidia",
     "ollama",
-    "openrouter",
     "copilot",
     "glm",
     "novita",
@@ -459,7 +459,7 @@ async fn main() -> Result<()> {
             reflector,
             preflight,
             clarifier,
-            tool_registry,
+            tool_registry.clone(),
             event_bus.clone(),
             skill_registry.clone(),
             knowledge_graph.clone(),
@@ -572,6 +572,7 @@ async fn main() -> Result<()> {
         event_bus_handle: event_bus.clone(),
         billing,
         connector_installs,
+        tool_registry: tool_registry.clone(),
     };
 
     tokio::spawn(Metrics::run_window_reset(metrics.clone()));
