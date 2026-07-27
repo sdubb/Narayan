@@ -5,20 +5,60 @@ Narayan is a B2B autonomous agent platform for running AI workers on top of your
 It is designed to do two things well:
 
 1. Help a user configure an agent conversationally in plan mode.
-2. Run that agent deterministically and safely in production � monitoring, detecting, and acting on your data.
+2. Run that agent deterministically and safely in production — monitoring, detecting, and acting on your data.
+
+> This repository is an earlier iteration (v5) of the underlying idea; active
+> day-to-day development has since continued in a private successor repo.
+> It's kept public here as a real, working reference point — not a mockup.
 
 ## What Narayan Does
 
 **Don't replace your backend. Make it smarter.**
 
-- **Bring Your Own Backend** � Connect any API, database, or REST endpoint. Agents fetch data and trigger actions on your systems.
-- **Webhook Ingestion** � Real-time events from Zendesk, Salesforce, GitHub, ServiceNow, and 17+ more platforms trigger agents instantly.
-- **Monitoring Agents** � Detect anomalies, flag exceptions, and track SLA deadlines on your data.
-- **Action Agents** � Fetch context, make decisions, and call your APIs to update records or notify teams.
-- **Bring-Your-Own Databases** � Query PostgreSQL, execute SQL directly, or use external databases as agent memory.
-- **MCP Server Support** � Use Model Context Protocol servers for extensible tool integrations into any system.
+- **Bring Your Own Backend** — Connect any API, database, or REST endpoint. Agents fetch data and trigger actions on your systems.
+- **Webhook Ingestion** — Real-time events from Zendesk, Salesforce, GitHub, ServiceNow, and 17+ more platforms trigger agents instantly.
+- **Monitoring Agents** — Detect anomalies, flag exceptions, and track SLA deadlines on your data.
+- **Action Agents** — Fetch context, make decisions, and call your APIs to update records or notify teams.
+- **Bring-Your-Own Databases** — Query PostgreSQL, execute SQL directly, or use external databases as agent memory.
+- **MCP Server Support** — Use Model Context Protocol servers for extensible tool integrations into any system.
 
 For the full system design, see [ARCHITECTURE.md](ARCHITECTURE.md).
+
+## How this approaches AI safety
+
+The design bet here is that an autonomous agent acting on real business systems
+is only trustworthy if its ability to act is bounded and inspectable, not
+just prompted to "be careful." That shows up as actual code, not just
+intent:
+
+- **`src/boundry`** — the approval/governance boundary an agent's actions
+  pass through: `approval.rs` gates consequential actions behind human or
+  policy sign-off, `data_barrier.rs` constrains what data an agent can reach,
+  `validator.rs` and `broker.rs` check a requested action against policy
+  before it executes, and `governance.rs`/`audit.rs` record the decision.
+- **`src/policy`** — a rules engine (`engine.rs`, `rules.rs`) that decides
+  what an agent is and isn't allowed to do, independent of what the agent's
+  prompt says it should do.
+- **`src/compliance`** — `pii.rs` (sensitive-data handling), `evidence.rs`
+  and `citations.rs` (grounding actions/claims in retrievable evidence
+  rather than an agent's unverified say-so), `reviewer.rs` (human review
+  hooks), and `sla.rs`.
+- **`src/audit`** — an append-only log (`log.rs`) plus a bridge for
+  exporting it, so an agent's action history is reconstructable after the
+  fact, not just self-reported in a chat transcript.
+- **Deterministic planning, not improvisation** — the runtime executes the
+  `workflow_outline` a user reviewed and approved during plan mode; the
+  planner doesn't invent new steps for a configured role at execution time,
+  which keeps what an agent *can* do in production traceable back to what a
+  human actually signed off on.
+
+The throughline: as agents take on more autonomous, multi-step action on
+real systems (CRMs, databases, ticketing, billing), the risk isn't that the
+model is unaligned in the abstract — it's that nothing structurally stops it
+from taking an unreviewed, unverified, or out-of-scope action. Narayan's
+boundary/policy/audit layers are an attempt to make "what can this agent
+actually do, and how do we know what it did" answerable by inspecting code
+and logs, not by trusting the agent's own report.
 
 ## High-Level Architecture
 
@@ -284,6 +324,22 @@ cp .env.example .env
 cargo build --release
 ./target/release/narayan
 ```
+
+## Real numbers (this repo, as committed)
+
+- ~91k lines of Rust backend (`src/`), ~16k lines of frontend (`narayan-v5/src`).
+- 329 `#[test]` occurrences in the Rust source.
+- 35 commits (2026-03-20 through 2026-04-06).
+
+Not a mockup or a slide deck — a working codebase with the boundary/policy/
+audit/compliance layers described above actually implemented, not just
+described.
+
+## License
+
+All rights reserved — see [LICENSE](LICENSE). Public for evaluation and
+reference; no license is granted to use, copy, or redistribute without
+permission.
 
 ## Key Docs
 
